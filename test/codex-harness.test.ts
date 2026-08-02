@@ -1214,7 +1214,8 @@ test("cancelling an OAuth startup after spawn closes the provider", async (t) =>
   assert.equal(existsSync(join(dir, "starts")), true);
   cancel.abort();
   assert.deepEqual(await turn, { reply: "", stopped: true });
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  for (let attempt = 0; attempt < 100 && !existsSync(join(dir, "closed")); attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(readFileSync(join(dir, "closed"), "utf8"), "closed");
 });
 
@@ -1585,6 +1586,40 @@ test("Codex records one llm row per turn carrying real timings and usage, even w
   await assert.rejects(runWith(failingProviderCodexBinary(dir, "turnFailed"), "telemetry-fail"));
   assert.equal(records.length, 2);
   assert.ok(typeof records[1]!.durationMs === "number");
+});
+
+test("Codex waits for the bounded durable llm record before completing a turn", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-telemetry-order-test-"));
+  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
+  const harness = createCodexHarness({
+    binaryPath: fakeCodexBinary(dir),
+    env: testHarnessEnv(dir),
+    turnWallClockMs: 5_000,
+  });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  let recorded = false;
+  const startedAt = Date.now();
+  const result = await harness.turns.runTurn({
+    session: { id: "telemetry-order" } as Session,
+    input: "hi",
+    systemPrompt: "be concise",
+    history: [],
+    tools: {} as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    emit: async (entry) => ({ ...entry, sessionId: "telemetry-order", seq: 1, createdAt: Date.now() }) as SessionEntry,
+    recordModelCall: () => {},
+    recordLlmRequest: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      recorded = true;
+    },
+  });
+  assert.equal(result.reply, "hello");
+  assert.equal(recorded, true);
+  assert.ok(Date.now() - startedAt >= 45);
 });
 
 const realCodexBinary = (() => {

@@ -1411,7 +1411,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         if (activeState === state) active.delete(activeThreadId);
       }
       if (runtimeCleanupRequested) await closeIdleRuntime();
-      void recordRequest();
+      await recordRequest();
     }
     if (cleanupErrors.length) throw cleanupErrors[0];
     if (!turnResult) throw new Error("Codex turn did not produce a result");
