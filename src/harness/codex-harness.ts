@@ -527,6 +527,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       const stale = runtime;
       runtime = null;
       runtimeCleanupRequested = false;
+      let persistenceFailed = false;
       const staleError = stale.server.error() ?? new Error("Codex app-server exited during a turn");
       for (const [threadId, state] of active) {
         if (state.server !== stale.server) continue;
@@ -536,7 +537,12 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       const lock = activeAuthLock;
       if (lock) {
         if (lock.isHeld())
-          stale.persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth);
+          persistenceFailed = !stale.persistAuth(
+            activeExpectedRefreshToken,
+            activeExpectedAccessToken,
+            lock.path,
+            activeExpectedSourceAuth,
+          );
         if (activeAuthLock === lock) {
           activeAuthLock = undefined;
           activeExpectedRefreshToken = undefined;
@@ -547,6 +553,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       }
       await stale.server.close().catch(() => undefined);
       rmSync(stale.jail, { recursive: true, force: true });
+      if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed");
     }
     let startup = starting;
     if (startup?.abort.signal.aborted) {
@@ -682,6 +689,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           startingServer = server;
           if (startupAbort.signal.aborted) throw new Error("Codex app-server startup cancelled");
         } catch (error) {
+          let persistenceFailed = false;
           if (authLock) {
             try {
               syncCodexOAuthAuthFile(
@@ -693,12 +701,14 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
                 expectedSourceAuth,
               );
             } catch (persistenceError) {
+              persistenceFailed = true;
               swallow("codex: oauth auth persistence", persistenceError);
             }
           }
           await server?.close().catch(() => undefined);
           await authLock?.release();
           rmSync(jail, { recursive: true, force: true });
+          if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed", { cause: error });
           throw error;
         }
         const childAuthPath = join(jail, "codex-home", "auth.json");
@@ -748,10 +758,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           await authLock?.release();
           authLock = undefined;
         } catch (error) {
-          if (authLock) persistAuth(expectedRefreshToken, expectedAccessToken, authLock.path, expectedSourceAuth);
+          const persistenceFailed = authLock
+            ? !persistAuth(expectedRefreshToken, expectedAccessToken, authLock.path, expectedSourceAuth)
+            : false;
           await server.close().catch(() => undefined);
           await authLock?.release();
           rmSync(jail, { recursive: true, force: true });
+          if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed", { cause: error });
           throw error;
         } finally {
           if (startTimer) clearTimeout(startTimer);
@@ -1244,8 +1257,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           )
         : null;
     let timer: NodeJS.Timeout | undefined;
+    const turnStartAbort = new AbortController();
+    let turnStartTimedOut = false;
+    const cleanupErrors: unknown[] = [];
     try {
-      const turnStartAbort = new AbortController();
       const turnStartSignals = [closeAbort.signal, turnStartAbort.signal];
       if (turn.cancel) turnStartSignals.push(turn.cancel);
       const turnStartTimeoutMs = deadline ? Math.max(1, deadline - Date.now()) : CODEX_START_TIMEOUT_MS;
@@ -1259,6 +1274,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         ),
         new Promise<never>((_, reject) => {
           turnStartTimer = setTimeout(() => {
+            turnStartTimedOut = true;
+            runtimeCleanupRequested = true;
             turnStartAbort.abort();
             reject(new NonRetryableTurnError("Codex turn/start request timed out"));
           }, turnStartTimeoutMs);
@@ -1268,6 +1285,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           if (turnStartTimer) clearTimeout(turnStartTimer);
         })
         .catch((error: unknown) => {
+          if (turnStartTimedOut) {
+            const timeoutError = new NonRetryableTurnError("Codex turn/start request timed out");
+            timeoutError.cause = error;
+            throw timeoutError;
+          }
           throw error instanceof CodexRpcError ? codexProviderFailure(error.message) : error;
         });
       turnId = response.turn.id;
@@ -1314,11 +1336,25 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         modelCalls: state.modelCalls,
         ...(state.tapeWriteFailed ? { tapeWriteFailed: true } : {}),
       };
+    } catch (error) {
+      if (turn.cancel?.aborted) {
+        runtimeCleanupRequested = true;
+        return { reply: "", stopped: true };
+      }
+      throw error;
     } finally {
       if (timer) clearTimeout(timer);
-      await stopSignals?.();
+      try {
+        await stopSignals?.();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        await releaseTurnAuth();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
       await recordRequest();
-      await releaseTurnAuth();
       turn.cancel?.removeEventListener("abort", onCancel);
       for (const [taskId, status] of state.taskStatuses) {
         if (status === "pending" || status === "in_progress") {
@@ -1330,6 +1366,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       }
       if (runtimeCleanupRequested) await closeIdleRuntime();
     }
+    if (cleanupErrors.length) throw cleanupErrors[0];
   };
 
   const single = async (
