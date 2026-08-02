@@ -582,10 +582,7 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
     const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
     assert.equal(persisted.OPENAI_API_KEY, "ambient-api-key");
     assert.equal((persisted.tokens as Record<string, unknown>).access_token, "access-after");
-    assert.equal(
-      (persisted.tokens as Record<string, unknown>).id_token,
-      oauthIdToken("account-before", "rotated"),
-    );
+    assert.equal((persisted.tokens as Record<string, unknown>).id_token, oauthIdToken("account-before", "rotated"));
   } finally {
     await lock.release();
   }
