@@ -57,8 +57,8 @@ function oauthIdToken(accountId: string, marker = ""): string {
   return `header.${payload}.signature`;
 }
 
-function oauthAccessToken(accountId: string): string {
-  return oauthIdToken(accountId, "access");
+function oauthAccessToken(accountId: string, marker = "access"): string {
+  return oauthIdToken(accountId, marker);
 }
 
 test("Codex replay keeps paired tool ids within the provider's 64-character limit", () => {
@@ -238,6 +238,7 @@ process.on("SIGTERM", () => {
 
 function refreshThenNonresponsiveCodexBinary(dir: string): string {
   const path = join(dir, "refresh-then-nonresponsive-codex");
+  const accessToken = oauthAccessToken("startup-account", "startup-after");
   writeFileSync(
     path,
     `#!${process.execPath}
@@ -245,8 +246,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const authPath = path.join(process.env.CODEX_HOME, "auth.json");
 const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
-auth.tokens.access_token = "startup-access-after";
-auth.tokens.refresh_token = "startup-refresh-after";
+auth.tokens.access_token = ${JSON.stringify(accessToken)};
 fs.writeFileSync(authPath, JSON.stringify(auth));
 process.stdin.resume();
 `,
@@ -360,6 +360,7 @@ rl.on("line", line => {
 function oauthTurnBinary(dir: string, token: string, delayMs: number): string {
   const path = join(dir, `oauth-${token}`);
   const events = join(dir, "oauth-events");
+  const accessToken = oauthAccessToken("shared-account", token);
   writeFileSync(
     path,
     `#!${process.execPath}
@@ -376,7 +377,7 @@ rl.on("line", (line) => {
   if (msg.method === "thread/start") return send({ id: msg.id, result: { thread: { id: "thread-${token}" } } });
   if (msg.method === "turn/start") {
     const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
-    auth.tokens.access_token = ${JSON.stringify(token)};
+    auth.tokens.access_token = ${JSON.stringify(accessToken)};
     fs.writeFileSync(authPath, JSON.stringify(auth));
     fs.appendFileSync(${JSON.stringify(events)}, ${JSON.stringify(`${token}\n`)});
     send({ id: msg.id, result: { turn: { id: "turn-${token}", status: "inProgress", items: [] } } });
@@ -556,7 +557,7 @@ test("Codex materializes API-key auth into its isolated home, and never an ambie
   );
 });
 
-test("Codex materializes ChatGPT OAuth auth without an API-key override and persists refreshes", async (t) => {
+test("Codex materializes ChatGPT OAuth auth without an API-key override and persists bound access updates", async (t) => {
   const source = mkdtempSync(join(tmpdir(), "qm-codex-oauth-source-"));
   const jail = mkdtempSync(join(tmpdir(), "qm-codex-oauth-jail-"));
   t.after(() => {
@@ -570,7 +571,7 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
       auth_mode: "chatgpt",
       OPENAI_API_KEY: "ambient-api-key",
       tokens: {
-        access_token: "access-before",
+        access_token: oauthAccessToken("account-before", "before"),
         refresh_token: "refresh-before",
         account_id: "account-before",
         id_token: oauthIdToken("account-before"),
@@ -592,14 +593,17 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
   const childAuthFile = join(home, "auth.json");
   const childAuth = JSON.parse(readFileSync(childAuthFile, "utf8")) as Record<string, unknown>;
   assert.equal(childAuth.OPENAI_API_KEY, undefined);
-  assert.equal((childAuth.tokens as Record<string, unknown>).access_token, "access-before");
+  assert.equal(
+    (childAuth.tokens as Record<string, unknown>).access_token,
+    oauthAccessToken("account-before", "before"),
+  );
   assert.equal((childAuth.tokens as Record<string, unknown>).account_id, "account-before");
   writeFileSync(
     childAuthFile,
     JSON.stringify({
       ...childAuth,
       tokens: {
-        access_token: "access-after",
+        access_token: oauthAccessToken("account-before", "after"),
         refresh_token: "refresh-after",
         account_id: "account-before",
         id_token: oauthIdToken("account-before"),
@@ -611,7 +615,11 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
     syncCodexOAuthAuthFile(authFile, childAuthFile, lock.path);
     const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
     assert.equal(persisted.OPENAI_API_KEY, "ambient-api-key");
-    assert.equal((persisted.tokens as Record<string, unknown>).access_token, "access-after");
+    assert.equal(
+      (persisted.tokens as Record<string, unknown>).access_token,
+      oauthAccessToken("account-before", "after"),
+    );
+    assert.equal((persisted.tokens as Record<string, unknown>).refresh_token, "refresh-before");
     assert.equal((persisted.tokens as Record<string, unknown>).id_token, oauthIdToken("account-before"));
   } finally {
     await lock.release();
@@ -830,7 +838,7 @@ test("Codex does not persist OAuth refreshes without a trusted account claim", (
   );
 });
 
-test("Codex does not persist OAuth tokens for a different declared or access-token account", (t) => {
+test("Codex does not persist OAuth tokens for a different declared account", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-token-test-"));
   const source = join(dir, "source.json");
   const child = join(dir, "child.json");
@@ -840,7 +848,7 @@ test("Codex does not persist OAuth tokens for a different declared or access-tok
     JSON.stringify({
       auth_mode: "chatgpt",
       tokens: {
-        access_token: oauthAccessToken("same"),
+        access_token: "source-access",
         refresh_token: "source-refresh",
         account_id: "same",
         id_token: oauthIdToken("same"),
@@ -853,7 +861,7 @@ test("Codex does not persist OAuth tokens for a different declared or access-tok
     JSON.stringify({
       auth_mode: "chatgpt",
       tokens: {
-        access_token: oauthAccessToken("different"),
+        access_token: "source-access",
         refresh_token: "child-refresh",
         account_id: "different",
         id_token: oauthIdToken("same"),
@@ -866,6 +874,75 @@ test("Codex does not persist OAuth tokens for a different declared or access-tok
     (JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>).refresh_token,
     "source-refresh",
   );
+});
+
+test("Codex does not persist an access token for a different access-token account", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-access-test-"));
+  const source = join(dir, "source.json");
+  const child = join(dir, "child.json");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(
+    source,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: oauthAccessToken("same"),
+        refresh_token: "source-refresh",
+        id_token: oauthIdToken("same"),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    child,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: oauthAccessToken("different"),
+        refresh_token: "child-refresh",
+        id_token: oauthIdToken("same"),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  assert.equal(syncCodexOAuthAuthFile(source, child), true);
+  const persisted = JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>;
+  assert.equal(persisted.access_token, oauthAccessToken("same"));
+  assert.equal(persisted.refresh_token, "source-refresh");
+});
+
+test("Codex does not persist an opaque refresh-token replacement", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-refresh-token-test-"));
+  const source = join(dir, "source.json");
+  const child = join(dir, "child.json");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(
+    source,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: oauthAccessToken("same"),
+        refresh_token: "source-refresh",
+        id_token: oauthIdToken("same"),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    child,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: oauthAccessToken("same"),
+        refresh_token: "child-refresh",
+        id_token: oauthIdToken("same"),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  assert.equal(syncCodexOAuthAuthFile(source, child), true);
+  const persisted = JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>;
+  assert.equal(persisted.refresh_token, "source-refresh");
 });
 
 test("Codex diagnostics redact malformed app-server output at the protocol boundary", async (t) => {
@@ -1116,7 +1193,7 @@ test("Codex discards a nonresponsive startup so a later turn can retry", async (
   assert.equal(readFileSync(join(dir, "starts"), "utf8"), "start\nstart\n");
 });
 
-test("Codex persists an OAuth refresh before discarding a failed startup", async (t) => {
+test("Codex persists a bound OAuth access update before discarding a failed startup", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "qm-codex-startup-oauth-test-"));
   const authFile = join(dir, "auth.json");
   writeFileSync(
@@ -1158,7 +1235,10 @@ test("Codex persists an OAuth refresh before discarding a failed startup", async
     (error: unknown) => /timed out|exited|closed/i.test(error instanceof Error ? error.message : String(error)),
   );
   const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-  assert.equal((persisted.tokens as Record<string, unknown>).access_token, "startup-access-after");
+  assert.equal(
+    (persisted.tokens as Record<string, unknown>).access_token,
+    oauthAccessToken("startup-account", "startup-after"),
+  );
 });
 
 test("cancelling an OAuth startup lock wait prevents the provider from starting", async (t) => {
@@ -1350,7 +1430,7 @@ test("OAuth turns serialize shared auth ownership and cancel a waiting contender
   assert.equal((await firstTurn).reply, "first");
   assert.equal(readFileSync(join(dir, "oauth-events"), "utf8"), "first\n");
   const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-  assert.equal((persisted.tokens as Record<string, unknown>).access_token, "first");
+  assert.equal((persisted.tokens as Record<string, unknown>).access_token, oauthAccessToken("shared-account", "first"));
 });
 
 test("Codex fails closed when OAuth auth is removed after startup", async (t) => {

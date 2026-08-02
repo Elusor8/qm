@@ -341,15 +341,17 @@ export function syncCodexOAuthAuthFile(
         sourceAccountId !== childAccountId ||
         (sourceDeclaredAccountId && sourceDeclaredAccountId !== sourceAccountId) ||
         (childDeclaredAccountId && childDeclaredAccountId !== sourceAccountId) ||
-        (sourceAccessAccountId && sourceAccessAccountId !== sourceAccountId) ||
-        (childAccessAccountId && childAccessAccountId !== sourceAccountId) ||
-        (sourceAccessToken?.split(".").length === 3 && sourceAccessAccountId !== sourceAccountId) ||
-        (childAccessToken?.split(".").length === 3 && childAccessAccountId !== sourceAccountId)
+        (sourceAccessToken?.split(".").length === 3 && sourceAccessAccountId !== sourceAccountId)
       )
         return false;
       if (expectedSourceAuth && JSON.stringify(source) !== JSON.stringify(expectedSourceAuth)) return false;
       if (expectedRefreshToken && codexOAuthRefreshToken(source) !== expectedRefreshToken) return false;
       if (expectedAccessToken && codexOAuthAccessToken(source) !== expectedAccessToken) return false;
+      const sourceRefreshToken = codexOAuthRefreshToken(source);
+      const childRefreshToken = codexOAuthRefreshToken(child);
+      const childAccessTokenBound =
+        childAccessToken === sourceAccessToken ||
+        (childAccessToken?.split(".").length === 3 && childAccessAccountId === sourceAccountId);
       const sanitized = sanitizedCodexOAuthAuth(child);
       const next = {
         ...source,
@@ -359,6 +361,8 @@ export function syncCodexOAuthAuthFile(
               tokens: {
                 ...sourceTokens,
                 ...childTokens,
+                access_token: childAccessTokenBound ? childAccessToken : sourceAccessToken,
+                refresh_token: childRefreshToken === sourceRefreshToken ? childRefreshToken : sourceRefreshToken,
                 ...(typeof sourceTokens.account_id === "string" ? { account_id: sourceTokens.account_id } : {}),
               },
             }
