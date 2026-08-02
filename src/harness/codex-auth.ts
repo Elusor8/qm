@@ -200,7 +200,17 @@ export async function acquireCodexOAuthAuthLock(
     try {
       const handle = await openFile(path, "wx", 0o600);
       const owner = `${process.pid}:${randomBytes(8).toString("hex")}`;
-      await handle.writeFile(owner);
+      try {
+        await handle.writeFile(owner);
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        try {
+          unlinkSync(path);
+        } catch (cleanupError) {
+          swallow("codex: oauth lock creation cleanup", cleanupError);
+        }
+        throw error;
+      }
       let released = false;
       return {
         path,
@@ -252,7 +262,17 @@ function lockFile(sourcePath: string): SyncLock {
     try {
       const fd = openSync(path, "wx", 0o600);
       const owner = `${process.pid}:${randomBytes(8).toString("hex")}`;
-      writeSync(fd, owner);
+      try {
+        writeSync(fd, owner);
+      } catch (error) {
+        closeSync(fd);
+        try {
+          unlinkSync(path);
+        } catch (cleanupError) {
+          swallow("codex: oauth lock creation cleanup", cleanupError);
+        }
+        throw error;
+      }
       return { fd, owner };
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
@@ -289,7 +309,6 @@ export function syncCodexOAuthAuthFile(
       !childTokens ||
       typeof sourceTokens.id_token !== "string" ||
       typeof childTokens.id_token !== "string" ||
-      sourceTokens.id_token !== childTokens.id_token ||
       !sourceAccountId ||
       sourceAccountId !== childAccountId
     )

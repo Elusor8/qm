@@ -50,9 +50,9 @@ function testHarnessEnv(home: string): NodeJS.ProcessEnv {
   return { ...process.env, HOME: home, CODEX_HOME: join(home, "codex-home") };
 }
 
-function oauthIdToken(accountId: string): string {
+function oauthIdToken(accountId: string, marker = ""): string {
   const payload = Buffer.from(
-    JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
+    JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId }, marker }),
   ).toString("base64url");
   return `header.${payload}.signature`;
 }
@@ -572,7 +572,7 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
         access_token: "access-after",
         refresh_token: "refresh-after",
         account_id: "account-before",
-        id_token: oauthIdToken("account-before"),
+        id_token: oauthIdToken("account-before", "rotated"),
       },
     }),
   );
@@ -582,6 +582,10 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
     const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
     assert.equal(persisted.OPENAI_API_KEY, "ambient-api-key");
     assert.equal((persisted.tokens as Record<string, unknown>).access_token, "access-after");
+    assert.equal(
+      (persisted.tokens as Record<string, unknown>).id_token,
+      oauthIdToken("account-before", "rotated"),
+    );
   } finally {
     await lock.release();
   }
