@@ -876,33 +876,42 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         throw new NonRetryableTurnError("Codex OAuth auth.json is unavailable");
       }
       if (oauthConfigured && authPath && sourceAuth) {
-        const authLockPromise = acquireCodexOAuthAuthLock(
-          authPath,
-          AbortSignal.any([closeAbort.signal, authAcquireAbort.signal]),
-          Math.max(120_000, wallMs + 5_000),
-        );
-        try {
-          turnAuthLock = await awaitSetup(authLockPromise);
-        } catch (error) {
-          void authLockPromise.then(
-            (lock) => lock.release(),
-            () => undefined,
+        while (true) {
+          const authLockPromise = acquireCodexOAuthAuthLock(
+            authPath,
+            AbortSignal.any([closeAbort.signal, authAcquireAbort.signal]),
+            Math.max(120_000, wallMs + 5_000),
           );
-          throw error;
+          try {
+            turnAuthLock = await awaitSetup(authLockPromise);
+          } catch (error) {
+            void authLockPromise.then(
+              (lock) => lock.release(),
+              () => undefined,
+            );
+            throw error;
+          }
+          if (runtime !== rt || rt.server.process.exitCode !== null) {
+            await turnAuthLock.release();
+            turnAuthLock = undefined;
+            rt = await awaitSetup(ensureRuntime());
+            continue;
+          }
+          const currentAuth = readCodexOAuthAuthFile(authPath);
+          if (!currentAuth) {
+            rmSync(join(rt.jail, "codex-home", "auth.json"), { force: true });
+            throw new NonRetryableTurnError("Codex OAuth auth.json is unavailable");
+          }
+          expectedRefreshToken = codexOAuthRefreshToken(currentAuth);
+          expectedAccessToken = codexOAuthAccessToken(currentAuth);
+          expectedSourceAuth = currentAuth ?? undefined;
+          prepareCodexHome(sourceEnv, rt.jail);
+          activeAuthLock = turnAuthLock;
+          activeExpectedRefreshToken = expectedRefreshToken;
+          activeExpectedAccessToken = expectedAccessToken;
+          activeExpectedSourceAuth = expectedSourceAuth;
+          break;
         }
-        const currentAuth = readCodexOAuthAuthFile(authPath);
-        if (!currentAuth) {
-          rmSync(join(rt.jail, "codex-home", "auth.json"), { force: true });
-          throw new NonRetryableTurnError("Codex OAuth auth.json is unavailable");
-        }
-        expectedRefreshToken = codexOAuthRefreshToken(currentAuth);
-        expectedAccessToken = codexOAuthAccessToken(currentAuth);
-        expectedSourceAuth = currentAuth ?? undefined;
-        prepareCodexHome(sourceEnv, rt.jail);
-        activeAuthLock = turnAuthLock;
-        activeExpectedRefreshToken = expectedRefreshToken;
-        activeExpectedAccessToken = expectedAccessToken;
-        activeExpectedSourceAuth = expectedSourceAuth;
       }
     } catch (error) {
       await releaseTurnAuth();
@@ -980,7 +989,21 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     }
     let started: { thread: { id: string }; model?: string };
     try {
-      started = await awaitSetup(rt.server.request("thread/start", threadStartRequest, isCodexThreadStart));
+      const requestTimeoutMs = deadline ? Math.max(1, deadline - Date.now()) : CODEX_START_TIMEOUT_MS;
+      let requestTimer: NodeJS.Timeout | undefined;
+      started = await awaitSetup(
+        Promise.race([
+          rt.server.request("thread/start", threadStartRequest, isCodexThreadStart),
+          new Promise<never>((_, reject) => {
+            requestTimer = setTimeout(
+              () => reject(new NonRetryableTurnError("Codex thread/start request timed out")),
+              requestTimeoutMs,
+            );
+          }),
+        ]).finally(() => {
+          if (requestTimer) clearTimeout(requestTimer);
+        }),
+      );
     } catch (error) {
       await releaseTurnAuth();
       setupSettled = true;
