@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { envSha, formatAge, readEnvFile } from "../scripts/dev/lib/util.ts";
@@ -30,7 +30,7 @@ import {
 } from "../scripts/dev/lib/lease.ts";
 import { assembleEnv, completeDevSecuritySecrets } from "../scripts/dev/lib/envctx.ts";
 import { buildChildSpecs, type SpecInputs } from "../scripts/dev/supervisor/specs.ts";
-import { loadConfig, OPENCODE_RUNTIME_VERSION } from "../src/config.ts";
+import { loadConfig, OPENCODE_RUNTIME_VERSION, providerKeysPresent } from "../src/config.ts";
 import type { LeaseInfo } from "../scripts/dev/lib/types.ts";
 
 function tmpStore(): string {
@@ -214,9 +214,34 @@ test("env assembly precedence: caller > login shell > dev.env > worktree .env; h
   assert.equal(openCode.env.PI_CAPTURE_REQUESTS, undefined);
 
   await assert.rejects(
-    assembleEnv({ worktree, callerEnv: { HARNESS: "codex" }, allowMock: false, log, probeLoginShell: async () => "" }),
+    assembleEnv({
+      worktree,
+      callerEnv: { HARNESS: "codex", CODEX_HOME: join(worktree, "empty-codex") },
+      allowMock: false,
+      log,
+      probeLoginShell: async () => "",
+    }),
     /HARNESS=codex needs OPENAI_API_KEY/,
   );
+  const oauthAuthFile = join(worktree, "codex-auth.json");
+  writeFileSync(
+    oauthAuthFile,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { access_token: "access", refresh_token: "refresh", account_id: "account" },
+    }),
+  );
+  chmodSync(oauthAuthFile, 0o600);
+  const codexOAuth = await assembleEnv({
+    worktree,
+    callerEnv: { HARNESS: "codex", CODEX_AUTH_FILE: oauthAuthFile },
+    allowMock: false,
+    log,
+    probeLoginShell: async () => "",
+  });
+  assert.equal(codexOAuth.harness, "codex");
+  assert.equal(codexOAuth.env.CODEX_AUTH_FILE, oauthAuthFile);
+  assert.equal(codexOAuth.codexAuthSource, oauthAuthFile);
   const codex = await assembleEnv({
     worktree,
     callerEnv: { HARNESS: "codex", OPENAI_API_KEY: "sk-openai" },
@@ -315,6 +340,26 @@ test("OpenCode config is strict, pinned, and inherits the Pi model", () => {
     "claude-opus-4-8",
   );
   assert.equal(loadConfig({ HARNESS: "claude", CLAUDE_BIN: "/bin/claude" }).claudeBinPath, "/bin/claude");
+  const source = mkdtempSync(join(tmpdir(), "qm-codex-config-"));
+  const authFile = join(source, "auth.json");
+  writeFileSync(
+    authFile,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { access_token: "access", refresh_token: "refresh", account_id: "account" },
+    }),
+  );
+  chmodSync(authFile, 0o600);
+  const oauthConfig = loadConfig({ HARNESS: "codex", CODEX_AUTH_FILE: authFile });
+  assert.equal(oauthConfig.codexAuthFile, authFile);
+  assert.equal(providerKeysPresent(oauthConfig).openai, false);
+  assert.equal(providerKeysPresent(oauthConfig).codexOAuth, true);
+  assert.throws(
+    () =>
+      loadConfig({ HARNESS: "codex", CODEX_AUTH_FILE: join(source, "missing.json"), OPENAI_API_KEY: "placeholder" }),
+    /OPENAI_API_KEY/,
+  );
+  rmSync(source, { recursive: true, force: true });
   assert.throws(() => loadConfig({ HARNESS: "bogus" }), /use mock, pi, opencode, codex, or claude/);
   assert.throws(() => loadConfig({ HARNESS: "PI" }), /use mock, pi, opencode, codex, or claude/);
 });
@@ -349,7 +394,7 @@ test("supervised children share the selected dev org", () => {
   const inputs: SpecInputs = {
     worktree: "/tmp/worktree",
     ports: slotPorts("pool1"),
-    baseEnv: { DEV_INSTANCE_ORG_ID: "beta" },
+    baseEnv: { DEV_INSTANCE_ORG_ID: "beta", CODEX_AUTH_FILE: "/tmp/codex-auth.json" },
     watch: false,
     webUiBasePath: "/",
     slack: { botToken: "xoxb-test", appToken: "xapp-test" },
@@ -364,6 +409,8 @@ test("supervised children share the selected dev org", () => {
   };
   const specs = buildChildSpecs(inputs);
   assert.equal(specs.find((spec) => spec.name === "core")!.env.ORG_ID, "beta");
+  assert.equal(specs.find((spec) => spec.name === "core")!.env.CODEX_AUTH_FILE, "/tmp/codex-auth.json");
+  for (const spec of specs.filter((spec) => spec.name !== "core")) assert.equal(spec.env.CODEX_AUTH_FILE, "");
   for (const spec of specs) assert.equal(spec.env.CORE_ORG_ID, "beta");
   inputs.baseEnv = {};
   assert.equal(buildChildSpecs(inputs).find((spec) => spec.name === "core")!.env.ORG_ID, "acme");

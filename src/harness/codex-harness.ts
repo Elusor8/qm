@@ -13,7 +13,17 @@ import type { ScopeId, SessionEntry } from "../types.ts";
 import { swallow } from "../util/errors.ts";
 import { countTokens } from "../util/tokens.ts";
 import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
-import { CodexAppServer, CodexRpcError } from "./codex-app-server.ts";
+import { CodexAppServer, CodexRpcError, redactCodexDiagnostics } from "./codex-app-server.ts";
+import {
+  codexAuthFileForEnv,
+  acquireCodexOAuthAuthLock,
+  codexOAuthAccessToken,
+  codexOAuthRefreshToken,
+  readCodexOAuthAuthFile,
+  sanitizedCodexOAuthAuth,
+  syncCodexOAuthAuthFile,
+  type CodexOAuthAuthLock,
+} from "./codex-auth.ts";
 import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
 import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
@@ -78,7 +88,59 @@ type BridgedTool = {
 
 type CodexItem = Record<string, unknown> & { type: string };
 type CodexTurn = { id: string; status: string; error?: { message?: string } | null; items?: CodexItem[] };
+const CODEX_TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "interrupted", "cancelled", "canceled"]);
+
+function isCodexThreadStart(value: unknown): value is { thread: { id: string }; model?: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  const thread = response.thread;
+  return Boolean(
+    thread &&
+    typeof thread === "object" &&
+    !Array.isArray(thread) &&
+    typeof (thread as Record<string, unknown>).id === "string" &&
+    (!("model" in response) || typeof response.model === "string"),
+  );
+}
+
+function isCodexTurnStart(value: unknown): value is { turn: CodexTurn } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const turn = (value as Record<string, unknown>).turn;
+  if (!turn || typeof turn !== "object" || Array.isArray(turn)) return false;
+  const response = turn as Record<string, unknown>;
+  return typeof response.id === "string" && typeof response.status === "string";
+}
+
+function isCodexTurn(value: unknown): value is CodexTurn {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const turn = value as Record<string, unknown>;
+  if (typeof turn.id !== "string" || typeof turn.status !== "string") return false;
+  if (!CODEX_TERMINAL_TURN_STATUSES.has(turn.status)) return false;
+  if (
+    "items" in turn &&
+    (!Array.isArray(turn.items) ||
+      turn.items.some(
+        (item) =>
+          !item ||
+          typeof item !== "object" ||
+          Array.isArray(item) ||
+          typeof (item as Record<string, unknown>).type !== "string" ||
+          !(item as Record<string, unknown>).type,
+      ))
+  )
+    return false;
+  const error = turn.error;
+  return (
+    error === undefined ||
+    error === null ||
+    (typeof error === "object" &&
+      !Array.isArray(error) &&
+      (!("message" in error) || typeof (error as Record<string, unknown>).message === "string"))
+  );
+}
+
 type ActiveTurn = {
+  server: CodexAppServer;
   threadId: string;
   turn: HarnessTurnInput;
   tools: Map<string, BridgedTool>;
@@ -100,7 +162,21 @@ type ActiveTurn = {
   stopped: boolean;
 };
 
-type Runtime = { server: CodexAppServer; jail: string };
+type Runtime = {
+  server: CodexAppServer;
+  jail: string;
+  persistAuth(
+    expectedRefreshToken?: string,
+    expectedAccessToken?: string,
+    heldLockPath?: string,
+    expectedSourceAuth?: Record<string, unknown>,
+  ): void;
+};
+type StartingRuntime = {
+  promise: Promise<Runtime>;
+  abort: AbortController;
+  waiters: number;
+};
 const CODEX_START_TIMEOUT_MS = 30_000;
 
 const CODEX_NON_RETRYABLE_PATTERN =
@@ -111,7 +187,8 @@ export function codexNonRetryable(message: string): boolean {
 }
 
 export function codexProviderFailure(message: string): Error {
-  return codexNonRetryable(message) ? new NonRetryableTurnError(message) : new Error(message);
+  const safe = redactCodexDiagnostics(message);
+  return codexNonRetryable(safe) ? new NonRetryableTurnError(safe) : new Error(safe);
 }
 const CODEX_CHILD_TOOL_NAMES = new Set(["execute", "read", "write", "publish", "memory", "history", "background"]);
 
@@ -190,7 +267,11 @@ export function codexChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.P
     HOME: jail,
     CODEX_HOME: join(jail, "codex-home"),
   };
+  const authPath = codexAuthFileForEnv(source, true);
+  const oauthAuth = authPath ? readCodexOAuthAuthFile(authPath) : null;
   for (const name of CODEX_ENV_PASSTHROUGH) {
+    if (oauthAuth && (name === "OPENAI_API_KEY" || name === "OPENAI_BASE_URL" || name === "CODEX_ACCESS_TOKEN"))
+      continue;
     if (source[name] !== undefined) env[name] = source[name];
   }
   return env;
@@ -199,6 +280,12 @@ export function codexChildEnv(source: NodeJS.ProcessEnv, jail: string): NodeJS.P
 export function prepareCodexHome(source: NodeJS.ProcessEnv, jail: string): string {
   const target = join(jail, "codex-home");
   mkdirSync(target, { recursive: true });
+  const authPath = codexAuthFileForEnv(source, true);
+  const oauthAuth = authPath ? readCodexOAuthAuthFile(authPath) : null;
+  if (oauthAuth) {
+    writeFileSync(join(target, "auth.json"), JSON.stringify(sanitizedCodexOAuthAuth(oauthAuth)), { mode: 0o600 });
+    return target;
+  }
   if (source.OPENAI_API_KEY) {
     writeFileSync(
       join(target, "auth.json"),
@@ -356,9 +443,19 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       DEFAULT_CODEX_MODEL_ID,
     ].find((id): id is string => modelSupportedByHarness(id, "codex"))!;
   const defaultTurnWallClockMs = opts.turnWallClockMs ?? CONFIG_DEFAULTS.turnWallClockSec * 1000;
+  const sourceEnv = opts.env ?? {};
+  const authPath = codexAuthFileForEnv(sourceEnv, true);
+  const oauthConfigured = Boolean(authPath && readCodexOAuthAuthFile(authPath));
+  const closeAbort = new AbortController();
+  let activeAuthLock: CodexOAuthAuthLock | undefined;
+  let activeExpectedRefreshToken: string | undefined;
+  let activeExpectedAccessToken: string | undefined;
+  let activeExpectedSourceAuth: Record<string, unknown> | undefined;
   let runtime: Runtime | null = null;
-  let starting: Promise<Runtime> | null = null;
+  let starting: StartingRuntime | null = null;
   let startingServer: CodexAppServer | null = null;
+  let setupUsers = 0;
+  let runtimeCleanupRequested = false;
 
   const processCollabItem = async (state: ActiveTurn, item: CodexItem): Promise<void> => {
     if (item.type !== "collabAgentToolCall") return;
@@ -421,156 +518,292 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     }
   };
 
-  const ensureRuntime = async (): Promise<Runtime> => {
+  const ensureRuntime = async (registerCancel?: (release: () => void) => void): Promise<Runtime> => {
     if (runtime && runtime.server.process.exitCode === null) return runtime;
-    if (starting) return await starting;
-    starting = (async () => {
-      const jail = mkdtempSync(join(tmpdir(), "qm-codex-"));
-      const sourceEnv = opts.env ?? {};
-      prepareCodexHome(sourceEnv, jail);
-      const binaryPath = opts.binaryPath ?? resolve("node_modules/.bin/codex");
-      const server = new CodexAppServer({
-        binaryPath,
-        cwd: jail,
-        env: codexChildEnv(sourceEnv, jail),
-        onNotification: async (method, params) => {
-          const p = (params ?? {}) as Record<string, unknown>;
-          const threadId = typeof p.threadId === "string" ? p.threadId : "";
-          const state = active.get(threadId);
-          if (!state) return;
-          if (method === "thread/tokenUsage/updated") {
-            const totals = codexUsageTotals(p);
-            if (totals) state.usageByThread.set(threadId, totals);
-            const usage = codexTokenUsageUpdate(p, state.usageInputTotals.get(threadId));
-            if (!usage) return;
-            state.usageInputTotals.set(threadId, usage.totalInputTokens);
-            state.modelCalls++;
-            state.turn.recordModelCall({
-              model: state.model,
-              inputTokens: usage.inputTokens,
-              entryCount: state.turn.history.length,
-            });
-          }
-          if (method === "item/agentMessage/delta" && threadId === state.threadId && typeof p.delta === "string") {
-            state.firstOutputAt ??= Date.now();
-            state.turn.onDelta?.(p.delta);
-          }
-          if ((method === "item/started" || method === "item/completed") && p.item && typeof p.item === "object") {
-            const item = p.item as CodexItem;
-            if (method === "item/completed") {
-              state.completedItems.push(item);
-              if (state.turn.tape) {
-                try {
-                  await state.turn.tape({
-                    kind: "message",
-                    harness: "codex",
-                    scopeLabel: state.turn.scopeLabel,
-                    payload: item,
-                  });
-                } catch (error) {
-                  state.tapeWriteFailed = true;
-                  swallow("codex: tape append", error);
-                }
-              }
-            }
-            await processCollabItem(state, item);
-          }
-          if (method === "turn/completed" && threadId === state.threadId) {
-            const completed = p.turn as CodexTurn | undefined;
-            if (completed)
-              state.resolve(completed.items?.length ? completed : { ...completed, items: state.completedItems });
-          }
-        },
-        onRequest: async (method, params) => {
-          if (method !== "item/tool/call") throw new Error(`unsupported Codex request ${method}`);
-          const p = (params ?? {}) as Record<string, unknown>;
-          const threadId = String(p.threadId ?? "");
-          const state = active.get(threadId);
-          if (!state) throw new Error("inactive Codex thread");
-          const name = String(p.tool ?? "");
-          const callId = String(p.callId ?? "");
-          if (threadId !== state.threadId && !codexChildToolAllowed(name))
-            throw new Error(`Codex child requested unavailable tool ${name}`);
-          const tool = state.tools.get(name);
-          if (!tool) throw new Error(`Codex requested unavailable tool ${name}`);
-          state.responseItems.push({
-            type: "function_call",
-            call_id: callId,
-            name,
-            arguments: JSON.stringify(p.arguments ?? {}),
-          });
-          try {
-            const result = await tool.execute(callId, p.arguments ?? {});
-            const output = toolText(result);
-            state.responseItems.push({ type: "function_call_output", call_id: callId, output });
-            if (result.terminate || state.turn.cancel?.aborted)
-              setImmediate(() => {
-                const requestingTurnId = String(p.turnId ?? "");
-                if (threadId !== state.threadId && requestingTurnId) {
-                  void server.request("turn/interrupt", { threadId, turnId: requestingTurnId }).catch(() => undefined);
-                }
-                void state.interrupt?.();
-              });
-            return { contentItems: [{ type: "inputText", text: output }], success: true };
-          } catch (error) {
-            const output = error instanceof Error ? error.message : String(error);
-            state.responseItems.push({ type: "function_call_output", call_id: callId, output });
-            return { contentItems: [{ type: "inputText", text: output }], success: false };
-          }
-        },
-      });
-      startingServer = server;
-      let startTimer: NodeJS.Timeout | undefined;
-      try {
-        await Promise.race([
-          server.initialize(),
-          new Promise<never>((_, reject) => {
-            startTimer = setTimeout(
-              () => reject(new Error("Codex app-server initialization timed out")),
-              opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS,
-            );
-          }),
-        ]);
-      } catch (error) {
-        await server.close().catch(() => undefined);
-        rmSync(jail, { recursive: true, force: true });
-        throw error;
-      } finally {
-        if (startTimer) clearTimeout(startTimer);
-        if (startingServer === server) startingServer = null;
-      }
-      runtime = { server, jail };
-      server.process.once("close", () => {
-        if (runtime?.server !== server) return;
-        for (const state of active.values())
-          state.reject(server.error() ?? new Error("Codex app-server exited during a turn"));
-        active.clear();
-        runtime = null;
-        rmSync(jail, { recursive: true, force: true });
-      });
-      return runtime;
-    })();
-    try {
-      return await starting;
-    } finally {
-      starting = null;
+    if (runtime) {
+      const stale = runtime;
+      runtime = null;
+      runtimeCleanupRequested = false;
+      rmSync(stale.jail, { recursive: true, force: true });
     }
+    let startup = starting;
+    if (startup?.abort.signal.aborted) {
+      await startup.promise.catch(() => undefined);
+      if (starting === startup) starting = null;
+      startup = starting;
+    }
+    if (!startup) {
+      const startupAbort = new AbortController();
+      const promise = (async () => {
+        const jail = mkdtempSync(join(tmpdir(), "qm-codex-"));
+        const sourceAuth = authPath ? readCodexOAuthAuthFile(authPath) : null;
+        let expectedRefreshToken = codexOAuthRefreshToken(sourceAuth);
+        let expectedAccessToken = codexOAuthAccessToken(sourceAuth);
+        let expectedSourceAuth = sourceAuth ?? undefined;
+        let authLock: CodexOAuthAuthLock | undefined;
+        let server!: CodexAppServer;
+        try {
+          if (oauthConfigured && !sourceAuth) throw new Error("Codex OAuth auth.json is unavailable");
+          if (oauthConfigured && authPath && sourceAuth) {
+            authLock = await acquireCodexOAuthAuthLock(
+              authPath,
+              AbortSignal.any([closeAbort.signal, startupAbort.signal]),
+            );
+            const currentAuth = readCodexOAuthAuthFile(authPath);
+            expectedRefreshToken = codexOAuthRefreshToken(currentAuth);
+            expectedAccessToken = codexOAuthAccessToken(currentAuth);
+            expectedSourceAuth = currentAuth ?? undefined;
+            if (!currentAuth) throw new Error("Codex OAuth auth.json is unavailable");
+            if (startupAbort.signal.aborted) throw new Error("Codex app-server startup cancelled");
+          }
+          prepareCodexHome(sourceEnv, jail);
+          if (startupAbort.signal.aborted) throw new Error("Codex app-server startup cancelled");
+          const binaryPath = opts.binaryPath ?? resolve("node_modules/.bin/codex");
+          server = new CodexAppServer({
+            binaryPath,
+            cwd: jail,
+            env: codexChildEnv(sourceEnv, jail),
+            onNotification: async (method, params) => {
+              const p = (params ?? {}) as Record<string, unknown>;
+              const threadId = typeof p.threadId === "string" ? p.threadId : "";
+              const state = active.get(threadId);
+              if (!state) return;
+              if (method === "thread/tokenUsage/updated") {
+                const totals = codexUsageTotals(p);
+                if (totals) state.usageByThread.set(threadId, totals);
+                const usage = codexTokenUsageUpdate(p, state.usageInputTotals.get(threadId));
+                if (!usage) return;
+                state.usageInputTotals.set(threadId, usage.totalInputTokens);
+                state.modelCalls++;
+                state.turn.recordModelCall({
+                  model: state.model,
+                  inputTokens: usage.inputTokens,
+                  entryCount: state.turn.history.length,
+                });
+              }
+              if (method === "item/agentMessage/delta" && threadId === state.threadId && typeof p.delta === "string") {
+                state.firstOutputAt ??= Date.now();
+                state.turn.onDelta?.(p.delta);
+              }
+              if ((method === "item/started" || method === "item/completed") && p.item && typeof p.item === "object") {
+                const item = p.item as CodexItem;
+                if (method === "item/completed") {
+                  state.completedItems.push(item);
+                  if (state.turn.tape) {
+                    try {
+                      await state.turn.tape({
+                        kind: "message",
+                        harness: "codex",
+                        scopeLabel: state.turn.scopeLabel,
+                        payload: item,
+                      });
+                    } catch (error) {
+                      state.tapeWriteFailed = true;
+                      swallow("codex: tape append", error);
+                    }
+                  }
+                }
+                await processCollabItem(state, item);
+              }
+              if (method === "turn/completed" && threadId === state.threadId) {
+                const completed = p.turn as CodexTurn | undefined;
+                if (!isCodexTurn(completed)) {
+                  state.reject(new CodexRpcError("Codex app-server sent an invalid turn/completed payload"));
+                  return;
+                }
+                state.resolve(completed.items?.length ? completed : { ...completed, items: state.completedItems });
+              }
+            },
+            onRequest: async (method, params) => {
+              if (method !== "item/tool/call") throw new Error(`unsupported Codex request ${method}`);
+              const p = (params ?? {}) as Record<string, unknown>;
+              const threadId = String(p.threadId ?? "");
+              const state = active.get(threadId);
+              if (!state) throw new Error("inactive Codex thread");
+              const name = String(p.tool ?? "");
+              const callId = String(p.callId ?? "");
+              if (threadId !== state.threadId && !codexChildToolAllowed(name))
+                throw new Error(`Codex child requested unavailable tool ${name}`);
+              const tool = state.tools.get(name);
+              if (!tool) throw new Error(`Codex requested unavailable tool ${name}`);
+              state.responseItems.push({
+                type: "function_call",
+                call_id: callId,
+                name,
+                arguments: JSON.stringify(p.arguments ?? {}),
+              });
+              try {
+                const result = await tool.execute(callId, p.arguments ?? {});
+                const output = toolText(result);
+                state.responseItems.push({ type: "function_call_output", call_id: callId, output });
+                if (result.terminate || state.turn.cancel?.aborted)
+                  setImmediate(() => {
+                    const requestingTurnId = String(p.turnId ?? "");
+                    if (threadId !== state.threadId && requestingTurnId) {
+                      void server
+                        .request("turn/interrupt", { threadId, turnId: requestingTurnId })
+                        .catch(() => undefined);
+                    }
+                    void state.interrupt?.();
+                  });
+                return { contentItems: [{ type: "inputText", text: output }], success: true };
+              } catch (error) {
+                const output = error instanceof Error ? error.message : String(error);
+                state.responseItems.push({ type: "function_call_output", call_id: callId, output });
+                return { contentItems: [{ type: "inputText", text: output }], success: false };
+              }
+            },
+          });
+          startingServer = server;
+          if (startupAbort.signal.aborted) throw new Error("Codex app-server startup cancelled");
+        } catch (error) {
+          await server?.close().catch(() => undefined);
+          await authLock?.release();
+          rmSync(jail, { recursive: true, force: true });
+          throw error;
+        }
+        const childAuthPath = join(jail, "codex-home", "auth.json");
+        const persistAuth = (
+          expectedRefresh = expectedRefreshToken,
+          expectedAccess = expectedAccessToken,
+          heldLockPath?: string,
+          expectedSource = expectedSourceAuth,
+        ) => {
+          try {
+            syncCodexOAuthAuthFile(
+              authPath,
+              childAuthPath,
+              heldLockPath,
+              expectedRefresh,
+              expectedAccess,
+              expectedSource,
+            );
+          } catch (error) {
+            swallow("codex: oauth auth persistence", error);
+          }
+        };
+        let startTimer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            server.initialize(),
+            new Promise<never>((_, reject) => {
+              startTimer = setTimeout(
+                () => reject(new Error("Codex app-server initialization timed out")),
+                opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS,
+              );
+            }),
+          ]);
+          if (authLock) persistAuth(expectedRefreshToken, expectedAccessToken, authLock.path, expectedSourceAuth);
+          await authLock?.release();
+          authLock = undefined;
+        } catch (error) {
+          if (authLock) persistAuth(expectedRefreshToken, expectedAccessToken, authLock.path, expectedSourceAuth);
+          await server.close().catch(() => undefined);
+          await authLock?.release();
+          rmSync(jail, { recursive: true, force: true });
+          throw error;
+        } finally {
+          if (startTimer) clearTimeout(startTimer);
+          if (startingServer === server) startingServer = null;
+        }
+        runtime = { server, jail, persistAuth };
+        runtimeCleanupRequested = false;
+        server.process.once("close", () => {
+          for (const [threadId, state] of active) {
+            if (state.server !== server) continue;
+            state.reject(server.error() ?? new Error("Codex app-server exited during a turn"));
+            active.delete(threadId);
+          }
+          if (runtime?.server !== server) {
+            rmSync(jail, { recursive: true, force: true });
+            return;
+          }
+          runtime = null;
+          runtimeCleanupRequested = false;
+          const lock = activeAuthLock;
+          activeAuthLock = undefined;
+          if (lock) {
+            if (lock.isHeld())
+              persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth);
+            void lock.release().catch((error) => swallow("codex: oauth lock release", error));
+            activeExpectedRefreshToken = undefined;
+            activeExpectedAccessToken = undefined;
+            activeExpectedSourceAuth = undefined;
+          }
+          rmSync(jail, { recursive: true, force: true });
+        });
+        return runtime;
+      })();
+      startup = { promise, abort: startupAbort, waiters: 0 };
+      starting = startup;
+      const current = startup;
+      void promise.then(
+        () => {
+          if (starting === current) starting = null;
+        },
+        () => {
+          if (starting === current) starting = null;
+        },
+      );
+    }
+    const current = startup;
+    current.waiters += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      current.waiters -= 1;
+      if (current.waiters === 0 && starting === current) {
+        current.abort.abort();
+        void startingServer?.close().catch(() => undefined);
+      }
+    };
+    registerCancel?.(release);
+    try {
+      return await current.promise;
+    } finally {
+      release();
+    }
+  };
+
+  const closeIdleRuntime = async (): Promise<void> => {
+    const current = runtime;
+    if (!current) return;
+    if (active.size || setupUsers) {
+      runtimeCleanupRequested = true;
+      return;
+    }
+    runtimeCleanupRequested = false;
+    if (runtime === current) runtime = null;
+    await current.server.close().catch(() => undefined);
+    rmSync(current.jail, { recursive: true, force: true });
   };
 
   const runPrompt = async (turn: HarnessTurnInput, toolsEnabled = true): Promise<HarnessTurnResult> => {
     if (turn.cancel?.aborted) return { reply: "", stopped: true };
+    setupUsers += 1;
+    let setupUserReleased = false;
+    const releaseSetupUser = () => {
+      if (setupUserReleased) return;
+      setupUserReleased = true;
+      setupUsers -= 1;
+    };
     const wallMs = turn.turnWallClockMs ?? defaultTurnWallClockMs;
     const deadline = wallMs > 0 ? Date.now() + wallMs : 0;
     const setupCancelled = new Error("Codex setup cancelled");
     const setupTimedOut = new NonRetryableTurnError(`Codex turn exceeded ${Math.round(wallMs / 1000)}s wall clock`);
     let rejectSetup!: (error: Error) => void;
     let setupSettled = false;
+    let releaseStartupWaiter: () => void = () => {};
+    const authAcquireAbort = new AbortController();
     const setupStop = new Promise<never>((_, reject) => {
       rejectSetup = reject;
     });
     const stopSetup = (error: Error) => {
       if (setupSettled) return;
       setupSettled = true;
+      releaseStartupWaiter();
+      authAcquireAbort.abort();
       rejectSetup(error);
     };
     const onSetupCancel = () => stopSetup(setupCancelled);
@@ -579,73 +812,174 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     const awaitSetup = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, setupStop]);
     let rt: Runtime;
     try {
-      rt = await awaitSetup(ensureRuntime());
+      rt = await awaitSetup(
+        ensureRuntime((release) => {
+          releaseStartupWaiter = release;
+        }),
+      );
     } catch (error) {
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
+      releaseSetupUser();
+      await closeIdleRuntime();
+      if (error === setupCancelled) {
+        return { reply: "", stopped: true };
+      }
+      throw error;
+    }
+    let turnAuthLock: CodexOAuthAuthLock | undefined;
+    let expectedRefreshToken: string | undefined;
+    let expectedAccessToken: string | undefined;
+    let expectedSourceAuth: Record<string, unknown> | undefined;
+    let turnAuthReleased = false;
+    const releaseTurnAuth = async (): Promise<void> => {
+      if (turnAuthReleased) return;
+      turnAuthReleased = true;
+      const lock = turnAuthLock;
+      if (!lock) return;
+      try {
+        if (lock.isHeld()) rt.persistAuth(expectedRefreshToken, expectedAccessToken, lock.path, expectedSourceAuth);
+      } finally {
+        if (activeAuthLock === lock) {
+          activeAuthLock = undefined;
+          activeExpectedRefreshToken = undefined;
+          activeExpectedAccessToken = undefined;
+          activeExpectedSourceAuth = undefined;
+        }
+        await lock.release();
+      }
+    };
+    try {
+      const sourceAuth = authPath ? readCodexOAuthAuthFile(authPath) : null;
+      if (oauthConfigured && !sourceAuth) {
+        rmSync(join(rt.jail, "codex-home", "auth.json"), { force: true });
+        throw new NonRetryableTurnError("Codex OAuth auth.json is unavailable");
+      }
+      if (oauthConfigured && authPath && sourceAuth) {
+        const authLockPromise = acquireCodexOAuthAuthLock(
+          authPath,
+          AbortSignal.any([closeAbort.signal, authAcquireAbort.signal]),
+          Math.max(120_000, wallMs + 5_000),
+        );
+        try {
+          turnAuthLock = await awaitSetup(authLockPromise);
+        } catch (error) {
+          void authLockPromise.then(
+            (lock) => lock.release(),
+            () => undefined,
+          );
+          throw error;
+        }
+        const currentAuth = readCodexOAuthAuthFile(authPath);
+        if (!currentAuth) {
+          rmSync(join(rt.jail, "codex-home", "auth.json"), { force: true });
+          throw new NonRetryableTurnError("Codex OAuth auth.json is unavailable");
+        }
+        expectedRefreshToken = codexOAuthRefreshToken(currentAuth);
+        expectedAccessToken = codexOAuthAccessToken(currentAuth);
+        expectedSourceAuth = currentAuth ?? undefined;
+        prepareCodexHome(sourceEnv, rt.jail);
+        activeAuthLock = turnAuthLock;
+        activeExpectedRefreshToken = expectedRefreshToken;
+        activeExpectedAccessToken = expectedAccessToken;
+        activeExpectedSourceAuth = expectedSourceAuth;
+      }
+    } catch (error) {
+      await releaseTurnAuth();
+      setupSettled = true;
+      if (setupTimer) clearTimeout(setupTimer);
+      turn.cancel?.removeEventListener("abort", onSetupCancel);
+      releaseSetupUser();
+      await closeIdleRuntime();
+      if (error === setupCancelled) {
+        return { reply: "", stopped: true };
+      }
+      throw error;
+    }
+    let ref!: ToolContextRef;
+    let toolAbort!: AbortController;
+    let tools!: BridgedTool[];
+    let dynamicTools!: Array<Record<string, unknown>>;
+    let model: string | undefined;
+    let threadStartRequest!: Record<string, unknown>;
+    try {
+      ref = codexToolContext(turn);
+      toolAbort = new AbortController();
+      ref.abortSignal = toolAbort.signal;
+      tools = toolsEnabled ? asTools(ref, toolOptions(opts, turn)) : [];
+      dynamicTools = tools.map((tool) => ({
+        type: "function",
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.parameters,
+      }));
+      model = modelSupportedByHarness(turn.model, "codex") ? turn.model! : resolveModelId(turn.scopeLabel);
+      threadStartRequest = {
+        ...(model ? { model } : {}),
+        cwd: rt.jail,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        ephemeral: true,
+        baseInstructions: turn.systemPrompt,
+        developerInstructions:
+          "Use the supplied dynamic QM tools for all workspace, execution, memory, history, and surface operations. The built-in working directory is an empty read-only control jail, not the user's workspace.",
+        dynamicTools,
+        experimentalRawEvents: true,
+        environments: [],
+        config: {
+          web_search: "disabled",
+          ...(codexReasoningEffort(turn.thinkingLevel)
+            ? { model_reasoning_effort: codexReasoningEffort(turn.thinkingLevel) }
+            : {}),
+          features: {
+            shell_tool: false,
+            unified_exec: false,
+            shell_snapshot: false,
+            apps: false,
+            plugins: false,
+            browser_use: false,
+            browser_use_external: false,
+            computer_use: false,
+            image_generation: false,
+            in_app_browser: false,
+            multi_agent: !turn.readOnly,
+            request_permissions_tool: false,
+            tool_suggest: false,
+          },
+        },
+      };
+    } catch (error) {
+      await releaseTurnAuth();
+      setupSettled = true;
+      if (setupTimer) clearTimeout(setupTimer);
+      turn.cancel?.removeEventListener("abort", onSetupCancel);
+      releaseSetupUser();
+      await closeIdleRuntime();
       if (error === setupCancelled) return { reply: "", stopped: true };
       throw error;
     }
-    const ref = codexToolContext(turn);
-    const toolAbort = new AbortController();
-    ref.abortSignal = toolAbort.signal;
-    const tools = toolsEnabled ? asTools(ref, toolOptions(opts, turn)) : [];
-    const dynamicTools = tools.map((tool) => ({
-      type: "function",
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.parameters,
-    }));
-    const model = modelSupportedByHarness(turn.model, "codex") ? turn.model! : resolveModelId(turn.scopeLabel);
-    const threadStartRequest = {
-      ...(model ? { model } : {}),
-      cwd: rt.jail,
-      approvalPolicy: "never",
-      sandbox: "read-only",
-      ephemeral: true,
-      baseInstructions: turn.systemPrompt,
-      developerInstructions:
-        "Use the supplied dynamic QM tools for all workspace, execution, memory, history, and surface operations. The built-in working directory is an empty read-only control jail, not the user's workspace.",
-      dynamicTools,
-      experimentalRawEvents: true,
-      environments: [],
-      config: {
-        web_search: "disabled",
-        ...(codexReasoningEffort(turn.thinkingLevel)
-          ? { model_reasoning_effort: codexReasoningEffort(turn.thinkingLevel) }
-          : {}),
-        features: {
-          shell_tool: false,
-          unified_exec: false,
-          shell_snapshot: false,
-          apps: false,
-          plugins: false,
-          browser_use: false,
-          browser_use_external: false,
-          computer_use: false,
-          image_generation: false,
-          in_app_browser: false,
-          multi_agent: !turn.readOnly,
-          request_permissions_tool: false,
-          tool_suggest: false,
-        },
-      },
-    };
     let started: { thread: { id: string }; model?: string };
     try {
-      started = await awaitSetup(rt.server.request("thread/start", threadStartRequest));
+      started = await awaitSetup(rt.server.request("thread/start", threadStartRequest, isCodexThreadStart));
     } catch (error) {
+      await releaseTurnAuth();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
-      if (error === setupCancelled) return { reply: "", stopped: true };
+      releaseSetupUser();
+      await closeIdleRuntime();
+      if (error === setupCancelled) {
+        return { reply: "", stopped: true };
+      }
       throw error;
     }
-    const threadId = started.thread.id;
-    const replay = replayItems(reconstructMessagesFromHistory(turn.history));
-    let userEntry: SessionEntry;
+    let threadId!: string;
+    let replay!: ReturnType<typeof replayItems>;
+    let userEntry!: SessionEntry;
     try {
+      threadId = started.thread.id;
+      replay = replayItems(reconstructMessagesFromHistory(turn.history));
       if (replay.length) await awaitSetup(rt.server.request("thread/inject_items", { threadId, items: replay }));
       userEntry = await awaitSetup(
         turn.emit({
@@ -659,51 +993,75 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }),
       );
     } catch (error) {
+      await releaseTurnAuth();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
+      releaseSetupUser();
+      await closeIdleRuntime();
+      if (error === setupCancelled) {
+        return { reply: "", stopped: true };
+      }
+      throw error;
+    }
+    let resolveCompleted!: (value: CodexTurn) => void;
+    let rejectCompleted!: (error: Error) => void;
+    let completed!: Promise<CodexTurn>;
+    let inputText!: string;
+    let input!: Array<Record<string, unknown>>;
+    let selectedModel!: string;
+    let state!: ActiveTurn;
+    try {
+      completed = new Promise<CodexTurn>((resolveTurn, rejectTurn) => {
+        resolveCompleted = resolveTurn;
+        rejectCompleted = rejectTurn;
+      });
+      void completed.catch(() => undefined);
+      inputText = codexTurnInputText(turn);
+      input = [
+        userInput(inputText),
+        ...(turn.images ?? []).map((image) => ({
+          type: "image",
+          url: `data:${image.mimeType};base64,${image.dataBase64}`,
+        })),
+      ];
+      selectedModel = model ?? started.model ?? "codex-default";
+      state = {
+        server: rt.server,
+        threadId,
+        turn,
+        tools: new Map(tools.map((tool) => [tool.name, tool])),
+        resolve: resolveCompleted,
+        reject: rejectCompleted,
+        responseItems: [],
+        completedItems: [],
+        taskIds: new Map(),
+        taskStatuses: new Map(),
+        taskResults: new Set(),
+        model: selectedModel,
+        modelCalls: 0,
+        usageInputTotals: new Map(),
+        usageByThread: new Map(),
+        firstOutputAt: null,
+        fallbackInputTokens: countTokens(JSON.stringify({ replay, input })),
+        tapeWriteFailed: false,
+        stopped: false,
+      };
+    } catch (error) {
+      await releaseTurnAuth();
+      setupSettled = true;
+      if (setupTimer) clearTimeout(setupTimer);
+      turn.cancel?.removeEventListener("abort", onSetupCancel);
+      releaseSetupUser();
+      await closeIdleRuntime();
       if (error === setupCancelled) return { reply: "", stopped: true };
       throw error;
     }
+    active.set(threadId, state);
     setupSettled = true;
     if (setupTimer) clearTimeout(setupTimer);
     turn.cancel?.removeEventListener("abort", onSetupCancel);
-    let resolveCompleted!: (value: CodexTurn) => void;
-    let rejectCompleted!: (error: Error) => void;
-    const completed = new Promise<CodexTurn>((resolveTurn, rejectTurn) => {
-      resolveCompleted = resolveTurn;
-      rejectCompleted = rejectTurn;
-    });
-    const inputText = codexTurnInputText(turn);
-    const input = [
-      userInput(inputText),
-      ...(turn.images ?? []).map((image) => ({
-        type: "image",
-        url: `data:${image.mimeType};base64,${image.dataBase64}`,
-      })),
-    ];
-    const selectedModel = model ?? started.model ?? "codex-default";
-    const state: ActiveTurn = {
-      threadId,
-      turn,
-      tools: new Map(tools.map((tool) => [tool.name, tool])),
-      resolve: resolveCompleted,
-      reject: rejectCompleted,
-      responseItems: [],
-      completedItems: [],
-      taskIds: new Map(),
-      taskStatuses: new Map(),
-      taskResults: new Set(),
-      model: selectedModel,
-      modelCalls: 0,
-      usageInputTotals: new Map(),
-      usageByThread: new Map(),
-      firstOutputAt: null,
-      fallbackInputTokens: countTokens(JSON.stringify({ replay, input })),
-      tapeWriteFailed: false,
-      stopped: false,
-    };
-    active.set(threadId, state);
+    releaseSetupUser();
     const requestPayload = {
       threadStart: {
         ...threadStartRequest,
@@ -796,7 +1154,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     let timer: NodeJS.Timeout | undefined;
     try {
       const response = await rt.server
-        .request<{ turn: CodexTurn }>("turn/start", { threadId, input, ...(model ? { model } : {}) })
+        .request<{ turn: CodexTurn }>("turn/start", { threadId, input, ...(model ? { model } : {}) }, isCodexTurnStart)
         .catch((error: unknown) => {
           throw error instanceof CodexRpcError ? codexProviderFailure(error.message) : error;
         });
@@ -809,6 +1167,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
               completed,
               new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
+                  runtimeCleanupRequested = true;
                   void interrupt(false);
                   reject(setupTimedOut);
                 }, remainingWallMs);
@@ -847,6 +1206,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       if (timer) clearTimeout(timer);
       await stopSignals?.();
       await recordRequest();
+      await releaseTurnAuth();
       turn.cancel?.removeEventListener("abort", onCancel);
       for (const [taskId, status] of state.taskStatuses) {
         if (status === "pending" || status === "in_progress") {
@@ -856,6 +1216,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       for (const [activeThreadId, activeState] of active) {
         if (activeState === state) active.delete(activeThreadId);
       }
+      if (runtimeCleanupRequested) await closeIdleRuntime();
     }
   };
 
@@ -910,13 +1271,29 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     {
       runTurn: runPrompt,
       close: async () => {
+        closeAbort.abort();
         await startingServer?.close().catch(() => undefined);
-        await starting?.catch(() => undefined);
+        await starting?.promise.catch(() => undefined);
         const current = runtime;
         if (current) {
           for (const state of active.values()) state.reject(new Error("Codex harness closed during a turn"));
           active.clear();
           await current.server.close();
+          const lock = activeAuthLock;
+          activeAuthLock = undefined;
+          if (lock) {
+            if (lock.isHeld())
+              current.persistAuth(
+                activeExpectedRefreshToken,
+                activeExpectedAccessToken,
+                lock.path,
+                activeExpectedSourceAuth,
+              );
+            await lock.release();
+            activeExpectedRefreshToken = undefined;
+            activeExpectedAccessToken = undefined;
+            activeExpectedSourceAuth = undefined;
+          }
           rmSync(current.jail, { recursive: true, force: true });
           if (runtime === current) runtime = null;
         }
