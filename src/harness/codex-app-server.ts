@@ -195,11 +195,9 @@ export class CodexAppServer {
   ): Promise<unknown> {
     if (this.closed) return Promise.reject(new Error("Codex app-server is closed"));
     const validate = typeof validateOrSignal === "function" ? validateOrSignal : undefined;
-    const requestSignal: AbortSignal | undefined = validate
-      ? signal
-      : typeof validateOrSignal === "function"
-        ? undefined
-        : validateOrSignal;
+    let requestSignal: AbortSignal | undefined;
+    if (validate) requestSignal = signal;
+    else if (typeof validateOrSignal !== "function") requestSignal = validateOrSignal;
     if (requestSignal?.aborted) return Promise.reject(new Error("Codex app-server request cancelled"));
     const id = this.nextId++;
     let rejectResult!: (error: Error) => void;
