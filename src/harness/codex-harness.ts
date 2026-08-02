@@ -773,31 +773,40 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         runtime = { server, jail, persistAuth };
         runtimeCleanupRequested = false;
         server.process.once("close", () => {
+          const currentRuntime = runtime?.server === server;
+          let persistenceFailed = false;
+          const lock = currentRuntime ? activeAuthLock : undefined;
+          if (lock?.isHeld())
+            persistenceFailed = !persistAuth(
+              activeExpectedRefreshToken,
+              activeExpectedAccessToken,
+              lock.path,
+              activeExpectedSourceAuth,
+            );
+          const closeError = persistenceFailed
+            ? new Error("Codex OAuth auth persistence failed", { cause: server.error() })
+            : (server.error() ?? new Error("Codex app-server exited during a turn"));
           for (const [threadId, state] of active) {
             if (state.server !== server) continue;
-            state.reject(server.error() ?? new Error("Codex app-server exited during a turn"));
+            state.reject(closeError);
             active.delete(threadId);
           }
-          if (runtime?.server !== server) {
+          if (!currentRuntime) {
             rmSync(jail, { recursive: true, force: true });
             return;
           }
           runtime = null;
           runtimeCleanupRequested = false;
-          const lock = activeAuthLock;
-          activeAuthLock = undefined;
-          if (lock) {
-            if (
-              lock.isHeld() &&
-              !persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth)
-            )
-              swallow("codex: oauth auth persistence", new Error("Codex OAuth auth persistence failed"));
+          if (closeAbort.signal.aborted) {
+            if (persistenceFailed) swallow("codex: oauth auth persistence", closeError);
+          } else if (lock) {
+            activeAuthLock = undefined;
             void lock.release().catch((error) => swallow("codex: oauth lock release", error));
             activeExpectedRefreshToken = undefined;
             activeExpectedAccessToken = undefined;
             activeExpectedSourceAuth = undefined;
           }
-          rmSync(jail, { recursive: true, force: true });
+          if (!closeAbort.signal.aborted) rmSync(jail, { recursive: true, force: true });
         });
         return runtime;
       })();
@@ -919,6 +928,14 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         await lock.release();
       }
     };
+    const releaseTurnAuthError = async (): Promise<unknown> => {
+      try {
+        await releaseTurnAuth();
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    };
     try {
       const sourceAuth = authPath ? readCodexOAuthAuthFile(authPath) : null;
       if (oauthConfigured && !sourceAuth) {
@@ -971,12 +988,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }
       }
     } catch (error) {
-      await releaseTurnAuth();
+      const releaseError = await releaseTurnAuthError();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
       releaseSetupUser();
       await closeIdleRuntime();
+      if (releaseError) throw releaseError;
       if (error === setupCancelled) {
         return { reply: "", stopped: true };
       }
@@ -1035,12 +1053,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         },
       };
     } catch (error) {
-      await releaseTurnAuth();
+      const releaseError = await releaseTurnAuthError();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
       releaseSetupUser();
       await closeIdleRuntime();
+      if (releaseError) throw releaseError;
       if (error === setupCancelled) return { reply: "", stopped: true };
       throw error;
     }
@@ -1068,12 +1087,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }),
       );
     } catch (error) {
-      await releaseTurnAuth();
+      const releaseError = await releaseTurnAuthError();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
       releaseSetupUser();
       await closeIdleRuntime();
+      if (releaseError) throw releaseError;
       if (error === setupCancelled) {
         return { reply: "", stopped: true };
       }
@@ -1098,12 +1118,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }),
       );
     } catch (error) {
-      await releaseTurnAuth();
+      const releaseError = await releaseTurnAuthError();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
       releaseSetupUser();
       await closeIdleRuntime();
+      if (releaseError) throw releaseError;
       if (error === setupCancelled) {
         return { reply: "", stopped: true };
       }
@@ -1153,12 +1174,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         stopped: false,
       };
     } catch (error) {
-      await releaseTurnAuth();
+      const releaseError = await releaseTurnAuthError();
       setupSettled = true;
       if (setupTimer) clearTimeout(setupTimer);
       turn.cancel?.removeEventListener("abort", onSetupCancel);
       releaseSetupUser();
       await closeIdleRuntime();
+      if (releaseError) throw releaseError;
       if (error === setupCancelled) return { reply: "", stopped: true };
       throw error;
     }
@@ -1178,20 +1200,28 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     const startedAt = Date.now();
     const recordRequest = async (): Promise<void> => {
       if (!turn.recordLlmRequest) return;
+      let recordTimer: NodeJS.Timeout | undefined;
       try {
-        await turn.recordLlmRequest({
-          turnSeq: userEntry.seq,
-          step: 0,
-          model: selectedModel,
-          request: requestPayload,
-          truncated: Boolean(turn.images?.length),
-          transport: { modelId: selectedModel },
-          ttftMs: state.firstOutputAt ? state.firstOutputAt - startedAt : null,
-          durationMs: Date.now() - startedAt,
-          usage: sumUsage(state.usageByThread),
-        });
+        await Promise.race([
+          turn.recordLlmRequest({
+            turnSeq: userEntry.seq,
+            step: 0,
+            model: selectedModel,
+            request: requestPayload,
+            truncated: Boolean(turn.images?.length),
+            transport: { modelId: selectedModel },
+            ttftMs: state.firstOutputAt ? state.firstOutputAt - startedAt : null,
+            durationMs: Date.now() - startedAt,
+            usage: sumUsage(state.usageByThread),
+          }),
+          new Promise<never>((_, reject) => {
+            recordTimer = setTimeout(() => reject(new Error("Codex llm request recording timed out")), 5_000);
+          }),
+        ]);
       } catch (error) {
         swallow("codex: llm request record", error);
+      } finally {
+        if (recordTimer) clearTimeout(recordTimer);
       }
     };
     if (turn.tape) {
@@ -1231,7 +1261,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     };
     state.interrupt = () => interrupt(false);
     const onCancel = () => {
-      void interrupt(false);
+      runtimeCleanupRequested = true;
+      void interrupt(true);
     };
     if (turn.cancel) {
       if (turn.cancel.aborted) onCancel();
@@ -1260,6 +1291,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     const turnStartAbort = new AbortController();
     let turnStartTimedOut = false;
     const cleanupErrors: unknown[] = [];
+    let turnResult: HarnessTurnResult | undefined;
     try {
       const turnStartSignals = [closeAbort.signal, turnStartAbort.signal];
       if (turn.cancel) turnStartSignals.push(turn.cancel);
@@ -1317,31 +1349,37 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         });
       }
       if (result.status === "failed") throw codexProviderFailure(result.error?.message ?? "Codex turn failed");
-      const terminal = ref.silentRequested || ref.pausedOnApproval;
-      const reply = terminal ? "" : textFromTurn(result);
-      for (const thinking of reasoningFromTurn(result))
-        await turn.emit({ type: "thinking", payload: { thinking }, scopeLabel: turn.scopeLabel });
-      if (reply && !terminal)
-        await turn.emit({
-          type: "assistant",
-          payload: { text: reply, stopped: state.stopped || undefined },
-          scopeLabel: turn.scopeLabel,
-        });
-      return {
-        reply,
-        ...(state.stopped ? { stopped: true as const } : {}),
-        ...(ref.silentRequested ? { silent: true } : {}),
-        ...(ref.pendingApprovals?.length ? { pendingApprovals: ref.pendingApprovals } : {}),
-        ...(ref.pausedOnApproval ? { pausedOnApproval: true } : {}),
-        modelCalls: state.modelCalls,
-        ...(state.tapeWriteFailed ? { tapeWriteFailed: true } : {}),
-      };
+      if (turn.cancel?.aborted) {
+        runtimeCleanupRequested = true;
+        turnResult = { reply: "", stopped: true };
+      } else {
+        const terminal = ref.silentRequested || ref.pausedOnApproval;
+        const reply = terminal ? "" : textFromTurn(result);
+        for (const thinking of reasoningFromTurn(result))
+          await turn.emit({ type: "thinking", payload: { thinking }, scopeLabel: turn.scopeLabel });
+        if (reply && !terminal)
+          await turn.emit({
+            type: "assistant",
+            payload: { text: reply, stopped: state.stopped || undefined },
+            scopeLabel: turn.scopeLabel,
+          });
+        turnResult = {
+          reply,
+          ...(state.stopped ? { stopped: true as const } : {}),
+          ...(ref.silentRequested ? { silent: true } : {}),
+          ...(ref.pendingApprovals?.length ? { pendingApprovals: ref.pendingApprovals } : {}),
+          ...(ref.pausedOnApproval ? { pausedOnApproval: true } : {}),
+          modelCalls: state.modelCalls,
+          ...(state.tapeWriteFailed ? { tapeWriteFailed: true } : {}),
+        };
+      }
     } catch (error) {
       if (turn.cancel?.aborted) {
         runtimeCleanupRequested = true;
-        return { reply: "", stopped: true };
+        turnResult = { reply: "", stopped: true };
+      } else {
+        throw error;
       }
-      throw error;
     } finally {
       if (timer) clearTimeout(timer);
       try {
@@ -1354,19 +1392,25 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       } catch (error) {
         cleanupErrors.push(error);
       }
-      await recordRequest();
       turn.cancel?.removeEventListener("abort", onCancel);
       for (const [taskId, status] of state.taskStatuses) {
         if (status === "pending" || status === "in_progress") {
-          await transitionTask(opts.tasks, taskId, status, "failed", turn.runId ?? turn.session.id);
+          try {
+            await transitionTask(opts.tasks, taskId, status, "failed", turn.runId ?? turn.session.id);
+          } catch (error) {
+            swallow("codex: task cleanup", error);
+          }
         }
       }
       for (const [activeThreadId, activeState] of active) {
         if (activeState === state) active.delete(activeThreadId);
       }
       if (runtimeCleanupRequested) await closeIdleRuntime();
+      await recordRequest();
     }
     if (cleanupErrors.length) throw cleanupErrors[0];
+    if (!turnResult) throw new Error("Codex turn did not produce a result");
+    return turnResult;
   };
 
   const single = async (
@@ -1429,7 +1473,6 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           active.clear();
           await current.server.close();
           const lock = activeAuthLock;
-          activeAuthLock = undefined;
           let persistenceFailed = false;
           if (lock) {
             if (lock.isHeld())
@@ -1439,10 +1482,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
                 lock.path,
                 activeExpectedSourceAuth,
               );
-            await lock.release();
-            activeExpectedRefreshToken = undefined;
-            activeExpectedAccessToken = undefined;
-            activeExpectedSourceAuth = undefined;
+            if (!persistenceFailed) {
+              await lock.release();
+              activeAuthLock = undefined;
+              activeExpectedRefreshToken = undefined;
+              activeExpectedAccessToken = undefined;
+              activeExpectedSourceAuth = undefined;
+            }
           }
           if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed");
           rmSync(current.jail, { recursive: true, force: true });

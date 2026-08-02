@@ -52,6 +52,11 @@ const CODEX_DIAGNOSTIC_SENSITIVE_KEYS = new Set([
   "idtoken",
   "apikey",
   "clientsecret",
+  "credential",
+  "credentials",
+  "password",
+  "passphrase",
+  "secret",
   "token",
   "authorization",
   "proxyauthorization",
@@ -88,25 +93,26 @@ function redactStructuredDiagnostics(value: string): string {
 export function redactCodexDiagnostics(value: string): string {
   return redactStructuredDiagnostics(value)
     .replace(
-      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)\[[\s\S]*?(?:\]|$)/gi,
+      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|credential|credentials|password|passphrase|secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)\[[\s\S]*?(?:\]|$)/gi,
       "$1[redacted]",
     )
     .replace(
-      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)\{[\s\S]*$/gi,
+      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|credential|credentials|password|passphrase|secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)\{[\s\S]*$/gi,
       "$1{redacted}",
     )
     .replace(
-      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)(["'])(?:(?:\\[\s\S])|(?!\2)[\s\S])*(?:\2|$)/gi,
+      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|credential|credentials|password|passphrase|secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)(["'])(?:(?:\\[\s\S])|(?!\2)[\s\S])*(?:\2|$)/gi,
       "$1$2[redacted]$2",
     )
     .replace(
-      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)(?!(?:["']|\[))[^,\r\n}\]]+/gi,
+      /(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|credential|credentials|password|passphrase|secret|token|authorization|proxy-authorization|cookie|set-cookie)["']?\s*[:=]\s*)(?!(?:["']|\[))[^,\r\n}\]]+/gi,
       "$1[redacted]",
     )
     .replace(/\b(?:Basic|Digest)\s+\S+/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, "[redacted]")
-    .replace(/\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted]");
+    .replace(/\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted]")
+    .replace(/\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{32,}\b/g, "[redacted]");
 }
 
 export interface CodexAppServerOptions {

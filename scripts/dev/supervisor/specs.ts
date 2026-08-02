@@ -21,7 +21,10 @@ export interface SpecInputs {
 export function buildChildSpecs(i: SpecInputs): ChildSpec[] {
   const watchArgs = i.watch ? ["--watch"] : [];
   const base = { ...i.baseEnv, ...i.sandboxEnv };
-  const siblingBase = { ...base, CODEX_AUTH_FILE: "" };
+  const siblingBase = Object.fromEntries(
+    Object.entries(base).filter(([key]) => key !== "HOME" && key !== "CODEX_HOME"),
+  );
+  siblingBase.CODEX_AUTH_FILE = "";
   const orgId = i.baseEnv.DEV_INSTANCE_ORG_ID || "acme";
   const signing: Record<string, string> = i.coreSigningSecret ? { CORE_SIGNING_SECRET: i.coreSigningSecret } : {};
   return [

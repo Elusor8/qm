@@ -411,7 +411,12 @@ test("supervised children share the selected dev org", () => {
   const inputs: SpecInputs = {
     worktree: "/tmp/worktree",
     ports: slotPorts("pool1"),
-    baseEnv: { DEV_INSTANCE_ORG_ID: "beta", CODEX_AUTH_FILE: "/tmp/codex-auth.json" },
+    baseEnv: {
+      DEV_INSTANCE_ORG_ID: "beta",
+      CODEX_AUTH_FILE: "/tmp/codex-auth.json",
+      HOME: "/tmp/home",
+      CODEX_HOME: "/tmp/home/.codex",
+    },
     watch: false,
     webUiBasePath: "/",
     slack: { botToken: "xoxb-test", appToken: "xapp-test" },
@@ -427,7 +432,11 @@ test("supervised children share the selected dev org", () => {
   const specs = buildChildSpecs(inputs);
   assert.equal(specs.find((spec) => spec.name === "core")!.env.ORG_ID, "beta");
   assert.equal(specs.find((spec) => spec.name === "core")!.env.CODEX_AUTH_FILE, "/tmp/codex-auth.json");
-  for (const spec of specs.filter((spec) => spec.name !== "core")) assert.equal(spec.env.CODEX_AUTH_FILE, "");
+  for (const spec of specs.filter((spec) => spec.name !== "core")) {
+    assert.equal(spec.env.CODEX_AUTH_FILE, "");
+    assert.equal(spec.env.HOME, undefined);
+    assert.equal(spec.env.CODEX_HOME, undefined);
+  }
   for (const spec of specs) assert.equal(spec.env.CORE_ORG_ID, "beta");
   inputs.baseEnv = {};
   assert.equal(buildChildSpecs(inputs).find((spec) => spec.name === "core")!.env.ORG_ID, "acme");

@@ -598,7 +598,7 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
         access_token: "access-after",
         refresh_token: "refresh-after",
         account_id: "account-before",
-        id_token: oauthIdToken("account-before", "rotated"),
+        id_token: oauthIdToken("account-before"),
       },
     }),
   );
@@ -608,7 +608,7 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
     const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
     assert.equal(persisted.OPENAI_API_KEY, "ambient-api-key");
     assert.equal((persisted.tokens as Record<string, unknown>).access_token, "access-after");
-    assert.equal((persisted.tokens as Record<string, unknown>).id_token, oauthIdToken("account-before", "rotated"));
+    assert.equal((persisted.tokens as Record<string, unknown>).id_token, oauthIdToken("account-before"));
   } finally {
     await lock.release();
   }
@@ -741,6 +741,16 @@ test("Codex diagnostics redact credential-shaped stderr", () => {
   assert.equal(nested.includes("nested-secret"), false);
   assert.equal(nested.includes("one-secret"), false);
   assert.equal(redactCodexDiagnostics("id_token=header.payload.signature").includes("header.payload.signature"), false);
+  const generic = redactCodexDiagnostics(
+    JSON.stringify({
+      secret: "generic-secret",
+      password: "generic-password",
+      opaque: "opaque-secret-value-123456789012345678901234",
+    }),
+  );
+  assert.equal(generic.includes("generic-secret"), false);
+  assert.equal(generic.includes("generic-password"), false);
+  assert.equal(generic.includes("opaque-secret-value-123456789012345678901234"), false);
 });
 
 test("Codex ignores OAuth auth files that are readable by other users", (t) => {

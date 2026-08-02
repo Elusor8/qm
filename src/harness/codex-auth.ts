@@ -241,11 +241,10 @@ export async function acquireCodexOAuthAuthLock(
               heldOAuthLockPaths.delete(path);
               return;
             } catch (error) {
-              if (attempt === 2) swallow("codex: oauth lock release", error);
+              if (attempt === 2) throw error;
               else await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
             }
           }
-          heldOAuthLockPaths.delete(path);
         },
       };
     } catch (error) {
@@ -307,47 +306,53 @@ export function syncCodexOAuthAuthFile(
   expectedRefreshToken?: string,
   expectedAccessToken?: string,
   expectedSourceAuth?: JsonObject,
-): void {
-  if (!sourcePath) return;
+): boolean {
+  if (!sourcePath) return true;
   const child = readCodexOAuthAuthFile(childPath);
-  if (!child) return;
+  if (!child) return false;
   const lock = heldLockPath ? undefined : lockFile(sourcePath);
+  let result: boolean;
+  let cleanupError: unknown;
   try {
-    const source = readJsonFile(sourcePath);
-    if (!source) return;
-    if (source.auth_mode !== child.auth_mode) return;
-    const sourceTokens = asObject(source.tokens);
-    const childTokens = asObject(child.tokens);
-    const sourceAccountId = codexOAuthJwtAccountId(source);
-    const childAccountId = codexOAuthJwtAccountId(child);
-    if (
-      !sourceTokens ||
-      !childTokens ||
-      typeof sourceTokens.id_token !== "string" ||
-      typeof childTokens.id_token !== "string" ||
-      !sourceAccountId ||
-      sourceAccountId !== childAccountId
-    )
-      return;
-    if (expectedSourceAuth && JSON.stringify(source) !== JSON.stringify(expectedSourceAuth)) return;
-    if (expectedRefreshToken && codexOAuthRefreshToken(source) !== expectedRefreshToken) return;
-    if (expectedAccessToken && codexOAuthAccessToken(source) !== expectedAccessToken) return;
-    const sanitized = sanitizedCodexOAuthAuth(child);
-    const next = {
-      ...source,
-      ...sanitized,
-      ...(childTokens
-        ? {
-            tokens: {
-              ...sourceTokens,
-              ...childTokens,
-              ...(typeof sourceTokens.account_id === "string" ? { account_id: sourceTokens.account_id } : {}),
-            },
-          }
-        : {}),
-    };
-    if (JSON.stringify(next) === JSON.stringify(source)) return;
-    writeJsonAtomically(sourcePath, next);
+    result = (() => {
+      const source = readJsonFile(sourcePath);
+      if (!source) return false;
+      if (source.auth_mode !== child.auth_mode) return false;
+      const sourceTokens = asObject(source.tokens);
+      const childTokens = asObject(child.tokens);
+      const sourceAccountId = codexOAuthJwtAccountId(source);
+      const childAccountId = codexOAuthJwtAccountId(child);
+      if (
+        !sourceTokens ||
+        !childTokens ||
+        typeof sourceTokens.id_token !== "string" ||
+        typeof childTokens.id_token !== "string" ||
+        sourceTokens.id_token !== childTokens.id_token ||
+        !sourceAccountId ||
+        sourceAccountId !== childAccountId
+      )
+        return false;
+      if (expectedSourceAuth && JSON.stringify(source) !== JSON.stringify(expectedSourceAuth)) return false;
+      if (expectedRefreshToken && codexOAuthRefreshToken(source) !== expectedRefreshToken) return false;
+      if (expectedAccessToken && codexOAuthAccessToken(source) !== expectedAccessToken) return false;
+      const sanitized = sanitizedCodexOAuthAuth(child);
+      const next = {
+        ...source,
+        ...sanitized,
+        ...(childTokens
+          ? {
+              tokens: {
+                ...sourceTokens,
+                ...childTokens,
+                ...(typeof sourceTokens.account_id === "string" ? { account_id: sourceTokens.account_id } : {}),
+              },
+            }
+          : {}),
+      };
+      if (JSON.stringify(next) === JSON.stringify(source)) return true;
+      writeJsonAtomically(sourcePath, next);
+      return true;
+    })();
   } finally {
     if (lock !== undefined) {
       const path = lockPath(sourcePath);
@@ -355,13 +360,20 @@ export function syncCodexOAuthAuthFile(
         try {
           if (readFileSync(path, "utf8") !== lock.owner) break;
           unlinkSync(path);
+          heldOAuthLockPaths.delete(path);
           break;
         } catch (error) {
-          if (attempt === 2) swallow("codex: oauth lock cleanup", error);
+          if (attempt === 2) cleanupError = error;
         }
       }
-      closeSync(lock.fd);
-      heldOAuthLockPaths.delete(path);
+      try {
+        closeSync(lock.fd);
+      } catch (error) {
+        cleanupError ??= error;
+      }
+      if (!cleanupError) heldOAuthLockPaths.delete(path);
     }
   }
+  if (cleanupError) throw cleanupError;
+  return result;
 }
