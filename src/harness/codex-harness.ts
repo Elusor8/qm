@@ -720,15 +720,20 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         ): boolean => {
           for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
-              syncCodexOAuthAuthFile(
-                authPath,
-                childAuthPath,
-                heldLockPath,
-                expectedRefresh,
-                expectedAccess,
-                expectedSource,
-              );
-              return true;
+              if (
+                syncCodexOAuthAuthFile(
+                  authPath,
+                  childAuthPath,
+                  heldLockPath,
+                  expectedRefresh,
+                  expectedAccess,
+                  expectedSource,
+                )
+              )
+                return true;
+              if (attempt === 2)
+                swallow("codex: oauth auth persistence", new Error("Codex OAuth auth persistence refused"));
+              else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
             } catch (error) {
               if (attempt === 2) swallow("codex: oauth auth persistence", error);
               else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
@@ -1398,7 +1403,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           try {
             await transitionTask(opts.tasks, taskId, status, "failed", turn.runId ?? turn.session.id);
           } catch (error) {
-            swallow("codex: task cleanup", error);
+            cleanupErrors.push(error);
           }
         }
       }
@@ -1406,7 +1411,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         if (activeState === state) active.delete(activeThreadId);
       }
       if (runtimeCleanupRequested) await closeIdleRuntime();
-      await recordRequest();
+      void recordRequest();
     }
     if (cleanupErrors.length) throw cleanupErrors[0];
     if (!turnResult) throw new Error("Codex turn did not produce a result");

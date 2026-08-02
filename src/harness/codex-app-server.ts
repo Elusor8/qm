@@ -19,6 +19,7 @@ type JsonRpcMessage = {
 };
 
 type JsonRpcResultValidator<T> = (value: unknown) => value is T;
+const MAX_CANCELLED_REQUEST_IDS = 256;
 
 function isJsonRpcId(value: unknown): value is JsonRpcId {
   return (typeof value === "string" && value.length > 0) || (typeof value === "number" && Number.isFinite(value));
@@ -218,7 +219,12 @@ export class CodexAppServer {
     if (requestSignal) {
       const onAbort = () => {
         if (!this.pending.delete(id)) return;
-        this.cancelledRequestIds.add(id);
+        if (this.cancelledRequestIds.size >= MAX_CANCELLED_REQUEST_IDS) {
+          this.failAll(new CodexRpcError("Codex app-server exceeded its cancelled request limit"));
+          this.process.kill("SIGTERM");
+        } else {
+          this.cancelledRequestIds.add(id);
+        }
         rejectResult(new Error("Codex app-server request cancelled"));
       };
       requestSignal.addEventListener("abort", onAbort, { once: true });
