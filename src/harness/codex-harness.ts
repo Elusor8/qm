@@ -1486,24 +1486,33 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           const lock = activeAuthLock;
           let persistenceFailed = false;
           if (lock) {
-            if (lock.isHeld())
-              persistenceFailed = !(await current.persistAuth(
-                activeExpectedRefreshToken,
-                activeExpectedAccessToken,
-                lock.path,
-                activeExpectedSourceAuth,
-              ));
-            if (!persistenceFailed) {
-              await lock.release();
-              activeAuthLock = undefined;
-              activeExpectedRefreshToken = undefined;
-              activeExpectedAccessToken = undefined;
-              activeExpectedSourceAuth = undefined;
+            try {
+              if (
+                lock.isHeld() &&
+                !(await current.persistAuth(
+                  activeExpectedRefreshToken,
+                  activeExpectedAccessToken,
+                  lock.path,
+                  activeExpectedSourceAuth,
+                ))
+              )
+                persistenceFailed = true;
+            } catch {
+              persistenceFailed = true;
             }
+            try {
+              await lock.release();
+            } catch {
+              persistenceFailed = true;
+            }
+            activeAuthLock = undefined;
+            activeExpectedRefreshToken = undefined;
+            activeExpectedAccessToken = undefined;
+            activeExpectedSourceAuth = undefined;
           }
-          if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed");
           rmSync(current.jail, { recursive: true, force: true });
           if (runtime === current) runtime = null;
+          if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed");
         }
       },
       resetSession: () => {},
