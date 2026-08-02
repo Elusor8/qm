@@ -809,6 +809,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     };
     const wallMs = turn.turnWallClockMs ?? defaultTurnWallClockMs;
     const deadline = wallMs > 0 ? Date.now() + wallMs : 0;
+    const runtimeRecoveryDeadline = Date.now() + Math.max(wallMs, CODEX_START_TIMEOUT_MS);
     const setupCancelled = new Error("Codex setup cancelled");
     const setupTimedOut = new NonRetryableTurnError(`Codex turn exceeded ${Math.round(wallMs / 1000)}s wall clock`);
     let rejectSetup!: (error: Error) => void;
@@ -877,10 +878,12 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       }
       if (oauthConfigured && authPath && sourceAuth) {
         while (true) {
+          if (Date.now() >= runtimeRecoveryDeadline)
+            throw new NonRetryableTurnError("Codex OAuth runtime recovery timed out");
           const authLockPromise = acquireCodexOAuthAuthLock(
             authPath,
             AbortSignal.any([closeAbort.signal, authAcquireAbort.signal]),
-            Math.max(120_000, wallMs + 5_000),
+            Math.min(120_000, Math.max(1, runtimeRecoveryDeadline - Date.now())),
           );
           try {
             turnAuthLock = await awaitSetup(authLockPromise);
@@ -894,7 +897,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           if (runtime !== rt || rt.server.process.exitCode !== null) {
             await turnAuthLock.release();
             turnAuthLock = undefined;
-            rt = await awaitSetup(ensureRuntime());
+            rt = await awaitSetup(
+              ensureRuntime((release) => {
+                releaseStartupWaiter = release;
+              }),
+            );
             continue;
           }
           const currentAuth = readCodexOAuthAuthFile(authPath);
