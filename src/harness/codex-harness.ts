@@ -170,7 +170,7 @@ type Runtime = {
     expectedAccessToken?: string,
     heldLockPath?: string,
     expectedSourceAuth?: Record<string, unknown>,
-  ): void;
+  ): boolean;
 };
 type StartingRuntime = {
   promise: Promise<Runtime>;
@@ -592,7 +592,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
               const p = (params ?? {}) as Record<string, unknown>;
               const threadId = typeof p.threadId === "string" ? p.threadId : "";
               const state = active.get(threadId);
-              if (!state) return;
+              if (!state || state.server !== server) return;
               if (method === "thread/tokenUsage/updated") {
                 const totals = codexUsageTotals(p);
                 if (totals) state.usageByThread.set(threadId, totals);
@@ -644,7 +644,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
               const p = (params ?? {}) as Record<string, unknown>;
               const threadId = String(p.threadId ?? "");
               const state = active.get(threadId);
-              if (!state) throw new Error("inactive Codex thread");
+              if (!state || state.server !== server) throw new Error("inactive Codex thread");
               const name = String(p.tool ?? "");
               const callId = String(p.callId ?? "");
               if (threadId !== state.threadId && !codexChildToolAllowed(name))
@@ -682,6 +682,20 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           startingServer = server;
           if (startupAbort.signal.aborted) throw new Error("Codex app-server startup cancelled");
         } catch (error) {
+          if (authLock) {
+            try {
+              syncCodexOAuthAuthFile(
+                authPath,
+                join(jail, "codex-home", "auth.json"),
+                authLock.path,
+                expectedRefreshToken,
+                expectedAccessToken,
+                expectedSourceAuth,
+              );
+            } catch (persistenceError) {
+              swallow("codex: oauth auth persistence", persistenceError);
+            }
+          }
           await server?.close().catch(() => undefined);
           await authLock?.release();
           rmSync(jail, { recursive: true, force: true });
@@ -693,19 +707,24 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           expectedAccess = expectedAccessToken,
           heldLockPath?: string,
           expectedSource = expectedSourceAuth,
-        ) => {
-          try {
-            syncCodexOAuthAuthFile(
-              authPath,
-              childAuthPath,
-              heldLockPath,
-              expectedRefresh,
-              expectedAccess,
-              expectedSource,
-            );
-          } catch (error) {
-            swallow("codex: oauth auth persistence", error);
+        ): boolean => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              syncCodexOAuthAuthFile(
+                authPath,
+                childAuthPath,
+                heldLockPath,
+                expectedRefresh,
+                expectedAccess,
+                expectedSource,
+              );
+              return true;
+            } catch (error) {
+              if (attempt === 2) swallow("codex: oauth auth persistence", error);
+              else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+            }
           }
+          return false;
         };
         let startTimer: NodeJS.Timeout | undefined;
         try {
@@ -724,7 +743,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
               );
             }),
           ]);
-          if (authLock) persistAuth(expectedRefreshToken, expectedAccessToken, authLock.path, expectedSourceAuth);
+          if (authLock && !persistAuth(expectedRefreshToken, expectedAccessToken, authLock.path, expectedSourceAuth))
+            throw new Error("Codex OAuth auth persistence failed");
           await authLock?.release();
           authLock = undefined;
         } catch (error) {
@@ -754,8 +774,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           const lock = activeAuthLock;
           activeAuthLock = undefined;
           if (lock) {
-            if (lock.isHeld())
-              persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth);
+            if (
+              lock.isHeld() &&
+              !persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth)
+            )
+              swallow("codex: oauth auth persistence", new Error("Codex OAuth auth persistence failed"));
             void lock.release().catch((error) => swallow("codex: oauth lock release", error));
             activeExpectedRefreshToken = undefined;
             activeExpectedAccessToken = undefined;
@@ -871,7 +894,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       const lock = turnAuthLock;
       if (!lock) return;
       try {
-        if (lock.isHeld()) rt.persistAuth(expectedRefreshToken, expectedAccessToken, lock.path, expectedSourceAuth);
+        if (lock.isHeld() && !rt.persistAuth(expectedRefreshToken, expectedAccessToken, lock.path, expectedSourceAuth))
+          throw new NonRetryableTurnError("Codex OAuth auth persistence failed");
       } finally {
         if (activeAuthLock === lock) {
           activeAuthLock = undefined;
@@ -1221,8 +1245,28 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         : null;
     let timer: NodeJS.Timeout | undefined;
     try {
-      const response = await rt.server
-        .request<{ turn: CodexTurn }>("turn/start", { threadId, input, ...(model ? { model } : {}) }, isCodexTurnStart)
+      const turnStartAbort = new AbortController();
+      const turnStartSignals = [closeAbort.signal, turnStartAbort.signal];
+      if (turn.cancel) turnStartSignals.push(turn.cancel);
+      const turnStartTimeoutMs = deadline ? Math.max(1, deadline - Date.now()) : CODEX_START_TIMEOUT_MS;
+      let turnStartTimer: NodeJS.Timeout | undefined;
+      const response = await Promise.race([
+        rt.server.request<{ turn: CodexTurn }>(
+          "turn/start",
+          { threadId, input, ...(model ? { model } : {}) },
+          isCodexTurnStart,
+          AbortSignal.any(turnStartSignals),
+        ),
+        new Promise<never>((_, reject) => {
+          turnStartTimer = setTimeout(() => {
+            turnStartAbort.abort();
+            reject(new NonRetryableTurnError("Codex turn/start request timed out"));
+          }, turnStartTimeoutMs);
+        }),
+      ])
+        .finally(() => {
+          if (turnStartTimer) clearTimeout(turnStartTimer);
+        })
         .catch((error: unknown) => {
           throw error instanceof CodexRpcError ? codexProviderFailure(error.message) : error;
         });
@@ -1349,9 +1393,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           await current.server.close();
           const lock = activeAuthLock;
           activeAuthLock = undefined;
+          let persistenceFailed = false;
           if (lock) {
             if (lock.isHeld())
-              current.persistAuth(
+              persistenceFailed = !current.persistAuth(
                 activeExpectedRefreshToken,
                 activeExpectedAccessToken,
                 lock.path,
@@ -1362,6 +1407,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             activeExpectedAccessToken = undefined;
             activeExpectedSourceAuth = undefined;
           }
+          if (persistenceFailed) throw new Error("Codex OAuth auth persistence failed");
           rmSync(current.jail, { recursive: true, force: true });
           if (runtime === current) runtime = null;
         }
