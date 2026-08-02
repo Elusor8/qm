@@ -272,8 +272,10 @@ export async function acquireCodexOAuthAuthLock(
               heldOAuthLockPaths.delete(path);
               return;
             } catch (error) {
-              if (attempt === 2) throw error;
-              else await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+              if (attempt === 2) {
+                heldOAuthLockPaths.delete(path);
+                throw error;
+              } else await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
             }
           }
         },
@@ -431,7 +433,7 @@ export async function syncCodexOAuthAuthFile(
       } catch (error) {
         cleanupError ??= error;
       }
-      if (!cleanupError) heldOAuthLockPaths.delete(path);
+      heldOAuthLockPaths.delete(path);
     }
   }
   if (cleanupError) throw cleanupError;
