@@ -226,10 +226,15 @@ export async function acquireCodexOAuthAuthLock(
           if (released) return;
           released = true;
           await handle.close().catch(() => undefined);
-          try {
-            if (readFileSync(path, "utf8") === owner) unlinkSync(path);
-          } catch {
-            return;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              if (readFileSync(path, "utf8") !== owner) return;
+              unlinkSync(path);
+              return;
+            } catch (error) {
+              if (attempt === 2) swallow("codex: oauth lock release", error);
+              else await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+            }
           }
         },
       };
@@ -334,10 +339,15 @@ export function syncCodexOAuthAuthFile(
     writeJsonAtomically(sourcePath, next);
   } finally {
     if (lock !== undefined) {
-      try {
-        if (readFileSync(lockPath(sourcePath), "utf8") === lock.owner) unlinkSync(lockPath(sourcePath));
-      } catch (error) {
-        swallow("codex: oauth lock cleanup", error);
+      const path = lockPath(sourcePath);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          if (readFileSync(path, "utf8") !== lock.owner) break;
+          unlinkSync(path);
+          break;
+        } catch (error) {
+          if (attempt === 2) swallow("codex: oauth lock cleanup", error);
+        }
       }
       closeSync(lock.fd);
     }

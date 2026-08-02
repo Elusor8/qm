@@ -524,6 +524,9 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       const stale = runtime;
       runtime = null;
       runtimeCleanupRequested = false;
+      const lock = activeAuthLock;
+      if (lock?.isHeld())
+        stale.persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth);
       rmSync(stale.jail, { recursive: true, force: true });
     }
     let startup = starting;
