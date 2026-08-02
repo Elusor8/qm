@@ -5,10 +5,14 @@ export type { Pool, PoolClient };
 
 export type Rows = Record<string, unknown>[];
 
+export interface PgQueryOptions {
+  signal?: AbortSignal;
+}
+
 export interface PgPool {
   pool(): Promise<Pool>;
-  q(text: string, params?: unknown[]): Promise<Rows>;
-  query(text: string, params?: unknown[]): Promise<{ rows: Rows; rowCount: number }>;
+  q(text: string, params?: unknown[], options?: PgQueryOptions): Promise<Rows>;
+  query(text: string, params?: unknown[], options?: PgQueryOptions): Promise<{ rows: Rows; rowCount: number }>;
   schema?(schemaSql: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -78,12 +82,16 @@ export function createPgPool(connectionString: string, statements: string[]): Pg
     }
     return poolP;
   }
-  async function query(text: string, params: unknown[] = []): Promise<{ rows: Rows; rowCount: number }> {
-    const res = await (await pool()).query(text, params);
+  async function query(
+    text: string,
+    params: unknown[] = [],
+    options: PgQueryOptions = {},
+  ): Promise<{ rows: Rows; rowCount: number }> {
+    const res = await (await pool()).query({ text, values: params, ...options });
     return { rows: res.rows as Rows, rowCount: res.rowCount ?? 0 };
   }
-  async function q(text: string, params: unknown[] = []): Promise<Rows> {
-    return (await query(text, params)).rows;
+  async function q(text: string, params: unknown[] = [], options?: PgQueryOptions): Promise<Rows> {
+    return (await query(text, params, options)).rows;
   }
   async function close(): Promise<void> {
     if (poolP) await (await poolP).end();

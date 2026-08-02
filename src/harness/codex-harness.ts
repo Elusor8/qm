@@ -692,14 +692,17 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           let persistenceFailed = false;
           if (authLock) {
             try {
-              await syncCodexOAuthAuthFile(
-                authPath,
-                join(jail, "codex-home", "auth.json"),
-                authLock.path,
-                expectedRefreshToken,
-                expectedAccessToken,
-                expectedSourceAuth,
-              );
+              if (
+                !(await syncCodexOAuthAuthFile(
+                  authPath,
+                  join(jail, "codex-home", "auth.json"),
+                  authLock.path,
+                  expectedRefreshToken,
+                  expectedAccessToken,
+                  expectedSourceAuth,
+                ))
+              )
+                persistenceFailed = true;
             } catch (persistenceError) {
               persistenceFailed = true;
               swallow("codex: oauth auth persistence", persistenceError);
@@ -780,41 +783,46 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }
         runtime = { server, jail, persistAuth };
         runtimeCleanupRequested = false;
-        server.process.once("close", async () => {
-          const currentRuntime = runtime?.server === server;
-          let persistenceFailed = false;
-          const lock = currentRuntime ? activeAuthLock : undefined;
-          if (lock?.isHeld())
-            persistenceFailed = !(await persistAuth(
-              activeExpectedRefreshToken,
-              activeExpectedAccessToken,
-              lock.path,
-              activeExpectedSourceAuth,
-            ));
-          const closeError = persistenceFailed
-            ? new Error("Codex OAuth auth persistence failed", { cause: server.error() })
-            : (server.error() ?? new Error("Codex app-server exited during a turn"));
-          for (const [threadId, state] of active) {
-            if (state.server !== server) continue;
-            state.reject(closeError);
-            active.delete(threadId);
-          }
-          if (!currentRuntime) {
+        server.process.once("close", () => {
+          void (async () => {
+            const currentRuntime = runtime?.server === server;
+            let persistenceFailed = false;
+            const lock = currentRuntime ? activeAuthLock : undefined;
+            if (lock?.isHeld())
+              persistenceFailed = !(await persistAuth(
+                activeExpectedRefreshToken,
+                activeExpectedAccessToken,
+                lock.path,
+                activeExpectedSourceAuth,
+              ));
+            const closeError = persistenceFailed
+              ? new Error("Codex OAuth auth persistence failed", { cause: server.error() })
+              : (server.error() ?? new Error("Codex app-server exited during a turn"));
+            for (const [threadId, state] of active) {
+              if (state.server !== server) continue;
+              state.reject(closeError);
+              active.delete(threadId);
+            }
+            if (!currentRuntime) {
+              rmSync(jail, { recursive: true, force: true });
+              return;
+            }
+            runtime = null;
+            runtimeCleanupRequested = false;
+            if (closeAbort.signal.aborted) {
+              if (persistenceFailed) swallow("codex: oauth auth persistence", closeError);
+            } else if (lock) {
+              activeAuthLock = undefined;
+              void lock.release().catch((error) => swallow("codex: oauth lock release", error));
+              activeExpectedRefreshToken = undefined;
+              activeExpectedAccessToken = undefined;
+              activeExpectedSourceAuth = undefined;
+            }
+            if (!closeAbort.signal.aborted) rmSync(jail, { recursive: true, force: true });
+          })().catch((error) => {
+            swallow("codex: provider close cleanup", error);
             rmSync(jail, { recursive: true, force: true });
-            return;
-          }
-          runtime = null;
-          runtimeCleanupRequested = false;
-          if (closeAbort.signal.aborted) {
-            if (persistenceFailed) swallow("codex: oauth auth persistence", closeError);
-          } else if (lock) {
-            activeAuthLock = undefined;
-            void lock.release().catch((error) => swallow("codex: oauth lock release", error));
-            activeExpectedRefreshToken = undefined;
-            activeExpectedAccessToken = undefined;
-            activeExpectedSourceAuth = undefined;
-          }
-          if (!closeAbort.signal.aborted) rmSync(jail, { recursive: true, force: true });
+          });
         });
         return runtime;
       })();
@@ -966,7 +974,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             turnAuthLock = await awaitSetup(authLockPromise);
           } catch (error) {
             void authLockPromise.then(
-              (lock) => lock.release(),
+              (lock) => lock.release().catch((releaseError) => swallow("codex: oauth lock release", releaseError)),
               () => undefined,
             );
             throw error;
@@ -1211,22 +1219,29 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     const startedAt = Date.now();
     const recordRequest = async (): Promise<void> => {
       if (!turn.recordLlmRequest) return;
+      const recordAbort = new AbortController();
       let recordTimer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([
-          turn.recordLlmRequest({
-            turnSeq: userEntry.seq,
-            step: 0,
-            model: selectedModel,
-            request: requestPayload,
-            truncated: Boolean(turn.images?.length),
-            transport: { modelId: selectedModel },
-            ttftMs: state.firstOutputAt ? state.firstOutputAt - startedAt : null,
-            durationMs: Date.now() - startedAt,
-            usage: sumUsage(state.usageByThread),
-          }),
+          turn.recordLlmRequest(
+            {
+              turnSeq: userEntry.seq,
+              step: 0,
+              model: selectedModel,
+              request: requestPayload,
+              truncated: Boolean(turn.images?.length),
+              transport: { modelId: selectedModel },
+              ttftMs: state.firstOutputAt ? state.firstOutputAt - startedAt : null,
+              durationMs: Date.now() - startedAt,
+              usage: sumUsage(state.usageByThread),
+            },
+            recordAbort.signal,
+          ),
           new Promise<never>((_, reject) => {
-            recordTimer = setTimeout(() => reject(new Error("Codex llm request recording timed out")), 5_000);
+            recordTimer = setTimeout(() => {
+              recordAbort.abort();
+              reject(new Error("Codex llm request recording timed out"));
+            }, 5_000);
           }),
         ]);
       } catch (error) {
