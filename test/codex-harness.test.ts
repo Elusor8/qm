@@ -643,11 +643,10 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pers
   const liveLock = `${authFile}.lock`;
   writeFileSync(liveLock, String(process.pid));
   utimesSync(liveLock, new Date(0), new Date(0));
-  try {
-    assert.throws(() => syncCodexOAuthAuthFile(authFile, childAuthFile), /timed out acquiring/);
-  } finally {
-    unlinkSync(liveLock);
-  }
+  const recoveredLock = await acquireCodexOAuthAuthLock(authFile, undefined, 1_000);
+  assert.equal(recoveredLock.isHeld(), true);
+  await recoveredLock.release();
+  assert.equal(existsSync(liveLock), false);
   const liveLockSafe = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
   assert.equal((liveLockSafe.tokens as Record<string, unknown>).access_token, "access-newest");
 

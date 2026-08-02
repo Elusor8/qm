@@ -159,8 +159,10 @@ function removeStaleLock(path: string): boolean {
     contents = readFileSync(path, "utf8");
     const owner = Number(contents.trim().split(":", 1)[0]);
     if (Number.isInteger(owner) && owner > 0) {
-      if (owner === process.pid && !heldOAuthLockPaths.has(path)) return true;
-      if (processAlive(owner)) return false;
+      if (owner === process.pid && heldOAuthLockPaths.has(path)) return false;
+      if (owner === process.pid) {
+        if (Date.now() - statSync(path).mtimeMs <= 60_000) return false;
+      } else if (processAlive(owner)) return false;
     } else if (Date.now() - statSync(path).mtimeMs <= 60_000) return false;
   } catch {
     return true;
