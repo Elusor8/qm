@@ -27,14 +27,10 @@ function asObject(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
 }
 
-function codexOAuthJwtAccountId(value: unknown): string | undefined {
-  const auth = asObject(value);
-  const tokens = auth ? asObject(auth.tokens) : null;
-  if (typeof tokens?.id_token !== "string") return undefined;
+function codexOAuthJwtAccountIdFromToken(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.split(".").length !== 3) return undefined;
   try {
-    const payload = asObject(
-      JSON.parse(Buffer.from(tokens.id_token.split(".")[1] ?? "", "base64url").toString("utf8")),
-    );
+    const payload = asObject(JSON.parse(Buffer.from(value.split(".")[1] ?? "", "base64url").toString("utf8")));
     const claims = payload ? asObject(payload["https://api.openai.com/auth"]) : null;
     return typeof claims?.chatgpt_account_id === "string" && claims.chatgpt_account_id
       ? claims.chatgpt_account_id
@@ -42,6 +38,12 @@ function codexOAuthJwtAccountId(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function codexOAuthJwtAccountId(value: unknown): string | undefined {
+  const auth = asObject(value);
+  const tokens = auth ? asObject(auth.tokens) : null;
+  return codexOAuthJwtAccountIdFromToken(tokens?.id_token);
 }
 
 function readJsonFile(path: string): JsonObject | null {
@@ -322,6 +324,13 @@ export function syncCodexOAuthAuthFile(
       const childTokens = asObject(child.tokens);
       const sourceAccountId = codexOAuthJwtAccountId(source);
       const childAccountId = codexOAuthJwtAccountId(child);
+      const sourceDeclaredAccountId =
+        typeof sourceTokens?.account_id === "string" ? sourceTokens.account_id : undefined;
+      const childDeclaredAccountId = typeof childTokens?.account_id === "string" ? childTokens.account_id : undefined;
+      const sourceAccessToken = typeof sourceTokens?.access_token === "string" ? sourceTokens.access_token : undefined;
+      const childAccessToken = typeof childTokens?.access_token === "string" ? childTokens.access_token : undefined;
+      const sourceAccessAccountId = codexOAuthJwtAccountIdFromToken(sourceAccessToken);
+      const childAccessAccountId = codexOAuthJwtAccountIdFromToken(childAccessToken);
       if (
         !sourceTokens ||
         !childTokens ||
@@ -329,7 +338,13 @@ export function syncCodexOAuthAuthFile(
         typeof childTokens.id_token !== "string" ||
         sourceTokens.id_token !== childTokens.id_token ||
         !sourceAccountId ||
-        sourceAccountId !== childAccountId
+        sourceAccountId !== childAccountId ||
+        (sourceDeclaredAccountId && sourceDeclaredAccountId !== sourceAccountId) ||
+        (childDeclaredAccountId && childDeclaredAccountId !== sourceAccountId) ||
+        (sourceAccessAccountId && sourceAccessAccountId !== sourceAccountId) ||
+        (childAccessAccountId && childAccessAccountId !== sourceAccountId) ||
+        (sourceAccessToken?.split(".").length === 3 && sourceAccessAccountId !== sourceAccountId) ||
+        (childAccessToken?.split(".").length === 3 && childAccessAccountId !== sourceAccountId)
       )
         return false;
       if (expectedSourceAuth && JSON.stringify(source) !== JSON.stringify(expectedSourceAuth)) return false;

@@ -57,6 +57,10 @@ function oauthIdToken(accountId: string, marker = ""): string {
   return `header.${payload}.signature`;
 }
 
+function oauthAccessToken(accountId: string): string {
+  return oauthIdToken(accountId, "access");
+}
+
 test("Codex replay keeps paired tool ids within the provider's 64-character limit", () => {
   const longId = "tool-call-".repeat(9);
   const normalized = codexReplayCallId(longId);
@@ -823,6 +827,44 @@ test("Codex does not persist OAuth refreshes without a trusted account claim", (
   assert.equal(
     (JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>).access_token,
     "source-access",
+  );
+});
+
+test("Codex does not persist OAuth tokens for a different declared or access-token account", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-token-test-"));
+  const source = join(dir, "source.json");
+  const child = join(dir, "child.json");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(
+    source,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: oauthAccessToken("same"),
+        refresh_token: "source-refresh",
+        account_id: "same",
+        id_token: oauthIdToken("same"),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    child,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: oauthAccessToken("different"),
+        refresh_token: "child-refresh",
+        account_id: "different",
+        id_token: oauthIdToken("same"),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  assert.equal(syncCodexOAuthAuthFile(source, child), false);
+  assert.equal(
+    (JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>).refresh_token,
+    "source-refresh",
   );
 });
 
