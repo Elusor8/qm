@@ -524,9 +524,25 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       const stale = runtime;
       runtime = null;
       runtimeCleanupRequested = false;
+      const staleError = stale.server.error() ?? new Error("Codex app-server exited during a turn");
+      for (const [threadId, state] of active) {
+        if (state.server !== stale.server) continue;
+        state.reject(staleError);
+        active.delete(threadId);
+      }
       const lock = activeAuthLock;
-      if (lock?.isHeld())
-        stale.persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth);
+      if (lock) {
+        if (lock.isHeld())
+          stale.persistAuth(activeExpectedRefreshToken, activeExpectedAccessToken, lock.path, activeExpectedSourceAuth);
+        if (activeAuthLock === lock) {
+          activeAuthLock = undefined;
+          activeExpectedRefreshToken = undefined;
+          activeExpectedAccessToken = undefined;
+          activeExpectedSourceAuth = undefined;
+        }
+        await lock.release().catch((error) => swallow("codex: oauth lock release", error));
+      }
+      await stale.server.close().catch(() => undefined);
       rmSync(stale.jail, { recursive: true, force: true });
     }
     let startup = starting;

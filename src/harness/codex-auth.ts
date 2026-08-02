@@ -21,6 +21,7 @@ import { swallow } from "../util/errors.ts";
 type JsonObject = Record<string, unknown>;
 
 const CODEX_OAUTH_MODES = new Set(["chatgpt", "chatgptAuthTokens"]);
+const heldOAuthLockPaths = new Set<string>();
 
 function asObject(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
@@ -158,6 +159,7 @@ function removeStaleLock(path: string): boolean {
     contents = readFileSync(path, "utf8");
     const owner = Number(contents.trim().split(":", 1)[0]);
     if (Number.isInteger(owner) && owner > 0) {
+      if (owner === process.pid && !heldOAuthLockPaths.has(path)) return true;
       if (processAlive(owner)) return false;
     } else if (Date.now() - statSync(path).mtimeMs <= 60_000) return false;
   } catch {
@@ -202,6 +204,7 @@ export async function acquireCodexOAuthAuthLock(
       const owner = `${process.pid}:${randomBytes(8).toString("hex")}`;
       try {
         await handle.writeFile(owner);
+        heldOAuthLockPaths.add(path);
       } catch (error) {
         await handle.close().catch(() => undefined);
         try {
@@ -228,14 +231,19 @@ export async function acquireCodexOAuthAuthLock(
           await handle.close().catch(() => undefined);
           for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
-              if (readFileSync(path, "utf8") !== owner) return;
+              if (readFileSync(path, "utf8") !== owner) {
+                heldOAuthLockPaths.delete(path);
+                return;
+              }
               unlinkSync(path);
+              heldOAuthLockPaths.delete(path);
               return;
             } catch (error) {
               if (attempt === 2) swallow("codex: oauth lock release", error);
               else await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
             }
           }
+          heldOAuthLockPaths.delete(path);
         },
       };
     } catch (error) {
@@ -269,6 +277,7 @@ function lockFile(sourcePath: string): SyncLock {
       const owner = `${process.pid}:${randomBytes(8).toString("hex")}`;
       try {
         writeSync(fd, owner);
+        heldOAuthLockPaths.add(path);
       } catch (error) {
         closeSync(fd);
         try {
@@ -350,6 +359,7 @@ export function syncCodexOAuthAuthFile(
         }
       }
       closeSync(lock.fd);
+      heldOAuthLockPaths.delete(path);
     }
   }
 }
