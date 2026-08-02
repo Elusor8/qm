@@ -93,18 +93,36 @@ export function createPgPool(connectionString: string, statements: string[]): Pg
       return { rows: res.rows as Rows, rowCount: res.rowCount ?? 0 };
     }
     if (options.signal.aborted) throw new DOMException("Postgres query cancelled", "AbortError");
-    const client = await p.connect();
+    const connectPromise = p.connect();
+    let connectAbort: (() => void) | undefined;
+    const connectAbortPromise = new Promise<never>((_, reject) => {
+      connectAbort = () => reject(new DOMException("Postgres query cancelled", "AbortError"));
+      options.signal!.addEventListener("abort", connectAbort, { once: true });
+    });
+    let client: PoolClient;
+    try {
+      client = await Promise.race([connectPromise, connectAbortPromise]);
+    } catch (error) {
+      void connectPromise
+        .then(
+          (lateClient) => lateClient.release(error instanceof Error ? error : new Error(String(error))),
+          () => undefined,
+        )
+        .catch(() => undefined);
+      throw error;
+    } finally {
+      if (connectAbort) options.signal.removeEventListener("abort", connectAbort);
+    }
     let queryError: Error | undefined;
-    const cancellableClient = client as PoolClient & {
-      activeQuery?: object | null;
-      cancel?: (client: PoolClient, query: object) => void;
-    };
+    let released = false;
     const cancel = () => {
-      const activeQuery = cancellableClient.activeQuery;
-      if (activeQuery && cancellableClient.cancel) cancellableClient.cancel(client, activeQuery);
+      if (released) return;
+      released = true;
+      client.release(new Error("Postgres query cancelled"));
     };
     options.signal.addEventListener("abort", cancel, { once: true });
     try {
+      if (released) throw new Error("Postgres query cancelled");
       const res = await client.query({ text, values: params });
       return { rows: res.rows as Rows, rowCount: res.rowCount ?? 0 };
     } catch (error) {
@@ -112,7 +130,7 @@ export function createPgPool(connectionString: string, statements: string[]): Pg
       throw error;
     } finally {
       options.signal?.removeEventListener("abort", cancel);
-      client.release(queryError);
+      if (!released) client.release(queryError);
     }
   }
   async function q(text: string, params: unknown[] = [], options?: PgQueryOptions): Promise<Rows> {
