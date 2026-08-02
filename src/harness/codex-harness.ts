@@ -821,7 +821,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             if (!closeAbort.signal.aborted) rmSync(jail, { recursive: true, force: true });
           })().catch((error) => {
             swallow("codex: provider close cleanup", error);
-            rmSync(jail, { recursive: true, force: true });
+            try {
+              rmSync(jail, { recursive: true, force: true });
+            } catch (cleanupError) {
+              swallow("codex: provider close jail cleanup", cleanupError);
+            }
           });
         });
         return runtime;

@@ -87,8 +87,33 @@ export function createPgPool(connectionString: string, statements: string[]): Pg
     params: unknown[] = [],
     options: PgQueryOptions = {},
   ): Promise<{ rows: Rows; rowCount: number }> {
-    const res = await (await pool()).query({ text, values: params, ...options });
-    return { rows: res.rows as Rows, rowCount: res.rowCount ?? 0 };
+    const p = await pool();
+    if (!options.signal) {
+      const res = await p.query(text, params);
+      return { rows: res.rows as Rows, rowCount: res.rowCount ?? 0 };
+    }
+    if (options.signal.aborted) throw new DOMException("Postgres query cancelled", "AbortError");
+    const client = await p.connect();
+    let queryError: Error | undefined;
+    const cancellableClient = client as PoolClient & {
+      activeQuery?: object | null;
+      cancel?: (client: PoolClient, query: object) => void;
+    };
+    const cancel = () => {
+      const activeQuery = cancellableClient.activeQuery;
+      if (activeQuery && cancellableClient.cancel) cancellableClient.cancel(client, activeQuery);
+    };
+    options.signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const res = await client.query({ text, values: params });
+      return { rows: res.rows as Rows, rowCount: res.rowCount ?? 0 };
+    } catch (error) {
+      queryError = error instanceof Error ? error : new Error(String(error));
+      throw error;
+    } finally {
+      options.signal?.removeEventListener("abort", cancel);
+      client.release(queryError);
+    }
   }
   async function q(text: string, params: unknown[] = [], options?: PgQueryOptions): Promise<Rows> {
     return (await query(text, params, options)).rows;

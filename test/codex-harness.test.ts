@@ -1741,6 +1741,53 @@ test("Codex waits for the bounded durable llm record before completing a turn", 
   assert.ok(Date.now() - startedAt >= 45);
 });
 
+test("Codex aborts a durable llm record that exceeds its bound", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "qm-codex-telemetry-timeout-test-"));
+  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
+  const harness = createCodexHarness({
+    binaryPath: fakeCodexBinary(dir),
+    env: testHarnessEnv(dir),
+    turnWallClockMs: 12_000,
+  });
+  t.after(async () => {
+    await harness.turns.close?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  let aborted = false;
+  const result = await harness.turns.runTurn({
+    session: { id: "telemetry-timeout" } as Session,
+    input: "hi",
+    systemPrompt: "be concise",
+    history: [],
+    tools: {} as HarnessTurnInput["tools"],
+    scopeLabel: scope,
+    orgScopeId: scope,
+    emit: async (entry) =>
+      ({ ...entry, sessionId: "telemetry-timeout", seq: 1, createdAt: Date.now() }) as SessionEntry,
+    recordModelCall: () => {},
+    recordLlmRequest: async (_record, signal) => {
+      if (!signal) throw new Error("missing record cancellation signal");
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          aborted = true;
+          resolve();
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    },
+  });
+  assert.equal(result.reply, "hello");
+  assert.equal(aborted, true);
+});
+
 const realCodexBinary = (() => {
   try {
     return join(dirname(createRequire(import.meta.url).resolve("@openai/codex/package.json")), "bin/codex.js");
