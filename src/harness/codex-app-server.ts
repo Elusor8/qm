@@ -125,6 +125,7 @@ export class CodexAppServer {
     JsonRpcId,
     { resolve(value: unknown): void; reject(error: Error): void; validate?: JsonRpcResultValidator<unknown> }
   >();
+  private readonly cancelledRequestIds = new Set<JsonRpcId>();
   private writeTail = Promise.resolve();
   private eventTail = Promise.resolve();
   private stderr = "";
@@ -184,18 +185,44 @@ export class CodexAppServer {
     await this.notify("initialized");
   }
 
-  request(method: string, params?: unknown): Promise<unknown>;
-  request<T>(method: string, params: unknown, validate: JsonRpcResultValidator<T>): Promise<T>;
-  request<T>(method: string, params?: unknown, validate?: JsonRpcResultValidator<T>): Promise<unknown> {
+  request(method: string, params?: unknown, signal?: AbortSignal): Promise<unknown>;
+  request<T>(method: string, params: unknown, validate: JsonRpcResultValidator<T>, signal?: AbortSignal): Promise<T>;
+  request<T>(
+    method: string,
+    params?: unknown,
+    validateOrSignal?: JsonRpcResultValidator<T> | AbortSignal,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     if (this.closed) return Promise.reject(new Error("Codex app-server is closed"));
+    const validate = typeof validateOrSignal === "function" ? validateOrSignal : undefined;
+    const requestSignal: AbortSignal | undefined = validate
+      ? signal
+      : typeof validateOrSignal === "function"
+        ? undefined
+        : validateOrSignal;
+    if (requestSignal?.aborted) return Promise.reject(new Error("Codex app-server request cancelled"));
     const id = this.nextId++;
+    let rejectResult!: (error: Error) => void;
     const result = new Promise<unknown>((resolve, reject) => {
+      rejectResult = reject;
       this.pending.set(id, {
         resolve,
         reject,
         ...(validate ? { validate: validate as JsonRpcResultValidator<unknown> } : {}),
       });
     });
+    if (requestSignal) {
+      const onAbort = () => {
+        if (!this.pending.delete(id)) return;
+        this.cancelledRequestIds.add(id);
+        rejectResult(new Error("Codex app-server request cancelled"));
+      };
+      requestSignal.addEventListener("abort", onAbort, { once: true });
+      void result.then(
+        () => requestSignal.removeEventListener("abort", onAbort),
+        () => requestSignal.removeEventListener("abort", onAbort),
+      );
+    }
     void this.send({ id, method, ...(params === undefined ? {} : { params }) }).catch((error) => {
       const waiter = this.pending.get(id);
       this.pending.delete(id);
@@ -233,7 +260,10 @@ export class CodexAppServer {
     }
     if (message.id !== undefined && !message.method) {
       const waiter = this.pending.get(message.id);
-      if (!waiter) throw new CodexRpcError(`Codex app-server sent an unknown response id ${String(message.id)}`);
+      if (!waiter) {
+        if (this.cancelledRequestIds.delete(message.id)) return;
+        throw new CodexRpcError(`Codex app-server sent an unknown response id ${String(message.id)}`);
+      }
       this.pending.delete(message.id);
       if ("error" in message) {
         if (!message.error || typeof message.error !== "object") {
@@ -284,5 +314,6 @@ export class CodexAppServer {
   private failAll(error: Error): void {
     for (const waiter of this.pending.values()) waiter.reject(error);
     this.pending.clear();
+    this.cancelledRequestIds.clear();
   }
 }

@@ -518,7 +518,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     }
   };
 
-  const ensureRuntime = async (registerCancel?: (release: () => void) => void): Promise<Runtime> => {
+  const ensureRuntime = async (
+    registerCancel?: (release: () => void) => void,
+    startupDeadline = 0,
+  ): Promise<Runtime> => {
     if (runtime && runtime.server.process.exitCode === null) return runtime;
     if (runtime) {
       const stale = runtime;
@@ -547,9 +550,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     }
     let startup = starting;
     if (startup?.abort.signal.aborted) {
-      await startup.promise.catch(() => undefined);
       if (starting === startup) starting = null;
-      startup = starting;
+      startup = null;
     }
     if (!startup) {
       const startupAbort = new AbortController();
@@ -564,9 +566,13 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         try {
           if (oauthConfigured && !sourceAuth) throw new Error("Codex OAuth auth.json is unavailable");
           if (oauthConfigured && authPath && sourceAuth) {
+            const lockTimeout = startupDeadline
+              ? Math.min(120_000, Math.max(1, startupDeadline - Date.now()))
+              : 120_000;
             authLock = await acquireCodexOAuthAuthLock(
               authPath,
               AbortSignal.any([closeAbort.signal, startupAbort.signal]),
+              lockTimeout,
             );
             const currentAuth = readCodexOAuthAuthFile(authPath);
             expectedRefreshToken = codexOAuthRefreshToken(currentAuth);
@@ -703,12 +709,18 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         };
         let startTimer: NodeJS.Timeout | undefined;
         try {
+          const initializationTimeout = startupDeadline
+            ? Math.min(
+                opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS,
+                Math.max(1, startupDeadline - Date.now()),
+              )
+            : (opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS);
           await Promise.race([
             server.initialize(),
             new Promise<never>((_, reject) => {
               startTimer = setTimeout(
                 () => reject(new Error("Codex app-server initialization timed out")),
-                opts.appServerStartTimeoutMs ?? CODEX_START_TIMEOUT_MS,
+                initializationTimeout,
               );
             }),
           ]);
@@ -897,10 +909,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
           if (runtime !== rt || rt.server.process.exitCode !== null) {
             await turnAuthLock.release();
             turnAuthLock = undefined;
+            if (authAcquireAbort.signal.aborted) throw setupCancelled;
             rt = await awaitSetup(
               ensureRuntime((release) => {
                 releaseStartupWaiter = release;
-              }),
+              }, runtimeRecoveryDeadline),
             );
             continue;
           }
@@ -998,14 +1011,20 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     try {
       const requestTimeoutMs = deadline ? Math.max(1, deadline - Date.now()) : CODEX_START_TIMEOUT_MS;
       let requestTimer: NodeJS.Timeout | undefined;
+      const requestAbort = new AbortController();
       started = await awaitSetup(
         Promise.race([
-          rt.server.request("thread/start", threadStartRequest, isCodexThreadStart),
+          rt.server.request(
+            "thread/start",
+            threadStartRequest,
+            isCodexThreadStart,
+            AbortSignal.any([authAcquireAbort.signal, closeAbort.signal, requestAbort.signal]),
+          ),
           new Promise<never>((_, reject) => {
-            requestTimer = setTimeout(
-              () => reject(new NonRetryableTurnError("Codex thread/start request timed out")),
-              requestTimeoutMs,
-            );
+            requestTimer = setTimeout(() => {
+              requestAbort.abort();
+              reject(new NonRetryableTurnError("Codex thread/start request timed out"));
+            }, requestTimeoutMs);
           }),
         ]).finally(() => {
           if (requestTimer) clearTimeout(requestTimer);
