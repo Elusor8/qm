@@ -39,6 +39,13 @@ function tmpStore(): string {
   return store;
 }
 
+function oauthIdToken(accountId: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
+  ).toString("base64url");
+  return `header.${payload}.signature`;
+}
+
 function addSlot(store: string, n: number, extra = ""): void {
   writeFileSync(
     join(store, `pool${n}.env`),
@@ -228,7 +235,12 @@ test("env assembly precedence: caller > login shell > dev.env > worktree .env; h
     oauthAuthFile,
     JSON.stringify({
       auth_mode: "chatgpt",
-      tokens: { access_token: "access", refresh_token: "refresh", account_id: "account" },
+      tokens: {
+        access_token: "access",
+        refresh_token: "refresh",
+        account_id: "account",
+        id_token: oauthIdToken("account"),
+      },
     }),
   );
   chmodSync(oauthAuthFile, 0o600);
@@ -346,7 +358,12 @@ test("OpenCode config is strict, pinned, and inherits the Pi model", () => {
     authFile,
     JSON.stringify({
       auth_mode: "chatgpt",
-      tokens: { access_token: "access", refresh_token: "refresh", account_id: "account" },
+      tokens: {
+        access_token: "access",
+        refresh_token: "refresh",
+        account_id: "account",
+        id_token: oauthIdToken("account"),
+      },
     }),
   );
   chmodSync(authFile, 0o600);
