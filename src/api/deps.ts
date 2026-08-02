@@ -1,4 +1,4 @@
-import type { ModelProviderAvailability } from "../model/pi-models.ts";
+import type { ModelProvider, ModelProviderAvailability } from "../model/pi-models.ts";
 import type { ModelCredentialStore } from "../model/model-credential-store.ts";
 import type { ReplayDedupe } from "../auth/replay-dedupe.ts";
 import type { FetchLike, OAuthClientResolver } from "../connectors/oauth.ts";
@@ -83,6 +83,7 @@ export interface ServerDeps {
   modelCredentialFetch?: typeof fetch;
   brandingDefault?: { accent?: string; mark?: string; selfLabel?: string };
   harnessId?: string;
+  harnessCarriedModelAuth?: ModelProvider;
   admin?: AdminService;
   rateLimiter?: RateLimiter;
   sessions?: SessionStore;
