@@ -16,12 +16,15 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { swallow } from "../util/errors.ts";
 
 type JsonObject = Record<string, unknown>;
 
 const CODEX_OAUTH_MODES = new Set(["chatgpt", "chatgptAuthTokens"]);
 const heldOAuthLockPaths = new Set<string>();
+const CODEX_OAUTH_ISSUER = "https://auth.openai.com";
+const CODEX_OAUTH_JWKS = createRemoteJWKSet(new URL(`${CODEX_OAUTH_ISSUER}/.well-known/jwks.json`));
 
 function asObject(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
@@ -40,10 +43,36 @@ function codexOAuthJwtAccountIdFromToken(value: unknown): string | undefined {
   }
 }
 
+function isCodexOAuthJwt(value: unknown): boolean {
+  if (typeof value !== "string" || value.split(".").length !== 3) return false;
+  try {
+    const header = asObject(JSON.parse(Buffer.from(value.split(".")[0] ?? "", "base64url").toString("utf8")));
+    const payload = asObject(JSON.parse(Buffer.from(value.split(".")[1] ?? "", "base64url").toString("utf8")));
+    return header?.alg === "RS256" && payload?.iss === CODEX_OAUTH_ISSUER;
+  } catch {
+    return false;
+  }
+}
+
 function codexOAuthJwtAccountId(value: unknown): string | undefined {
   const auth = asObject(value);
   const tokens = auth ? asObject(auth.tokens) : null;
   return codexOAuthJwtAccountIdFromToken(tokens?.id_token);
+}
+
+async function verifiedCodexOAuthJwtAccountId(token: string): Promise<string | undefined> {
+  try {
+    const { payload } = await jwtVerify(token, CODEX_OAUTH_JWKS, {
+      issuer: CODEX_OAUTH_ISSUER,
+      algorithms: ["RS256"],
+    });
+    const claims = asObject(payload["https://api.openai.com/auth"]);
+    return typeof claims?.chatgpt_account_id === "string" && claims.chatgpt_account_id
+      ? claims.chatgpt_account_id
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function readJsonFile(path: string): JsonObject | null {
@@ -301,14 +330,14 @@ function lockFile(sourcePath: string): SyncLock {
   throw new Error("timed out acquiring the Codex OAuth auth lock");
 }
 
-export function syncCodexOAuthAuthFile(
+export async function syncCodexOAuthAuthFile(
   sourcePath: string | undefined,
   childPath: string,
   heldLockPath?: string,
   expectedRefreshToken?: string,
   expectedAccessToken?: string,
   expectedSourceAuth?: JsonObject,
-): boolean {
+): Promise<boolean> {
   if (!sourcePath) return true;
   const child = readCodexOAuthAuthFile(childPath);
   if (!child) return false;
@@ -316,7 +345,7 @@ export function syncCodexOAuthAuthFile(
   let result: boolean;
   let cleanupError: unknown;
   try {
-    result = (() => {
+    result = await (async () => {
       const source = readJsonFile(sourcePath);
       if (!source) return false;
       if (source.auth_mode !== child.auth_mode) return false;
@@ -336,12 +365,11 @@ export function syncCodexOAuthAuthFile(
         !childTokens ||
         typeof sourceTokens.id_token !== "string" ||
         typeof childTokens.id_token !== "string" ||
-        sourceTokens.id_token !== childTokens.id_token ||
         !sourceAccountId ||
         sourceAccountId !== childAccountId ||
         (sourceDeclaredAccountId && sourceDeclaredAccountId !== sourceAccountId) ||
         (childDeclaredAccountId && childDeclaredAccountId !== sourceAccountId) ||
-        (sourceAccessToken?.split(".").length === 3 && sourceAccessAccountId !== sourceAccountId)
+        (isCodexOAuthJwt(sourceAccessToken) && sourceAccessAccountId !== sourceAccountId)
       )
         return false;
       if (expectedSourceAuth && JSON.stringify(source) !== JSON.stringify(expectedSourceAuth)) return false;
@@ -349,10 +377,22 @@ export function syncCodexOAuthAuthFile(
       if (expectedAccessToken && codexOAuthAccessToken(source) !== expectedAccessToken) return false;
       const sourceRefreshToken = codexOAuthRefreshToken(source);
       const childRefreshToken = codexOAuthRefreshToken(child);
+      const refreshTokenChanged = childRefreshToken !== sourceRefreshToken;
+      const childIdTokenChanged = childTokens.id_token !== sourceTokens.id_token;
+      const verifiedChildIdAccount = childIdTokenChanged
+        ? await verifiedCodexOAuthJwtAccountId(childTokens.id_token)
+        : sourceAccountId;
+      if (childIdTokenChanged && verifiedChildIdAccount !== sourceAccountId) return false;
+      const childAccessTokenChanged = childAccessToken !== sourceAccessToken;
+      const verifiedChildAccessAccount =
+        childAccessTokenChanged && childAccessToken && isCodexOAuthJwt(childAccessToken)
+          ? await verifiedCodexOAuthJwtAccountId(childAccessToken)
+          : childAccessAccountId;
       const childAccessTokenBound =
         childAccessToken === sourceAccessToken ||
-        (childAccessToken?.split(".").length === 3 && childAccessAccountId === sourceAccountId);
+        (isCodexOAuthJwt(childAccessToken) && verifiedChildAccessAccount === sourceAccountId);
       const sanitized = sanitizedCodexOAuthAuth(child);
+      const persistChildTokens = !refreshTokenChanged;
       const next = {
         ...source,
         ...sanitized,
@@ -361,8 +401,9 @@ export function syncCodexOAuthAuthFile(
               tokens: {
                 ...sourceTokens,
                 ...childTokens,
-                access_token: childAccessTokenBound ? childAccessToken : sourceAccessToken,
-                refresh_token: childRefreshToken === sourceRefreshToken ? childRefreshToken : sourceRefreshToken,
+                access_token: persistChildTokens && childAccessTokenBound ? childAccessToken : sourceAccessToken,
+                refresh_token: sourceRefreshToken,
+                id_token: persistChildTokens ? childTokens.id_token : sourceTokens.id_token,
                 ...(typeof sourceTokens.account_id === "string" ? { account_id: sourceTokens.account_id } : {}),
               },
             }
