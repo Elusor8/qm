@@ -134,5 +134,5 @@ export async function ensureLocalPostgres(
     throw new Error(`createdb ${dbName} failed`);
   }
   log(`durability: using local Postgres container ${container} database ${dbName}`);
-  return { url: `postgres://postgres:${password}@127.0.0.1:${port}/${dbName}` };
+  return { url: `postgres://postgres:${encodeURIComponent(password)}@127.0.0.1:${port}/${dbName}` };
 }
