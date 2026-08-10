@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { shq } from "../util/shell.ts";
 import { swallowAs } from "../util/errors.ts";
 import { makeTar, parseTar } from "./tar.ts";
+import { DISPLACED_DIR_REL } from "../credentials/resident-paths.ts";
 
 import type {
   AgentComputerBackupArea,
@@ -83,13 +84,16 @@ function normalizeBackupRelPath(path: string): string {
   return parts.join("/");
 }
 
-function defaultExcludeAgentComputerBackup(
+export function defaultExcludeAgentComputerBackup(
   entry: Pick<AgentComputerBackupEntry, "area" | "path">,
   credentialPrefixes: readonly string[],
 ): boolean {
   const rel = normalizeBackupRelPath(entry.path);
   const parts = rel.split("/");
   if (entry.area === "home" && credentialPrefixes.some((pfx) => rel === pfx || rel.startsWith(`${pfx}/`))) return true;
+  // Credentials prep displaced out of the way are still credentials — they must not ride a backup
+  // into a published app just because they no longer sit at their canonical $HOME path.
+  if (entry.area === "home" && parts[0] === DISPLACED_DIR_REL) return true;
   return (
     parts.includes(".aws") ||
     parts.includes("__pycache__") ||
@@ -148,6 +152,10 @@ export function createExecBackup({
                 "-path './venv/*'",
                 `-path './${WORKSPACE_BASENAME}'`,
                 `-path './${WORKSPACE_BASENAME}/*'`,
+                // Displaced credentials are excluded from the archive anyway; pruning them at the
+                // find keeps their plaintext out of the tar and out of core's memory entirely.
+                `-path './${DISPLACED_DIR_REL}'`,
+                `-path './${DISPLACED_DIR_REL}/*'`,
               ]
             : [];
         const contentCachePrunes = backupOpts.keepContentCaches

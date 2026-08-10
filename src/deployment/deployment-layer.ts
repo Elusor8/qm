@@ -1,3 +1,5 @@
+import { DISPLACED_DIR_REL } from "../credentials/resident-paths.ts";
+
 export type ApprovalDecision = "require_approval" | "deny";
 
 export interface ToolApproval {
@@ -129,6 +131,11 @@ export function parseToolDescriptor(raw: string, sourcePath: string): ToolDescri
     ) {
       throw new Error(
         `${sourcePath}: credential path ${JSON.stringify(path)} must be a $HOME-relative path with no traversal`,
+      );
+    }
+    if (segments[0] === DISPLACED_DIR_REL) {
+      throw new Error(
+        `${sourcePath}: credential path ${JSON.stringify(path)} is reserved — ${DISPLACED_DIR_REL} is where provision quarantines displaced $HOME state, and linking it would make it its own displacement target`,
       );
     }
     if (!segments[0]!.startsWith(".")) {

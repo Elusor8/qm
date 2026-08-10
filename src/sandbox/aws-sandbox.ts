@@ -22,7 +22,7 @@ import type {
   SandboxHandle,
   TeardownOptions,
 } from "./sandbox.ts";
-import { visibleNotInstalled, visibleTools } from "./sandbox.ts";
+import { execFailureDetail, visibleNotInstalled, visibleTools } from "./sandbox.ts";
 import {
   ephemeralCredLinkPaths,
   ephemeralCredLinkScript,
@@ -32,6 +32,7 @@ import {
 const HOME_DIR = "/root";
 const WORKSPACE_BASENAME = "workspace";
 const WORKSPACE_DIR = `${HOME_DIR}/${WORKSPACE_BASENAME}`;
+const PREP_TIMEOUT_SEC = 30;
 const HOME_TAR = "/tmp/agent-home.tar";
 const RO_LAYERS_TAR = ".ro-layers.tar";
 const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
@@ -378,9 +379,12 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
       const prepared = await execRaw(
         id,
         `mkdir -p ${shq(WORKSPACE_DIR)} && ${ephemeralCredLinkScript(HOME_DIR, credentialPaths)}`,
-        30,
+        PREP_TIMEOUT_SEC,
       );
-      if (prepared.code !== 0) throw new Error(`AWS sandbox credential setup failed: ${prepared.stderr.slice(0, 200)}`);
+      if (prepared.code !== 0)
+        throw new Error(
+          `AWS sandbox credential setup failed: ${execFailureDetail(prepared, PREP_TIMEOUT_SEC).slice(0, 200)}`,
+        );
 
       const env = provOpts?.env && Object.keys(provOpts.env).length ? provOpts.env : undefined;
       const handle: SandboxHandle = {

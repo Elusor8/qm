@@ -1,11 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, symlink, stat, readlink, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  symlink,
+  stat,
+  readlink,
+  readFile,
+  readdir,
+  utimes,
+  lstat,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { createExecBackup, defaultExcludeAgentComputerBackup } from "../src/sandbox/exec-file-ops.ts";
 import {
+  DISPLACED_DIR_REL,
   EPHEMERAL_CRED_DIR,
   credentialServiceForPath,
   ephemeralCredLinkPaths,
@@ -186,4 +200,186 @@ test("the heal never fires on a target that is already usable as a directory", a
 test(".config/glab is ephemeral-linked but NOT publish-captured (prod never baked glab creds into apps)", () => {
   assert.ok(!residentAuthPaths().includes(".config/glab"));
   assert.ok(EPHEMERAL_CRED_PATHS.some((link) => link.rel === ".config/glab" && link.kind === "dir"));
+});
+
+test("prep never emits a command that could delete $HOME or a credential bundle", () => {
+  const script = ephemeralCredLinkScript("/home/agent", [{ path: ".acmecli", kind: "directory" }]);
+  for (const doomed of ["/home/agent", "/home/agent/.config", "/home/agent/.aws", "/home/agent/.acmecli"]) {
+    assert.doesNotMatch(
+      script,
+      new RegExp(`rm -rf '${doomed}'(?!\\.)`),
+      `${doomed} must only ever be renamed aside, never removed`,
+    );
+  }
+});
+
+test("prep never copies bytes across the $HOME/ephemeral device boundary", () => {
+  const script = ephemeralCredLinkScript("/home/agent", [{ path: ".acmecli", kind: "directory" }]);
+  const crossDevice = [...script.matchAll(/mv (?!'\/tmp\/agent-creds)(\S+) '\/tmp\/agent-creds[^']*'/g)];
+  assert.deepEqual(
+    crossDevice.map((m) => m[0]),
+    [],
+    "a cross-device mv is a recursive copy that can outrun the prep timeout and never converge",
+  );
+});
+
+test("a stale file on $HOME itself is displaced, not deleted, and the box still comes up", async (t) => {
+  const { home, credDir } = await tempPair(t);
+  await writeFile(join(home, ".aws"), "squatter");
+
+  assert.equal(await runLinkScript(home, credDir), 0, "provision prep must not fail");
+  assert.equal(await readlink(join(home, ".aws")), join(credDir, ".aws"), "the ephemeral link is in place");
+  const quarantined = await readdir(join(home, DISPLACED_DIR_REL));
+  const aside = quarantined.find((name) => name.startsWith(".aws."));
+  assert.ok(aside, `the squatter was displaced into ${DISPLACED_DIR_REL}, got ${quarantined.join(", ")}`);
+  assert.equal(
+    await readFile(join(home, DISPLACED_DIR_REL, aside), "utf8"),
+    "squatter",
+    "displaced state is preserved on its own device",
+  );
+});
+
+test("displaced credentials are quarantined out of $HOME's backup surface", () => {
+  const exclude = (path: string): boolean =>
+    defaultExcludeAgentComputerBackup(
+      { area: "home", path },
+      EPHEMERAL_CRED_PATHS.map((link) => link.rel),
+    );
+  assert.ok(exclude(`${DISPLACED_DIR_REL}/.config/gcloud/credentials.db`), "displaced bundles never reach a backup");
+  assert.ok(exclude(`${DISPLACED_DIR_REL}/.netrc.1234`), "nor displaced single-file credentials");
+  assert.ok(!exclude(".bashrc"), "ordinary home files still back up");
+});
+
+test("displaced credentials cannot be rescanned as a bogus credential service", () => {
+  const script = ephemeralCredLinkScript("/home/agent");
+  // Capture globs $HOME/.config/*/ — an aside beside its original would be picked up as a service
+  // literally named "gcloud.displaced" and re-materialized onto every future box forever.
+  assert.doesNotMatch(script, /'\/home\/agent\/\.config\/[a-z]+\.[a-z-]+'/);
+  for (const m of script.matchAll(/mv '\/home\/agent\/([^']+)' '([^']+)'/g)) {
+    // The quarantine root is the one path with nowhere inside itself to go; it heals in place.
+    if (m[1] === DISPLACED_DIR_REL) continue;
+    assert.match(m[2]!, new RegExp(`^/home/agent/${DISPLACED_DIR_REL}/`), `${m[1]} must be displaced into quarantine`);
+  }
+});
+
+test("concurrent preps on one box both succeed and neither destroys the other's displaced state", async (t) => {
+  const { home, credDir } = await tempPair(t);
+  await writeFile(join(home, ".aws"), "squatter");
+
+  // provision() runs per tool call on a multi-instance core with no lock, so two preps racing onto
+  // one aside name is routine: the loser used to fail the && chain and delete the winner's bundle.
+  const codes = await Promise.all([runLinkScript(home, credDir), runLinkScript(home, credDir)]);
+  assert.deepEqual(codes, [0, 0], "neither prep may deny the agent its computer");
+  assert.equal(await readlink(join(home, ".aws")), join(credDir, ".aws"));
+  const asides = (await readdir(join(home, DISPLACED_DIR_REL))).filter((n) => n.startsWith(".aws."));
+  assert.equal(asides.length, 1, "the one squatter is displaced exactly once");
+  assert.equal(await readFile(join(home, DISPLACED_DIR_REL, asides[0]!), "utf8"), "squatter");
+});
+
+test("a file squatting on the quarantine root does not brick the box", async (t) => {
+  const { home, credDir } = await tempPair(t);
+  await writeFile(join(home, DISPLACED_DIR_REL), "squatter");
+  await writeFile(join(home, ".aws"), "creds");
+
+  assert.equal(await runLinkScript(home, credDir), 0, "the quarantine root heals like everything else");
+  assert.equal(await readlink(join(home, ".aws")), join(credDir, ".aws"));
+  assert.ok((await stat(join(home, DISPLACED_DIR_REL))).isDirectory());
+  const displacedSquatter = (await readdir(home)).find((n) => n.startsWith(`${DISPLACED_DIR_REL}.`));
+  assert.ok(displacedSquatter, "and the squatter itself is displaced, not deleted");
+});
+
+test("repeated displacement of the same path does not overwrite an earlier bundle", async (t) => {
+  const { home, credDir } = await tempPair(t);
+  for (const generation of ["first", "second"]) {
+    await rm(join(home, ".netrc"), { force: true });
+    await writeFile(join(home, ".netrc"), generation);
+    assert.equal(await runLinkScript(home, credDir), 0);
+  }
+  const asides = (await readdir(join(home, DISPLACED_DIR_REL))).filter((n) => n.startsWith(".netrc."));
+  const contents = await Promise.all(asides.map((n) => readFile(join(home, DISPLACED_DIR_REL, n), "utf8")));
+  assert.deepEqual(contents.sort(), ["first", "second"], "a reused pid must not clobber the older aside");
+});
+
+test("quarantined credentials are pruned from the backup archive, not just filtered after it", async () => {
+  const scripts: string[] = [];
+  const backup = createExecBackup({
+    label: "test",
+    exec: async (_id, script) => {
+      scripts.push(script);
+      return { stdout: "", stderr: "", code: 0, timedOut: false };
+    },
+    readAbsBytes: async () => Buffer.alloc(0),
+    defaultHomeDir: "/home/agent",
+    ephemeralCredentialPrefixes: EPHEMERAL_CRED_PATHS.map((link) => link.rel),
+  });
+  await backup.backupComputer(
+    { id: "box", rootDir: "/home/agent/workspace", homeDir: "/home/agent" },
+    { include: ["home"] },
+  );
+  // Filtering after the fact still tars the plaintext and drags it through core's memory first.
+  assert.match(scripts.join("\n"), new RegExp(`-path '\\./${DISPLACED_DIR_REL}/\\*'`));
+});
+
+test("the quarantine sweep expires asides without deleting the quarantine itself", async (t) => {
+  const { home, credDir } = await tempPair(t);
+  const quarantine = join(home, DISPLACED_DIR_REL);
+  await mkdir(quarantine, { recursive: true });
+  await writeFile(join(quarantine, ".netrc.stale"), "expired");
+  await writeFile(join(quarantine, ".netrc.fresh"), "recent");
+  // `find DIR -maxdepth 1` matches DIR itself, so an old-enough box would sweep away every
+  // credential it had ever displaced along with the directory holding them.
+  const longAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+  await utimes(quarantine, longAgo, longAgo);
+  await utimes(join(quarantine, ".netrc.stale"), longAgo, longAgo);
+  await writeFile(join(home, ".netrc"), "squatter");
+
+  assert.equal(await runLinkScript(home, credDir), 0);
+  const remaining = await readdir(quarantine);
+  assert.ok(!remaining.includes(".netrc.stale"), "expired asides are swept");
+  assert.ok(remaining.includes(".netrc.fresh"), "recent asides survive");
+  assert.ok(
+    remaining.some((n) => n.startsWith(".netrc.") && n !== ".netrc.fresh"),
+    "and the aside just displaced is still there",
+  );
+});
+
+test("a symlinked quarantine root cannot walk displaced credentials out of quarantine", async (t) => {
+  const { home, credDir } = await tempPair(t);
+  // The agent has a shell on the box, so it can point the quarantine anywhere. Writing THROUGH the
+  // symlink would land plaintext credentials outside the one directory the backup prune and the
+  // capture glob know to skip — in the workspace, which backs up under a different area entirely.
+  const elsewhere = join(home, "workspace", "leak");
+  await mkdir(elsewhere, { recursive: true });
+  await symlink(elsewhere, join(home, DISPLACED_DIR_REL));
+  await writeFile(join(home, ".netrc"), "machine example.com password hunter2");
+
+  assert.equal(await runLinkScript(home, credDir), 0);
+  assert.deepEqual(await readdir(elsewhere), [], "nothing was written through the symlink");
+  assert.ok(!(await lstat(join(home, DISPLACED_DIR_REL))).isSymbolicLink(), "the symlink was displaced");
+  const quarantined = await readdir(join(home, DISPLACED_DIR_REL));
+  assert.ok(
+    quarantined.some((n) => n.startsWith(".netrc.")),
+    "and the credential landed in a real quarantine directory",
+  );
+});
+
+test("prep contains no deletion that can reach $HOME outside the quarantine", () => {
+  const home = "/home/agent";
+  const script = ephemeralCredLinkScript(home, [{ path: ".acmecli", kind: "directory" }]);
+  const quarantine = `${home}/${DISPLACED_DIR_REL}`;
+  const deletable = (path: string): boolean =>
+    path.startsWith(`${EPHEMERAL_CRED_DIR}/`) || path === EPHEMERAL_CRED_DIR || path.startsWith(`${quarantine}/`);
+
+  for (const m of script.matchAll(/rm -rf ('[^']+'|\S+)/g)) {
+    const arg = m[1]!.replace(/^'|'$/g, "");
+    if (arg === "{}") continue; // find's placeholder — checked below via its root and -mindepth
+    assert.ok(deletable(arg), `rm -rf ${arg} can reach $HOME outside the quarantine`);
+  }
+  // A `find … -exec rm` evades any check that only looks at literal rm arguments — which is how the
+  // sweep that deleted the whole quarantine slipped past this guard's first version.
+  for (const m of script.matchAll(/find ('[^']+'|\S+)([^;]*?)-exec rm[^;]*/g)) {
+    const root = m[1]!.replace(/^'|'$/g, "");
+    assert.ok(deletable(`${root}/`), `find -exec rm rooted at ${root} can reach $HOME`);
+    assert.match(m[2]!, /-mindepth 1\b/, `find -exec rm at ${root} would also delete its own root`);
+  }
 });

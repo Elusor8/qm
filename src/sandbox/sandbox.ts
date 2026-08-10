@@ -81,6 +81,14 @@ export interface ExecOptions {
   signal?: AbortSignal;
 }
 
+// A failing exec often says nothing on either stream — a timeout kills the script before it
+// writes, and a wedged guest filesystem blocks every command silently. Falling back to the exit
+// code keeps such a failure attributable instead of surfacing a bare "failed: ".
+export const execFailureDetail = (result: ExecResult, timeoutSec: number): string =>
+  result.stderr.trim() ||
+  result.stdout.trim() ||
+  (result.timedOut ? `timed out after ${timeoutSec}s with no output` : `exit ${result.code} with no output`);
+
 export type AgentComputerBackupArea = "workspace" | "home";
 
 export interface AgentComputerBackupEntry {

@@ -17,6 +17,7 @@ import { ephemeralCredLinkScript } from "../credentials/resident-paths.ts";
 import { ephemeralCredLinkPaths } from "../credentials/resident-paths.ts";
 import { shortHash } from "../util/crypto.ts";
 import { killableScript, killScript } from "./exec-kill.ts";
+import { execFailureDetail } from "./sandbox.ts";
 import type {
   AgentComputerProfile,
   ExecOptions,
@@ -35,6 +36,7 @@ const RO_LAYERS_TAR = ".ro-layers.tar";
 const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const FINGERPRINT_LABEL = "qm.sandbox-fingerprint";
 const BUILD_HINT = "run `npm run sandbox:local:build`";
+const PREP_TIMEOUT_SEC = 30;
 
 export type { DockerExec };
 
@@ -382,8 +384,15 @@ export function createLocalSandbox(workspace: WorkspaceStore, opts: LocalSandbox
       };
 
       try {
-        const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)} && ${ephemeralCredLinkScript(homeDir)}`, 30);
-        if (prep.code !== 0) throw new Error(`local sandbox provision prep failed: ${prep.stderr.slice(0, 200)}`);
+        const prep = await execRaw(
+          name,
+          `mkdir -p ${shq(workspaceDir)} && ${ephemeralCredLinkScript(homeDir)}`,
+          PREP_TIMEOUT_SEC,
+        );
+        if (prep.code !== 0)
+          throw new Error(
+            `local sandbox provision prep failed: ${execFailureDetail(prep, PREP_TIMEOUT_SEC).slice(0, 200)}`,
+          );
 
         await materializeRoLayers(
           workspace,

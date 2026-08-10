@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSpritesSandbox, spriteScopeName } from "../src/sandbox/sprites-sandbox.ts";
 import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
-import { supportsProcessSessions, supportsBlobStaging } from "../src/sandbox/sandbox.ts";
+import { execFailureDetail, supportsProcessSessions, supportsBlobStaging } from "../src/sandbox/sandbox.ts";
 import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.ts";
 import { scopeId } from "../src/types.ts";
 import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-token.ts";
@@ -255,6 +255,17 @@ test("stageIn pulls a blob into the guest atomically (temp then mv)", async () =
   assert.match(script, /-o .*\.part/, "downloads to a temp file");
   assert.match(script, /mv -f /, "and only then moves it into place");
   assert.match(script, /curl -fsS/, "-f so an HTTP error fails loudly instead of writing the error body");
+});
+
+test("a prep failure that writes nothing still names its cause", () => {
+  assert.equal(
+    execFailureDetail({ stdout: "", stderr: "", code: 124, timedOut: true }, 60),
+    "timed out after 60s with no output",
+    "a wedged guest filesystem kills the script before it can explain itself",
+  );
+  assert.equal(execFailureDetail({ stdout: "", stderr: "", code: 1, timedOut: false }, 60), "exit 1 with no output");
+  assert.equal(execFailureDetail({ stdout: "out", stderr: " boom\n", code: 1, timedOut: false }, 60), "boom");
+  assert.equal(execFailureDetail({ stdout: " out\n", stderr: "", code: 1, timedOut: false }, 60), "out");
 });
 
 test("restartComputer reboots the scope's sprite and heals a wedged exec channel", async () => {

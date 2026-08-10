@@ -23,7 +23,7 @@ import { CAPABILITY_HEADER } from "../api/contract.ts";
 import { ephemeralCredLinkPaths } from "../credentials/resident-paths.ts";
 import { shortHash } from "../util/crypto.ts";
 import { killableScript, killScript } from "./exec-kill.ts";
-import { visibleNotInstalled, visibleTools } from "./sandbox.ts";
+import { execFailureDetail, visibleNotInstalled, visibleTools } from "./sandbox.ts";
 import type {
   AgentComputerProfile,
   ExecOptions,
@@ -45,6 +45,7 @@ const RESTART_TIMEOUT_MS = 60_000;
 const CHECK_TIMEOUT_MS = 30_000;
 const GUEST_PROBE_TIMEOUT_SEC = 15;
 const DEFAULT_SPRITES_BASE_URL = "https://api.sprites.dev";
+const PREP_TIMEOUT_SEC = 60;
 
 export interface SpritesClientLike {
   getSprite(name: string): Promise<unknown>;
@@ -423,9 +424,9 @@ export function createSpritesSandbox(workspace: WorkspaceStore, opts: SpritesSan
       try {
         // Scratch boxes are credential-free and wiped at release; they don't get the links.
         const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(HOME_DIR, opts.credentialPaths ?? [])}`;
-        const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, 60);
+        const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
         if (prep.code !== 0)
-          throw new Error(`sprites provision prep failed: ${(prep.stderr || prep.stdout).slice(0, 200)}`);
+          throw new Error(`sprites provision prep failed: ${execFailureDetail(prep, PREP_TIMEOUT_SEC).slice(0, 200)}`);
 
         await materializeRoLayers(
           workspace,
