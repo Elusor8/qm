@@ -11692,7 +11692,9 @@
           root.appendChild(
             dataCard(
               "Attached scopes",
-              plural(attached.length, "scope") + " share this environment's computer and working memory.",
+              plural(attached.length, "scope") +
+                (attached.length === 1 ? " shares" : " share") +
+                " this environment's computer and working memory.",
               chips,
             ),
           );
