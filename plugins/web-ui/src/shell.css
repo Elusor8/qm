@@ -1031,6 +1031,8 @@ a.chat-row-open {
   outline-offset: 2px;
 }
 .chat-topbar {
+  position: relative;
+  z-index: 1;
   height: 56px;
   box-sizing: border-box;
   display: flex;
