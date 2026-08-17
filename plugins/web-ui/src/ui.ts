@@ -215,7 +215,7 @@ export function closeFormMenus(): boolean {
   return closed;
 }
 
-export function placeMenuPopover(menu: HTMLElement): void {
+function placeMenuPopover(menu: HTMLElement): void {
   const margin = 8;
   menu.style.transform = "";
   menu.classList.remove("drop-up");

@@ -18,7 +18,7 @@ function ensureEl(): HTMLDivElement {
   return tipEl;
 }
 
-export function showTooltip(target: Element, text: string): void {
+function showTooltip(target: Element, text: string): void {
   if (!text) return;
   anchor = target;
   const el = ensureEl();
@@ -69,7 +69,7 @@ export function attachTooltip(el: Element, text: string): void {
   el.addEventListener("click", binding.leave);
 }
 
-export function detachTooltip(el: Element): void {
+function detachTooltip(el: Element): void {
   const binding = attached.get(el);
   if (!binding) return;
   attached.delete(el);
