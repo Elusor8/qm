@@ -984,10 +984,7 @@ class PaneTab implements ITabRenderer {
         ${awaiting ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>` : nothing}
         ${
           background
-            ? html`<span
-                class="bg-chip"
-                aria-label=${background.label}
-                ${tip(background.label)}
+            ? html`<span class="bg-chip" aria-label=${background.label} ${tip(background.label)}
                 >${background.jobs > 0 ? icon(Cog, 11) : nothing}${
                   background.watches > 0 ? icon(Binoculars, 11) : nothing
                 }${background.crons > 0 ? icon(Clock3, 11) : nothing}</span

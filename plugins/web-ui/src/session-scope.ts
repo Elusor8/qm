@@ -112,8 +112,7 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
       ><span class="session-crumb-sep">/</span>`;
   })();
   const heading = html`
-    ${crumbTpl}
-    <span class="session-title">${o.title}</span>
+    ${crumbTpl} ${o.title ? html`<span class="session-title">${o.title}</span>` : nothing}
     ${
       o.fork
         ? html`<button
@@ -155,7 +154,9 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
           ? html`<button class="session-heading as-link" type="button" ${tip("Back to this chat")} @click=${o.onTitle}>
               ${heading}
             </button>`
-          : html`<div class="session-heading" ${tip(headingTitle)}>${heading}</div>`
+          : headingTitle
+            ? html`<div class="session-heading" ${tip(headingTitle)}>${heading}</div>`
+            : html`<div class="session-heading">${heading}</div>`
       }
       <div class="topbar-actions session-tools">
         ${tool("crons", Clock3, "Crons")} ${tool("files", Files, "Files")} ${tool("apps", Rocket, "Apps")}

@@ -285,11 +285,11 @@ export function renderList(): void {
         archived.length
           ? html`
               <button class="archived-toggle ${showArchived ? "open" : ""}" @click=${toggleShowArchived}>
-                ${icon(showArchived ? ChevronDown : ChevronRight, 14)} ${icon(Archive, 14)}
+                ${icon(showArchived ? ChevronDown : ChevronRight, 14)}
                 <span>Archived</span>
                 <span class="archived-count">${archived.length}</span>
               </button>
-              ${showArchived ? groupedRows(archivedItems) : nothing}
+              ${showArchived ? html`<div class="archived-children">${groupedRows(archivedItems)}</div>` : nothing}
             `
           : nothing
       }
@@ -396,12 +396,22 @@ function toggleRecentProject(scopeId: string): void {
   renderList();
 }
 
+export function startNewChat(scopeId: string | null, name: string | null): void {
+  closeSidebarOnNarrowView();
+  if (scopeId) sessionsState.collapsedProjectScopes.delete(scopeId);
+  if (addBlankPane(scopeId ?? undefined)) return;
+  addPendingSession(mainConversation().newChat(scopeId ? { scopeId, name } : undefined), scopeId, name);
+}
+
+export function startNewChatInLastScope(): void {
+  const mounted = mainConversation().state;
+  const scopeId = mounted.scopeId ?? visibleSessions().find((s) => !s.archived)?.scopeId ?? null;
+  startNewChat(scopeId, scopeId ? projectName(scopeId) : null);
+}
+
 function startProjectChat(event: Event, scopeId: string, name: string | null): void {
   event.stopPropagation();
-  closeSidebarOnNarrowView();
-  sessionsState.collapsedProjectScopes.delete(scopeId);
-  if (addBlankPane(scopeId)) return;
-  addPendingSession(mainConversation().newChat({ scopeId, name }), scopeId, name);
+  startNewChat(scopeId, name);
 }
 
 function projectMenuPopover(item: Extract<RecentItem, { kind: "project" }>): TemplateResult {
@@ -586,9 +596,7 @@ function sessionWorking(s: CoreSession): boolean {
 function statusMarks(s: CoreSession): TemplateResult {
   const ind = rowIndicators(s, liveThreads());
   return html`${ind.working ? html`<span class="working-dot" ${ref(syncWorkingPulse)} aria-label="Agent is working"></span>` : nothing}${
-    ind.awaiting
-      ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>`
-      : nothing
+    ind.awaiting ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>` : nothing
   }${
     ind.background
       ? html`<span

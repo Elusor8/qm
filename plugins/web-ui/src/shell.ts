@@ -19,7 +19,6 @@ import { ensureDeliveryStream, mainConversation, onExitCanvas } from "./conversa
 import { clearAllDrafts, saveDraft, storedDraft } from "./drafts";
 import { deepLinkPath, isPlainLeftClick, parseDeepLink, UI_BASE } from "./deep-link";
 import {
-  addBlankPane,
   adoptRemoteSplit,
   canvasToast,
   drawCanvas,
@@ -39,6 +38,7 @@ import {
   renderList,
   resetSessionsState,
   sessionsState,
+  startNewChatInLastScope,
   toggleWebOnly,
 } from "./sessions";
 import { openCronById, renderCronsPage, resetActiveCron, routeCronsHistory } from "./crons";
@@ -46,7 +46,6 @@ import { renderFiles } from "./files";
 import { setScopedSession } from "./session-scope";
 import { openChatSearch } from "./search";
 import { closeBrowse, openBrowse } from "./browse";
-import { closeNewChat, openNewChat } from "./new-chat";
 import { hideTooltip, tip } from "./tooltip";
 import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeychainState } from "./connectors";
 import { renderDeploys } from "./deploys";
@@ -147,7 +146,6 @@ export async function signOut(): Promise<void> {
   }
   appState.me = null;
   closeBrowse();
-  closeNewChat();
   clearAllDrafts();
   exitSplitIfActive();
   mainConversation().resetChatState();
@@ -460,9 +458,8 @@ export function renderSidebarTop(): void {
       <nav class="nav quick-nav" @click=${onNavClick}>
         ${navRow("chats", ICON.home, "Home")}
         ${actionRow(ICON.newChat, newChatLabel, () => {
-          closeSidebarOnNarrowView();
           hideTooltip();
-          if (!addBlankPane()) openNewChat();
+          startNewChatInLastScope();
         })}
         ${actionRow(Search, "Search", () => {
           hideTooltip();

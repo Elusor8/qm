@@ -609,7 +609,13 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
         <div class="project-dialog paste-dialog" role="dialog" aria-modal="true" aria-labelledby="paste-dialog-title">
           <div class="project-dialog-head">
             <div><h2 id="paste-dialog-title">Pasted text</h2></div>
-            <button class="chip-x" type="button" aria-label="Close" ${tip("Close")} @click=${() => closePasteView(agent)}>
+            <button
+              class="chip-x"
+              type="button"
+              aria-label="Close"
+              ${tip("Close")}
+              @click=${() => closePasteView(agent)}
+            >
               ${icon(X, 16)}
             </button>
           </div>
@@ -674,7 +680,13 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
 
   function sendControls(agent: Agent): TemplateResult {
     if (!agent.state.isStreaming) {
-      return html`<button class="send-btn" type="submit" aria-label="Send" ${tip("Send")} ?disabled=${!composerCanSend()}>
+      return html`<button
+        class="send-btn"
+        type="submit"
+        aria-label="Send"
+        ${tip("Send")}
+        ?disabled=${!composerCanSend()}
+      >
         ${icon(ArrowUp, 17)}
       </button>`;
     }

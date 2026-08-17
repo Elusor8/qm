@@ -119,6 +119,13 @@ interface SettledRowKey {
   tpl: TemplateResult | typeof nothing;
 }
 const settledRowCache = new WeakMap<object, SettledRowKey>();
+const CHAT_CTAS = [
+  "What can I help with?",
+  "Ahoy — what are we after?",
+  "What are we charting today?",
+  "Where shall we set sail?",
+  "What's the heading, captain?",
+];
 const connectedConnectors = new Set<string>();
 const redrawHooks = new Set<() => void>();
 let proactiveOpenerStarted = false;
@@ -190,6 +197,8 @@ export function createChatSurface(
     },
   });
 
+  let ctaThreadRef: string | null = null;
+  let ctaIndex = -1;
   let workTicker: ReturnType<typeof setInterval> | null = null;
   let revealedTailLen = 0;
   let liveWorkExpanded = false;
@@ -922,6 +931,14 @@ export function createChatSurface(
     `;
   }
 
+  function chatCta(): string {
+    if (chatState.threadRef !== ctaThreadRef) {
+      ctaThreadRef = chatState.threadRef;
+      ctaIndex = (ctaIndex + 1) % CHAT_CTAS.length;
+    }
+    return CHAT_CTAS[ctaIndex]!;
+  }
+
   function setTranscriptWindow(anchorSeq: number | null, earlierCount: number, hasEarlier = earlierCount > 0): void {
     chatState.transcriptAnchorSeq = hasEarlier ? anchorSeq : null;
     chatState.earlierCount = earlierCount;
@@ -1049,10 +1066,13 @@ export function createChatSurface(
     }
     const tier = ctx.density();
     const glanceTier = tier === "card" || tier === "strip" ? tier : null;
+    const emptyChat = !messages.length && !chatState.forkSession;
     render(
       html`
         <div
-          class="custom-chat-shell ${ctx.pane ? "in-pane" : ""} ${ctx.composer.state.dragging ? "dragging" : ""}"
+          class="custom-chat-shell ${ctx.pane ? "in-pane" : ""} ${ctx.composer.state.dragging ? "dragging" : ""} ${
+            emptyChat && !glanceTier ? "empty-chat" : ""
+          }"
           @dragenter=${(e: DragEvent) => ctx.composer.onDragEnter(e)}
           @dragover=${(e: DragEvent) => ctx.composer.onDragOver(e)}
           @dragleave=${(e: DragEvent) => ctx.composer.onDragLeave(e)}
@@ -1070,9 +1090,9 @@ export function createChatSurface(
             glanceTier
               ? paneGlance(agent, messages, glanceTier)
               : html`<section class="chat-scroll" @scroll=${onTranscriptScroll}>
-                  <div class="message-stack ${messages.length || chatState.forkSession ? "" : "empty-stack"}">
+                  <div class="message-stack ${emptyChat ? "empty-stack" : ""}">
                     ${inheritedHeader()} ${chatState.earlierCount > 0 ? earlierNotice(agent) : nothing}
-                    ${messageContent}
+                    ${messageContent} ${emptyChat ? html`<h1 class="chat-cta">${chatCta()}</h1>` : nothing}
                     ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}
                   </div>
                 </section>`
@@ -1134,7 +1154,7 @@ export function createChatSurface(
         ? s.id === chatState.sessionId
         : Boolean(chatState.threadRef) && s.threadRef === chatState.threadRef,
     );
-    const title = session?.title?.trim() || "New chat";
+    const title = session?.title?.trim() ?? "";
     const crumb = scope && !scope.startsWith("personal:") ? scopeTitle(scope, chatState.contextName) : null;
     const forkedFrom =
       chatState.forkSession && chatState.sessionId === chatState.forkSession.id
@@ -1156,7 +1176,7 @@ export function createChatSurface(
           scopeId: scope ?? "",
           sessionId: chatState.sessionId,
           threadRef: chatState.threadRef,
-          title,
+          title: title || "New chat",
           crumb,
         });
         if (scope && tool !== "memory") contextsState.selected = scope;

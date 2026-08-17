@@ -9,7 +9,7 @@ test("collapsed sidebar is an in-flow rail, not a floating button", () => {
   assert.doesNotMatch(shell, /sidebar-peek-toggle/);
   assert.doesNotMatch(css, /sidebar-peek-toggle/);
   assert.match(css, /--rail-w: 50px/);
-  assert.match(css, /\.layout\.sidebar-closed \.sidebar \{\s*width: var\(--rail-w\);\s*\}/);
+  assert.match(css, /\.layout\.sidebar-closed \.sidebar \{\s*width: var\(--rail-w\);\s*padding-right: 8px;\s*\}/);
   assert.match(css, /\.sidebar \{[^}]*transition: width 0\.18s ease;/);
   assert.match(css, /body\.resizing-sidebar \.sidebar \{\s*transition: none;/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.sidebar \{\s*transition: none;/);
