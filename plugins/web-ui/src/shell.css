@@ -421,7 +421,6 @@ a.chat-row-open {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12.5px;
-  font-weight: 600;
 }
 .recent-project-count,
 .archived-toggle .archived-count {
@@ -931,8 +930,6 @@ a.chat-row-open {
   cursor: pointer;
   font: inherit;
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
   text-align: left;
 }
 .archived-toggle:hover {
@@ -2630,12 +2627,9 @@ a.chat-row-open {
   width: 230px;
 }
 .menu-title {
-  padding: 6px 8px 5px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted-foreground);
+  padding: 7px 8px 6px;
+  font-size: 14px;
+  color: var(--foreground);
 }
 .menu-option {
   width: 100%;

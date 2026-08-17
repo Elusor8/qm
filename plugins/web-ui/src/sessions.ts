@@ -364,7 +364,7 @@ function recentItem(item: RecentItem): TemplateResult {
                   ${tip(PROJECT_OPTIONS_TOOLTIP)}
                   @click=${(e: Event) => toggleSessionMenu(e, menuKey)}
                 >
-                  ${icon(EllipsisVertical, 17)}
+                  ${icon(EllipsisVertical, 15)}
                 </button>
                 ${menuOpen ? projectMenuPopover(item) : nothing}
               </div>
@@ -375,7 +375,7 @@ function recentItem(item: RecentItem): TemplateResult {
                 ${tip(NEW_CHAT_TOOLTIP)}
                 @click=${(event: Event) => startProjectChat(event, item.scopeId, item.name)}
               >
-                ${icon(Plus, 14)}
+                ${icon(Plus, 15)}
               </button>
             </div>`
       }
@@ -861,7 +861,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
                 ${tip(CONVERSATION_OPTIONS_TOOLTIP)}
                 @click=${(e: Event) => toggleSessionMenu(e, s.id)}
               >
-                ${icon(EllipsisVertical, 17)}
+                ${icon(EllipsisVertical, 15)}
               </button>
               ${menuOpen ? sessionMenuPopover(s) : nothing}
             </div>`
