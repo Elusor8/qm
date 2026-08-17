@@ -21,9 +21,9 @@ import {
   Plus,
   RefreshCw,
   SquareTerminal,
-  User,
   Users,
   X,
+  type IconNode,
 } from "lucide";
 import {
   api,
@@ -311,11 +311,19 @@ export function renderList(): void {
   notifySessionsChanged();
 }
 
+const NEW_CHAT_TOOLTIP = "Start a new chat";
+const PROJECT_OPTIONS_TOOLTIP = "Project options";
+const CONVERSATION_OPTIONS_TOOLTIP = "Conversation options";
+
+function newChatHint(name: string): string {
+  return `Start a new chat in ${name}`;
+}
+
 function recentItem(item: RecentItem): TemplateResult {
   if (item.kind === "session") return sessionRow(item.session);
   const collapsed = sessionsState.collapsedProjectScopes.has(item.scopeId);
-  let glyph = Folder;
-  if (item.groupKind === "personal") glyph = User;
+  let glyph: IconNode | null = Folder;
+  if (item.groupKind === "personal") glyph = null;
   else if (item.groupKind === "channel") glyph = Hash;
   else if (item.groupKind === "group") glyph = Users;
   let fallbackName = "Project";
@@ -338,7 +346,10 @@ function recentItem(item: RecentItem): TemplateResult {
                 aria-controls=${childrenId}
                 @click=${() => toggleRecentProject(item.scopeId)}
               >
-                ${icon(collapsed ? ChevronRight : ChevronDown, 13)} ${icon(glyph, 14)}
+                <span class="recent-project-glyph">
+                  ${glyph && !collapsed ? html`<span class="glyph">${icon(glyph, 14)}</span>` : nothing}
+                  <span class="chev">${icon(collapsed ? ChevronRight : ChevronDown, 13)}</span>
+                </span>
                 <span class="recent-project-name">${name.replace(/^#/, "")}</span>
               </button>
               <div class="session-menu recent-project-menu ${menuOpen ? "menu-open" : ""}">
@@ -347,11 +358,17 @@ function recentItem(item: RecentItem): TemplateResult {
                   class="session-menu-btn"
                   data-menu-id=${menuKey}
                   type="button"
-                  title="Project options"
                   aria-label=${`Options for ${name}`}
                   aria-haspopup="menu"
                   aria-expanded=${menuOpen ? "true" : "false"}
-                  @click=${(e: Event) => toggleSessionMenu(e, menuKey)}
+                  @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, PROJECT_OPTIONS_TOOLTIP)}
+                  @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                  @focus=${(e: Event) => showTooltip(e.currentTarget as Element, PROJECT_OPTIONS_TOOLTIP)}
+                  @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                  @click=${(e: Event) => {
+                    hideTooltip();
+                    toggleSessionMenu(e, menuKey);
+                  }}
                 >
                   ${icon(EllipsisVertical, 17)}
                 </button>
@@ -360,9 +377,15 @@ function recentItem(item: RecentItem): TemplateResult {
               <button
                 class="recent-project-new-chat"
                 type="button"
-                aria-label=${`New chat in ${name}`}
-                title=${`New chat in ${name}`}
-                @click=${(event: Event) => startProjectChat(event, item.scopeId, item.name)}
+                aria-label=${newChatHint(name)}
+                @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, NEW_CHAT_TOOLTIP)}
+                @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                @focus=${(e: Event) => showTooltip(e.currentTarget as Element, NEW_CHAT_TOOLTIP)}
+                @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                @click=${(event: Event) => {
+                  hideTooltip();
+                  startProjectChat(event, item.scopeId, item.name);
+                }}
               >
                 ${icon(Plus, 14)}
               </button>
@@ -827,10 +850,14 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
               <button
                 class="session-menu-btn session-archive-btn"
                 type="button"
-                title=${s.archived ? "Unarchive" : "Archive"}
                 aria-label=${`${s.archived ? "Unarchive" : "Archive"} ${sessionTitle(s)}`}
+                @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, s.archived ? "Unarchive" : "Archive")}
+                @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                @focus=${(e: Event) => showTooltip(e.currentTarget as Element, s.archived ? "Unarchive" : "Archive")}
+                @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
                 @click=${(e: Event) => {
                   e.stopPropagation();
+                  hideTooltip();
                   setArchived(s, !s.archived);
                 }}
               >
@@ -840,10 +867,17 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
                 class="session-menu-btn"
                 data-menu-id=${s.id}
                 type="button"
-                title="Conversation options"
+                aria-label=${`Options for ${sessionTitle(s)}`}
                 aria-haspopup="menu"
                 aria-expanded=${menuOpen ? "true" : "false"}
-                @click=${(e: Event) => toggleSessionMenu(e, s.id)}
+                @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, CONVERSATION_OPTIONS_TOOLTIP)}
+                @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                @focus=${(e: Event) => showTooltip(e.currentTarget as Element, CONVERSATION_OPTIONS_TOOLTIP)}
+                @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                @click=${(e: Event) => {
+                  hideTooltip();
+                  toggleSessionMenu(e, s.id);
+                }}
               >
                 ${icon(EllipsisVertical, 17)}
               </button>

@@ -32,13 +32,9 @@ test("the collapsed rail keeps icon-only navigation instead of going empty", () 
   );
   assert.match(
     css,
-    /\.layout\.sidebar-closed #sidebar-top \.new-chat span,\s*\.layout\.sidebar-closed #sidebar-top \.navrow span,\s*\.layout\.sidebar-closed #sidebar-top \.nav-section-toggle,\s*\.layout\.sidebar-closed #sidebar-top \.section-label \{\s*display: none;/,
+    /\.layout\.sidebar-closed #sidebar-top \.navrow span,\s*\.layout\.sidebar-closed #sidebar-top \.section-label \{\s*display: none;/,
   );
-  assert.match(css, /\.layout\.sidebar-closed #sidebar-top \.nav-group\.collapsed \{[^}]*grid-template-rows: 1fr;/);
-  assert.match(
-    css,
-    /\.layout\.sidebar-closed #sidebar-top \.new-chat,\s*\.layout\.sidebar-closed #sidebar-top \.navrow \{\s*justify-content: center;/,
-  );
+  assert.match(css, /\.layout\.sidebar-closed #sidebar-top \.navrow \{\s*justify-content: center;/);
   // Icon-only rows need tooltips to carry their labels.
   assert.match(shell, /class="navrow[^`]*title=\$\{label\}/);
 });

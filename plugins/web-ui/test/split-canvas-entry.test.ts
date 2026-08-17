@@ -25,7 +25,12 @@ test("no new-chat affordance can cost the user their canvas", () => {
   assert.match(add, /return true;\n\}$/, "having split, the canvas owns the click");
   assert.doesNotMatch(add.slice(add.indexOf("splitPane(")), /return false/, "a full canvas must not fall through");
 
-  assert.match(shell, /if \(!addBlankPane\(\)\) mainConversation\(\)\.newChat\(\);/);
+  assert.match(
+    shell,
+    /if \(!addBlankPane\(\)\) openNewChat\(\);/,
+    "the canvas gets the sidebar click before the modal",
+  );
+  assert.match(fn(read("new-chat.ts"), "startChat"), /conv\.newChat\(\);/, "and the modal is what mounts the chat");
   const plus = fn(sessions, "startProjectChat");
   const claimed = plus.indexOf("addBlankPane(scopeId)");
   assert.ok(claimed > 0, "the project + must offer the click to the canvas");

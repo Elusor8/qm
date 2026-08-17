@@ -1,23 +1,5 @@
 import { html, nothing, render, type TemplateResult } from "lit";
-import {
-  ArrowLeft,
-  Box,
-  Brain,
-  ChevronDown,
-  Clock,
-  Files,
-  Folder,
-  KeyRound,
-  LogOut,
-  MessageSquare,
-  PanelLeft,
-  Plus,
-  RefreshCw,
-  Rocket,
-  Search,
-  ShieldCheck,
-  type IconNode,
-} from "lucide";
+import { ArrowLeft, House, LayoutGrid, LogOut, PanelLeft, Plus, RefreshCw, Search, type IconNode } from "lucide";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import {
   api,
@@ -62,14 +44,16 @@ import {
 import { openCronById, renderCronsPage, resetActiveCron, routeCronsHistory } from "./crons";
 import { renderFiles } from "./files";
 import { setScopedSession } from "./session-scope";
-import { openChatSearch, SEARCH_HOTKEY_LABEL } from "./search";
+import { openChatSearch } from "./search";
+import { closeBrowse, openBrowse } from "./browse";
+import { closeNewChat, openNewChat } from "./new-chat";
 import { hideTooltip, showTooltip } from "./tooltip";
 import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeychainState } from "./connectors";
 import { renderDeploys } from "./deploys";
 import { renderMemory, resetMemoryState } from "./memory";
 import { renderSkills } from "./skills";
 import { contextsState, ensureContexts, renderContexts, resetContextsState, resolveProjectScope } from "./contexts";
-import { appState, can, isView, type AuthMode, type Me, type View } from "./shell-state";
+import { appState, isView, type AuthMode, type Me, type View } from "./shell-state";
 import { trapDialogFocus } from "./dialog-focus";
 export { appState, can, type Me, type View } from "./shell-state";
 
@@ -146,42 +130,10 @@ function resetSidebarWidth(): void {
   localStorage.removeItem(SIDEBAR_W_KEY);
 }
 
-const NAV_WORKSPACE_KEY = "web-ui:nav-workspace";
-
-function loadNavOpen(key: string): boolean {
-  try {
-    return localStorage.getItem(key) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function saveNavOpen(key: string, open: boolean): void {
-  try {
-    localStorage.setItem(key, open ? "1" : "0");
-  } catch {
-    void 0;
-  }
-}
-
-let navWorkspaceOpen = loadNavOpen(NAV_WORKSPACE_KEY);
-
-function toggleNavWorkspace(): void {
-  navWorkspaceOpen = !navWorkspaceOpen;
-  saveNavOpen(NAV_WORKSPACE_KEY, navWorkspaceOpen);
-  renderSidebarTop();
-}
-
 const ICON = {
   newChat: Plus,
-  chats: MessageSquare,
-  contexts: Folder,
-  files: Files,
-  keychain: KeyRound,
-  deploys: Rocket,
-  crons: Clock,
-  memory: Brain,
-  skills: Box,
+  home: House,
+  browse: LayoutGrid,
 };
 
 export async function signOut(): Promise<void> {
@@ -194,6 +146,8 @@ export async function signOut(): Promise<void> {
     }
   }
   appState.me = null;
+  closeBrowse();
+  closeNewChat();
   clearAllDrafts();
   exitSplitIfActive();
   mainConversation().resetChatState();
@@ -434,9 +388,15 @@ export function mountShell(): void {
             <button
               class="icon-btn subtle sidebar-toggle sidebar-collapse-toggle"
               type="button"
-              title="Hide sidebar"
-              aria-label="Hide sidebar"
-              @click=${toggleSidebar}
+              aria-label=${sidebarToggleLabel()}
+              @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, sidebarToggleLabel())}
+              @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+              @focus=${(e: Event) => showTooltip(e.currentTarget as Element, sidebarToggleLabel())}
+              @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+              @click=${() => {
+                hideTooltip();
+                toggleSidebar();
+              }}
             >
               ${icon(PanelLeft, 17)}
             </button>
@@ -485,82 +445,42 @@ export function mountShell(): void {
 
 export function renderSidebarTop(): void {
   if (!appState.topEl) return;
+  const highlighted = (v: View) => v !== "chats" && appState.currentView === v;
   const navRow = (v: View, glyph: IconNode, label: string) =>
     html`<a
-      class="navrow ${appState.currentView === v ? "active" : ""}"
+      class="navrow ${highlighted(v) ? "active" : ""}"
       href=${deepLinkPath(UI_BASE, v, null)}
       data-view=${v}
       title=${label}
     >
       ${icon(glyph, 17)}<span>${label}</span>
     </a>`;
-  const navGroup = (id: string, title: string, open: boolean, toggle: () => void, rows: TemplateResult) => html`
-    <button
-      class="nav-section-toggle"
-      type="button"
-      aria-expanded=${open ? "true" : "false"}
-      aria-controls=${id}
-      title=${open ? `Hide ${title}` : `Show ${title}`}
-      @click=${toggle}
-    >
-      <span>${title}</span>
-      <span class="nav-section-chevron">${icon(ChevronDown, 14)}</span>
-    </button>
-    <div id=${id} class="nav-group ${open ? "" : "collapsed"}">
-      <div class="nav-group-inner">${rows}</div>
-    </div>
-  `;
+  const actionRow = (glyph: IconNode, label: string, run: () => void) =>
+    html`<button class="navrow" type="button" title=${label} @click=${run}>
+      ${icon(glyph, 17)}<span>${label}</span>
+    </button>`;
+  const newChatLabel = splitState.active ? "New session" : "Create New Chat";
   render(
     html`
-      <button
-        class="new-chat"
-        title=${splitState.active ? "New session" : "New chat"}
-        @click=${() => {
+      <nav class="nav quick-nav" @click=${onNavClick}>
+        ${navRow("chats", ICON.home, "Home")}
+        ${actionRow(ICON.newChat, newChatLabel, () => {
           closeSidebarOnNarrowView();
-          if (!addBlankPane()) mainConversation().newChat();
-        }}
-      >
-        ${icon(ICON.newChat, 17)}<span>${splitState.active ? "New session" : "New chat"}</span>
-      </button>
-      <nav class="nav" @click=${onNavClick}>
-        ${navGroup(
-          "nav-workspace",
-          "Browse",
-          navWorkspaceOpen,
-          toggleNavWorkspace,
-          html`
-            ${navRow("contexts", ICON.contexts, "Projects")} ${navRow("chats", ICON.chats, "Chats")}
-            ${navRow("files", ICON.files, "Files")} ${navRow("crons", ICON.crons, "Crons")}
-            ${navRow("keychain", ICON.keychain, "Keychain")} ${navRow("deploys", ICON.deploys, "Apps")}
-            ${navRow("memory", ICON.memory, "Memory")} ${navRow("skills", ICON.skills, "Skills")}
-            ${
-              can("admin")
-                ? html`<a class="navrow" href=${ADMIN_HOME_URL} title="Admin">
-                    ${icon(ShieldCheck, 17)}<span>Admin</span>
-                  </a>`
-                : nothing
-            }
-          `,
-        )}
+          hideTooltip();
+          if (!addBlankPane()) openNewChat();
+        })}
+        ${actionRow(Search, "Search", () => {
+          hideTooltip();
+          openChatSearch();
+        })}
+        ${actionRow(ICON.browse, "Browse", () => {
+          hideTooltip();
+          openBrowse();
+        })}
       </nav>
       ${html`
         <div class="section-label recents-label">
           <span>Sessions</span>
-          <button
-            class="chat-search-open"
-            type="button"
-            aria-label="Search your chats"
-            @click=${() => {
-              hideTooltip();
-              openChatSearch();
-            }}
-            @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, `Search your chats · ${SEARCH_HOTKEY_LABEL}`)}
-            @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-            @focus=${(e: Event) => showTooltip(e.currentTarget as Element, `Search your chats · ${SEARCH_HOTKEY_LABEL}`)}
-            @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-          >
-            ${icon(Search, 13)}
-          </button>
           <button
             class="web-only-toggle ${sessionsState.webOnly ? "on" : ""}"
             type="button"
@@ -726,11 +646,14 @@ function onSidebarKeydown(event: KeyboardEvent): void {
   trapDialogFocus(event, () => setSidebarOpen(false));
 }
 
+function sidebarToggleLabel(): string {
+  return sidebarOpen ? "Hide sidebar" : "Show sidebar";
+}
+
 function updateSidebarToggleLabels(): void {
-  const collapseLabel = sidebarOpen ? "Hide sidebar" : "Show sidebar";
+  const collapseLabel = sidebarToggleLabel();
   (appEl as HTMLElement).querySelectorAll<HTMLButtonElement>(".sidebar-toggle").forEach((btn) => {
     btn.setAttribute("aria-expanded", sidebarOpen ? "true" : "false");
-    btn.setAttribute("title", collapseLabel);
     btn.setAttribute("aria-label", collapseLabel);
   });
 }
