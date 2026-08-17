@@ -47,7 +47,7 @@ import { setScopedSession } from "./session-scope";
 import { openChatSearch } from "./search";
 import { closeBrowse, openBrowse } from "./browse";
 import { closeNewChat, openNewChat } from "./new-chat";
-import { hideTooltip, showTooltip } from "./tooltip";
+import { hideTooltip, tip } from "./tooltip";
 import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeychainState } from "./connectors";
 import { renderDeploys } from "./deploys";
 import { renderMemory, resetMemoryState } from "./memory";
@@ -389,14 +389,8 @@ export function mountShell(): void {
               class="icon-btn subtle sidebar-toggle sidebar-collapse-toggle"
               type="button"
               aria-label=${sidebarToggleLabel()}
-              @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, sidebarToggleLabel())}
-              @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-              @focus=${(e: Event) => showTooltip(e.currentTarget as Element, sidebarToggleLabel())}
-              @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-              @click=${() => {
-                hideTooltip();
-                toggleSidebar();
-              }}
+              ${tip(sidebarToggleLabel())}
+              @click=${toggleSidebar}
             >
               ${icon(PanelLeft, 17)}
             </button>
@@ -404,15 +398,15 @@ export function mountShell(): void {
           <div id="sidebar-top"></div>
           <div class="list" id="sidebar-body"></div>
           <div class="sidebar-footer">
-            <div class="user-pill" title=${appState.me?.user ?? ""}>
+            <div class="user-pill">
               <span class="avatar">${initials(appState.me?.user ?? "?")}</span>
               <span class="user-name">${appState.me?.user ?? ""}</span>
             </div>
-            <a class="icon-btn subtle" href=${ADMIN_HOME_URL} title="Back to admin" aria-label="Back to admin"
+            <a class="icon-btn subtle" href=${ADMIN_HOME_URL} aria-label="Back to admin" ${tip("Back to admin")}
               >${icon(ArrowLeft, 17)}</a
             >
-            <theme-toggle .includeSystem=${true} title="Color scheme: light / dark / system"></theme-toggle>
-            <button class="icon-btn subtle" title="Sign out" aria-label="Sign out" @click=${signOut}>
+            <theme-toggle .includeSystem=${true} ${tip("Color scheme: light / dark / system")}></theme-toggle>
+            <button class="icon-btn subtle" aria-label="Sign out" ${tip("Sign out")} @click=${signOut}>
               ${icon(LogOut, 17)}
             </button>
           </div>
@@ -423,7 +417,7 @@ export function mountShell(): void {
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize sidebar"
-          title="Drag to resize · double-click to reset"
+          ${tip("Drag to resize · double-click to reset")}
           @pointerdown=${startSidebarResize}
           @dblclick=${resetSidebarWidth}
         ></div>
@@ -451,12 +445,13 @@ export function renderSidebarTop(): void {
       class="navrow ${highlighted(v) ? "active" : ""}"
       href=${deepLinkPath(UI_BASE, v, null)}
       data-view=${v}
-      title=${label}
+      aria-label=${label}
+      ${tip(sidebarOpen ? "" : label)}
     >
       ${icon(glyph, 17)}<span>${label}</span>
     </a>`;
   const actionRow = (glyph: IconNode, label: string, run: () => void) =>
-    html`<button class="navrow" type="button" title=${label} @click=${run}>
+    html`<button class="navrow" type="button" aria-label=${label} ${tip(sidebarOpen ? "" : label)} @click=${run}>
       ${icon(glyph, 17)}<span>${label}</span>
     </button>`;
   const newChatLabel = splitState.active ? "New session" : "Create New Chat";
@@ -486,7 +481,7 @@ export function renderSidebarTop(): void {
             type="button"
             role="switch"
             aria-checked=${sessionsState.webOnly ? "true" : "false"}
-            title=${sessionsState.webOnly ? "Showing web chats only" : "Hide non-web conversations"}
+            ${tip(sessionsState.webOnly ? "Showing web chats only" : "Hide non-web conversations")}
             @click=${toggleWebOnly}
           >
             <span>Web only</span><span class="mini-switch"><span class="mini-knob"></span></span>
@@ -616,6 +611,7 @@ function setSidebarOpen(open: boolean, moveFocus = true): void {
   sidebarOpen = open;
   (appEl as HTMLElement).querySelector(".layout")?.classList.toggle("sidebar-closed", !sidebarOpen);
   updateSidebarToggleLabels();
+  renderSidebarTop();
   syncSidebarAccessibility(moveFocus);
 }
 
@@ -679,7 +675,7 @@ export function renderPane(
             class="pane-refresh"
             type="button"
             aria-label=${refreshLabel}
-            title=${refreshLabel}
+            ${tip(refreshLabel)}
             @click=${onRefresh}
           >
             ${icon(RefreshCw, 17)}

@@ -59,7 +59,7 @@ import {
   type RecentItem,
   type ChatBrowseStatus,
 } from "./session-list";
-import { hideTooltip, showTooltip } from "./tooltip";
+import { tip } from "./tooltip";
 import { errMessage } from "../../chassis/src/errors";
 import { copyText, fieldSelect, icon, relTime } from "./ui";
 import { listPageTpl } from "./list-page";
@@ -217,7 +217,7 @@ export function groupDmTitle(s: CoreSession): TemplateResult | string {
   if (s.type !== "group") return defaultSessionTitle(s);
   const label = groupDmLabel(s.channelName);
   if (!label) return defaultSessionTitle(s);
-  return html`<span class="group-dm-title" title=${label.text}>
+  return html`<span class="group-dm-title" ${tip(label.text)}>
     <span class="group-dm-count">${label.count}</span>
     <span class="group-dm-names">${label.text}</span>
   </span>`;
@@ -361,14 +361,8 @@ function recentItem(item: RecentItem): TemplateResult {
                   aria-label=${`Options for ${name}`}
                   aria-haspopup="menu"
                   aria-expanded=${menuOpen ? "true" : "false"}
-                  @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, PROJECT_OPTIONS_TOOLTIP)}
-                  @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                  @focus=${(e: Event) => showTooltip(e.currentTarget as Element, PROJECT_OPTIONS_TOOLTIP)}
-                  @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                  @click=${(e: Event) => {
-                    hideTooltip();
-                    toggleSessionMenu(e, menuKey);
-                  }}
+                  ${tip(PROJECT_OPTIONS_TOOLTIP)}
+                  @click=${(e: Event) => toggleSessionMenu(e, menuKey)}
                 >
                   ${icon(EllipsisVertical, 17)}
                 </button>
@@ -378,14 +372,8 @@ function recentItem(item: RecentItem): TemplateResult {
                 class="recent-project-new-chat"
                 type="button"
                 aria-label=${newChatHint(name)}
-                @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, NEW_CHAT_TOOLTIP)}
-                @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                @focus=${(e: Event) => showTooltip(e.currentTarget as Element, NEW_CHAT_TOOLTIP)}
-                @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                @click=${(event: Event) => {
-                  hideTooltip();
-                  startProjectChat(event, item.scopeId, item.name);
-                }}
+                ${tip(NEW_CHAT_TOOLTIP)}
+                @click=${(event: Event) => startProjectChat(event, item.scopeId, item.name)}
               >
                 ${icon(Plus, 14)}
               </button>
@@ -597,9 +585,9 @@ function sessionWorking(s: CoreSession): boolean {
 
 function statusMarks(s: CoreSession): TemplateResult {
   const ind = rowIndicators(s, liveThreads());
-  return html`${ind.working ? html`<span class="working-dot" ${ref(syncWorkingPulse)} title="Agent is working" aria-label="Agent is working"></span>` : nothing}${
+  return html`${ind.working ? html`<span class="working-dot" ${ref(syncWorkingPulse)} aria-label="Agent is working"></span>` : nothing}${
     ind.awaiting
-      ? html`<span class="awaiting-dot" title="Waiting for your reply" aria-label="Waiting for your reply"></span>`
+      ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>`
       : nothing
   }${
     ind.background
@@ -608,11 +596,7 @@ function statusMarks(s: CoreSession): TemplateResult {
           role="button"
           tabindex="0"
           aria-label="${ind.background.label} — click to inspect"
-          @mouseenter=${(e: Event) =>
-            showTooltip(e.currentTarget as Element, `${ind.background!.label} — click to inspect`)}
-          @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-          @focus=${(e: Event) => showTooltip(e.currentTarget as Element, `${ind.background!.label} — click to inspect`)}
-          @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+          ${tip(`${ind.background.label} — click to inspect`)}
           @click=${(e: Event) => openBackgroundInspector(e, s)}
           @keydown=${(e: KeyboardEvent) => (e.key === "Enter" || e.key === " ") && openBackgroundInspector(e, s)}
           >${ind.background.jobs > 0 ? icon(Cog, 11) : nothing}${
@@ -658,7 +642,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
         <span class="list-row-meta">
           ${scopeChip(s.scopeId, s.channelName ?? null)}
           ${surfaceOf(s) === "slack" ? html`<span class="surface surface-slack">${slackLogo(13)}</span>` : nothing}
-          ${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}
+          ${readOnly ? html`<span class="ro-lock" ${tip("Read-only")}>${icon(Lock, 12)}</span>` : nothing}
           <span class="list-row-date">${listWhen(activityOf(s))}</span>
         </span>
       </a>
@@ -668,7 +652,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
               <button
                 class="icon-btn"
                 type="button"
-                title="Copy link"
+                ${tip("Copy link")}
                 aria-label=${`Copy link to ${sessionTitle(s)}`}
                 @click=${() => void copyText(sessionLink(location.origin, UI_BASE, s.id))}
               >
@@ -677,7 +661,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
               <button
                 class="icon-btn"
                 type="button"
-                title=${s.pinned ? "Unpin" : "Pin"}
+                ${tip(s.pinned ? "Unpin" : "Pin")}
                 aria-label=${`${s.pinned ? "Unpin" : "Pin"} ${sessionTitle(s)}`}
                 @click=${() => {
                   setPinned(s, !s.pinned);
@@ -689,7 +673,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
               <button
                 class="icon-btn"
                 type="button"
-                title=${s.archived ? "Unarchive" : "Archive"}
+                ${tip(s.archived ? "Unarchive" : "Archive")}
                 aria-label=${`${s.archived ? "Unarchive" : "Archive"} ${sessionTitle(s)}`}
                 @click=${() => {
                   setArchived(s, !s.archived);
@@ -838,10 +822,10 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
         }}
       >
         <div class="title" aria-live="polite">
-          ${statusMarks(s)}${surfaceGlyph(s)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
+          ${statusMarks(s)}${surfaceGlyph(s)}${readOnly ? html`<span class="ro-lock" ${tip("Read-only")}>${icon(Lock, 12)}</span>` : nothing}<span
             class="tl"
             >${titleContent}</span
-          >${context ? html`<span class="row-context" title=${context}>${context}</span>` : nothing}
+          >${context ? html`<span class="row-context" ${tip(context)}>${context}</span>` : nothing}
         </div>
       </a>
       ${
@@ -851,13 +835,9 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
                 class="session-menu-btn session-archive-btn"
                 type="button"
                 aria-label=${`${s.archived ? "Unarchive" : "Archive"} ${sessionTitle(s)}`}
-                @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, s.archived ? "Unarchive" : "Archive")}
-                @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                @focus=${(e: Event) => showTooltip(e.currentTarget as Element, s.archived ? "Unarchive" : "Archive")}
-                @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                ${tip(s.archived ? "Unarchive" : "Archive")}
                 @click=${(e: Event) => {
                   e.stopPropagation();
-                  hideTooltip();
                   setArchived(s, !s.archived);
                 }}
               >
@@ -870,14 +850,8 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
                 aria-label=${`Options for ${sessionTitle(s)}`}
                 aria-haspopup="menu"
                 aria-expanded=${menuOpen ? "true" : "false"}
-                @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, CONVERSATION_OPTIONS_TOOLTIP)}
-                @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                @focus=${(e: Event) => showTooltip(e.currentTarget as Element, CONVERSATION_OPTIONS_TOOLTIP)}
-                @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                @click=${(e: Event) => {
-                  hideTooltip();
-                  toggleSessionMenu(e, s.id);
-                }}
+                ${tip(CONVERSATION_OPTIONS_TOOLTIP)}
+                @click=${(e: Event) => toggleSessionMenu(e, s.id)}
               >
                 ${icon(EllipsisVertical, 17)}
               </button>
@@ -958,14 +932,13 @@ function sessionColorRow(s: CoreSession): TemplateResult {
             class="color-swatch ${current === c ? "selected" : ""}"
             type="button"
             style=${`--swatch:${c}`}
-            title=${`Color row ${c}`}
             aria-label=${`Color row ${c}`}
             aria-pressed=${current === c ? "true" : "false"}
             @click=${() => setColor(s, current === c ? null : c)}
           ></button>
         `,
       )}
-      <label class="color-swatch custom ${current && !isPreset ? "selected" : ""}" title="Custom color (RGB picker)">
+      <label class="color-swatch custom ${current && !isPreset ? "selected" : ""}" ${tip("Custom color (RGB picker)")}>
         <input
           type="color"
           aria-label="Custom row color"
@@ -980,7 +953,7 @@ function sessionColorRow(s: CoreSession): TemplateResult {
           ? html`<button
               class="color-swatch clear"
               type="button"
-              title="Clear color"
+              ${tip("Clear color")}
               aria-label="Clear row color"
               @click=${() => setColor(s, null)}
             >

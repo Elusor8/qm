@@ -2,6 +2,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { Box, Brain, Clock3, Files, GitFork, KeyRound, Rocket } from "lucide";
 import { api } from "./core-bridge";
 import { icon } from "./ui";
+import { tip } from "./tooltip";
 
 /** A session's context carried into the crons/files/memory views so the whole
  * view stays scoped to that project and keeps the session top bar. */
@@ -101,7 +102,7 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
     return html`<button
         class="session-crumb as-link"
         type="button"
-        title="Open the ${o.crumb} project"
+        ${tip(`Open the ${o.crumb} project`)}
         @click=${(e: Event) => {
           e.stopPropagation();
           o.onCrumb!();
@@ -118,7 +119,7 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
         ? html`<button
             class="session-fork-badge"
             type="button"
-            title="Forked from ${o.fork.title}${o.fork.onClick ? " — open the original" : ""}"
+            ${tip(`Forked from ${o.fork.title}${o.fork.onClick ? " — open the original" : ""}`)}
             ?disabled=${!o.fork.onClick}
             @click=${(e: Event) => {
               e.stopPropagation();
@@ -151,10 +152,10 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
     <header class="chat-topbar session-topbar">
       ${
         o.onTitle
-          ? html`<button class="session-heading as-link" type="button" title="Back to this chat" @click=${o.onTitle}>
+          ? html`<button class="session-heading as-link" type="button" ${tip("Back to this chat")} @click=${o.onTitle}>
               ${heading}
             </button>`
-          : html`<div class="session-heading" title=${headingTitle}>${heading}</div>`
+          : html`<div class="session-heading" ${tip(headingTitle)}>${heading}</div>`
       }
       <div class="topbar-actions session-tools">
         ${tool("crons", Clock3, "Crons")} ${tool("files", Files, "Files")} ${tool("apps", Rocket, "Apps")}

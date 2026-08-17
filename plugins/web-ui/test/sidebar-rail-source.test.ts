@@ -36,7 +36,7 @@ test("the collapsed rail keeps icon-only navigation instead of going empty", () 
   );
   assert.match(css, /\.layout\.sidebar-closed #sidebar-top \.navrow \{\s*justify-content: center;/);
   // Icon-only rows need tooltips to carry their labels.
-  assert.match(shell, /class="navrow[^`]*title=\$\{label\}/);
+  assert.match(shell, /class="navrow[^`]*\$\{tip\(sidebarOpen \? "" : label\)\}/);
 });
 
 test("narrow viewports keep the rail in flow and size it for touch + safe area", () => {

@@ -100,6 +100,7 @@ import { backgroundLabel, clearWorking, conversationBackground, isAbandonedNewCh
 import { liveTurnThreadRef } from "./working-dot";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
 import { createForkOriginController, forkOriginView } from "./fork-origin";
+import { tip } from "./tooltip";
 
 installMarkdownSanitizer();
 
@@ -1003,7 +1004,7 @@ export function createChatSurface(
     const snippet = last ? messageText(last).trim() : "";
     if (tier === "strip") {
       return html`
-        <button type="button" class="pane-strip" title="Expand this pane" @click=${() => ctx.onExpand?.()}>
+        <button type="button" class="pane-strip" ${tip("Expand this pane")} @click=${() => ctx.onExpand?.()}>
           <span class="pane-strip-text">${now ?? snippet}</span>
           ${icon(Maximize2, 13)}
         </button>
@@ -1174,7 +1175,8 @@ export function createChatSurface(
         <div class="topbar-actions">
           <button
             class="icon-btn subtle"
-            title="Refresh conversations"
+            aria-label="Refresh conversations"
+            ${tip("Refresh conversations")}
             @click=${() => void refreshSessions({ refreshContexts: true })}
           >
             ${icon(RefreshCw, 17)}
@@ -1291,7 +1293,7 @@ export function createChatSurface(
             ? html`<button
                 class="msg-copy"
                 type="button"
-                title="Copy"
+                ${tip("Copy")}
                 aria-label="Copy message"
                 @click=${(e: Event) => void copyMessage(text, e.currentTarget as HTMLButtonElement)}
               >
@@ -1304,7 +1306,7 @@ export function createChatSurface(
             ? html`<button
                 class="msg-copy msg-fork"
                 type="button"
-                title="Fork conversation from here"
+                ${tip("Fork conversation from here")}
                 aria-label="Fork conversation from here"
                 @click=${() => void forkFromMessage(index)}
               >
@@ -1695,7 +1697,7 @@ export function createChatSurface(
           type="button"
           class="bg-activity-strip"
           aria-expanded=${String(bgPanel.open)}
-          title=${bgPanel.open ? "Hide background activity" : "Work continuing on the agent's computer — click to inspect"}
+          ${tip(bgPanel.open ? "Hide background activity" : "Work continuing on the agent's computer — click to inspect")}
           @click=${toggleBackgroundPanel}
         >
           ${icon(Activity, 13)}<span class="bg-activity-label">${label ?? "Background activity"}</span>
@@ -1732,7 +1734,7 @@ export function createChatSurface(
           type="button"
           class="bg-row-head"
           aria-expanded=${String(open)}
-          title=${open ? "Hide output" : "Show live output"}
+          ${tip(open ? "Hide output" : "Show live output")}
           @click=${() => toggleJobOutput(j.processId)}
         >
           ${icon(Terminal, 13)}
@@ -1798,7 +1800,7 @@ export function createChatSurface(
           class="live-work-line ${expandable ? "" : "static"}"
           ?disabled=${!expandable}
           aria-expanded=${expandable ? String(liveWorkExpanded) : nothing}
-          title=${title}
+          ${tip(title)}
           @click=${toggleLiveWorkExpanded}
         >
           ${summary ? html`<span class="tool-icon">${icon(summary.icon, 15)}</span>` : nothing}
@@ -1961,7 +1963,7 @@ export function createChatSurface(
       ${
         expanded
           ? html`<code class="approval-cmd approval-cmd-full">${a.command}</code>`
-          : html`<code class="approval-summary" title=${a.command}>${summary}</code>`
+          : html`<code class="approval-summary" ${tip(a.command)}>${summary}</code>`
       }
       ${
         a.matched
@@ -2189,10 +2191,10 @@ export function createChatSurface(
       if (src) {
         const img = html`<img src=${src} alt=${a.fileName} loading="lazy" />`;
         return artifactHref
-          ? html`<a class="file-image" href=${artifactHref} target="_blank" rel="noreferrer" title=${a.fileName}
+          ? html`<a class="file-image" href=${artifactHref} target="_blank" rel="noreferrer" ${tip(a.fileName)}
               >${img}</a
             >`
-          : html`<span class="file-image" title=${a.fileName}>${img}</span>`;
+          : html`<span class="file-image" ${tip(a.fileName)}>${img}</span>`;
       }
     }
     return fileChip(a.fileName, a.size, artifactHref);
@@ -2203,7 +2205,7 @@ export function createChatSurface(
     const href = withBase(`/api/files/${encodeURIComponent(file.artifactId)}/content`);
     if (file.mimetype?.startsWith("image/")) {
       if (!browserRenderableImage(file.mimetype)) return imageChip(file.name, file.sizeBytes, href);
-      return html`<a class="file-image" href=${href} target="_blank" rel="noreferrer" title=${file.name}
+      return html`<a class="file-image" href=${href} target="_blank" rel="noreferrer" ${tip(file.name)}
         ><img src=${href} alt=${file.name} loading="lazy"
       /></a>`;
     }
