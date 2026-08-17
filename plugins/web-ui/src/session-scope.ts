@@ -130,9 +130,6 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
         : nothing
     }
   `;
-  const headingTitle = o.crumb
-    ? `This chat runs in the ${o.crumb} context — the agent works with that context's files and memory, separate from your personal context.`
-    : o.title;
   const tool = (t: SessionTool, glyph: Parameters<typeof icon>[0], hint: string) => {
     const count = o.toolCount?.(t) ?? null;
     return html`
@@ -154,9 +151,7 @@ export function sessionTopbarTpl(o: SessionTopbarOpts): TemplateResult {
           ? html`<button class="session-heading as-link" type="button" ${tip("Back to this chat")} @click=${o.onTitle}>
               ${heading}
             </button>`
-          : headingTitle
-            ? html`<div class="session-heading" ${tip(headingTitle)}>${heading}</div>`
-            : html`<div class="session-heading">${heading}</div>`
+          : html`<div class="session-heading">${heading}</div>`
       }
       <div class="topbar-actions session-tools">
         ${tool("crons", Clock3, "Crons")} ${tool("files", Files, "Files")} ${tool("apps", Rocket, "Apps")}

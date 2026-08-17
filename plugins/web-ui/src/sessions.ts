@@ -61,7 +61,7 @@ import {
 } from "./session-list";
 import { tip } from "./tooltip";
 import { errMessage } from "../../chassis/src/errors";
-import { copyText, fieldSelect, icon, relTime } from "./ui";
+import { copyText, icon, relTime, selectMenu, workingWave } from "./ui";
 import { listPageTpl } from "./list-page";
 import {
   contextsState,
@@ -252,12 +252,27 @@ export function slackLogo(size = 13): TemplateResult {
   </svg>`;
 }
 
+const DESIGN_PREVIEW_THINKING_ROWS = 2;
+
+function withPreviewThinking(list: CoreSession[]): CoreSession[] {
+  if (DESIGN_PREVIEW_THINKING_ROWS < 1) return list;
+  const previewed = new Set(
+    [...list]
+      .filter((s) => !s.archived)
+      .sort((a, b) => activityOf(b) - activityOf(a))
+      .slice(0, DESIGN_PREVIEW_THINKING_ROWS)
+      .map((s) => s.threadRef),
+  );
+  return list.map((s) => (previewed.has(s.threadRef) ? { ...s, working: true } : s));
+}
+
 function visibleSessions(): CoreSession[] {
-  const sorted = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a));
+  const sorted = withPreviewThinking([...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a)));
   return sessionsState.webOnly ? sorted.filter((s) => surfaceOf(s) === "web") : sorted;
 }
 
 export function renderList(): void {
+  if (chatsPageShowing()) drawChatsPage();
   if (!appState.listEl) return;
   const visible = visibleSessions();
   const active = visible.filter((s) => !s.archived);
@@ -474,6 +489,10 @@ export async function renderChatsPage(): Promise<void> {
   if (appState.currentView === "chats") drawChatsPage();
 }
 
+function chatsPageShowing(): boolean {
+  return Boolean(chatsPageHost && appState.mainEl && chatsPageHost.parentElement === appState.mainEl);
+}
+
 export function drawChatsPage(): void {
   if (appState.currentView !== "chats" || !appState.mainEl || splitState.active) return;
   mainConversation().state.host = null;
@@ -483,7 +502,7 @@ export function drawChatsPage(): void {
     appState.mainEl.replaceChildren(chatsPageHost);
   }
   const q = chatsPageQuery.trim().toLowerCase();
-  const rows = [...sessionsState.list]
+  const rows = withPreviewThinking([...sessionsState.list])
     .filter((s) => chatBrowseStatusMatches(s, chatsPageStatus))
     .filter((s) => chatsPageSurface === "all" || surfaceOf(s) === chatsPageSurface)
     .filter((s) => (chatsPageScope ? s.scopeId === chatsPageScope : true))
@@ -539,21 +558,22 @@ export function drawChatsPage(): void {
               </button>`,
           )}
         </div>
-        <label class="list-select"
-          ><span>Surface</span>${fieldSelect({
-            compact: true,
+        <div class="list-select">
+          <span>Surface</span>
+          ${selectMenu({
+            ariaLabel: "Filter by surface",
             value: chatsPageSurface,
             onChange: (value) => {
               chatsPageSurface = value as typeof chatsPageSurface;
               drawChatsPage();
             },
             options: [
-              html`<option value="all">All surfaces</option>`,
-              html`<option value="web">Web</option>`,
-              html`<option value="slack">Slack</option>`,
+              { value: "all", label: "All surfaces" },
+              { value: "web", label: "Web" },
+              { value: "slack", label: "Slack" },
             ],
-          })}</label
-        >
+          })}
+        </div>
       </div>`,
       rows,
       empty,
@@ -568,11 +588,12 @@ function chatMatches(s: CoreSession, q: string): boolean {
 }
 
 export const syncWorkingPulse = (el?: Element): void => {
-  if (!(el instanceof HTMLElement)) return;
+  if (!(el instanceof Element)) return;
+  const running = (): Animation[] => el.getAnimations({ subtree: true });
   const pin = (): void => {
-    for (const a of el.getAnimations()) a.startTime = 0;
+    for (const a of running()) a.startTime = 0;
   };
-  if (el.getAnimations().length > 0) pin();
+  if (running().length > 0) pin();
   else requestAnimationFrame(pin);
 };
 
@@ -595,7 +616,7 @@ function sessionWorking(s: CoreSession): boolean {
 
 function statusMarks(s: CoreSession): TemplateResult {
   const ind = rowIndicators(s, liveThreads());
-  return html`${ind.working ? html`<span class="working-dot" ${ref(syncWorkingPulse)} aria-label="Agent is working"></span>` : nothing}${
+  return html`${ind.working ? html`<span class="working-mark" ${ref(syncWorkingPulse)}>${workingWave()}</span>` : nothing}${
     ind.awaiting ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>` : nothing
   }${
     ind.background
@@ -630,11 +651,10 @@ function isActiveRow(s: CoreSession): boolean {
 }
 
 function chatPageRow(s: CoreSession): TemplateResult {
-  const active = isActiveRow(s);
   const readOnly = !isContinuable(s, appState.me?.user ?? "");
   return html`
     <div
-      class="list-row chat-row ${active ? "active" : ""} ${s.color ? "colored" : ""}"
+      class="list-row chat-row ${s.color ? "colored" : ""}"
       style=${s.color ? `--session-color:${s.color}` : nothing}
     >
       <a
@@ -652,6 +672,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
           ${surfaceOf(s) === "slack" ? html`<span class="surface surface-slack">${slackLogo(13)}</span>` : nothing}
           ${readOnly ? html`<span class="ro-lock" ${tip("Read-only")}>${icon(Lock, 12)}</span>` : nothing}
           <span class="list-row-date">${listWhen(activityOf(s))}</span>
+          <span class="chat-row-arrow" aria-hidden="true">${icon(ChevronRight, 16)}</span>
         </span>
       </a>
       ${
@@ -664,7 +685,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
                 aria-label=${`Copy link to ${sessionTitle(s)}`}
                 @click=${() => void copyText(sessionLink(location.origin, UI_BASE, s.id))}
               >
-                ${icon(Link, 14)}
+                ${icon(Link, 13.5)}
               </button>
               <button
                 class="icon-btn"
@@ -676,7 +697,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
                   drawChatsPage();
                 }}
               >
-                ${s.pinned ? icon(PinOff, 14) : icon(Pin, 14)}
+                ${s.pinned ? icon(PinOff, 13.5) : icon(Pin, 13.5)}
               </button>
               <button
                 class="icon-btn"
@@ -688,7 +709,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
                   drawChatsPage();
                 }}
               >
-                ${s.archived ? icon(ArchiveRestore, 14) : icon(Archive, 14)}
+                ${s.archived ? icon(ArchiveRestore, 13.5) : icon(Archive, 13.5)}
               </button>
             </span>`
           : nothing
@@ -849,7 +870,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
                   setArchived(s, !s.archived);
                 }}
               >
-                ${s.archived ? icon(ArchiveRestore, 15) : icon(Archive, 15)}
+                ${s.archived ? icon(ArchiveRestore, 13.5) : icon(Archive, 13.5)}
               </button>
               <button
                 class="session-menu-btn"

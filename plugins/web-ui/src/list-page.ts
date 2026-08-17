@@ -11,6 +11,12 @@ export function listBackLink(label: string, onBack: () => void): TemplateResult 
   </button>`;
 }
 
+export function listRowsTpl(rows: TemplateResult[], className = ""): TemplateResult {
+  return html`<div class="list-rows ${className}">
+    ${rows.flatMap((row, i) => (i ? [html`<div class="list-divider" role="presentation"></div>`, row] : row))}
+  </div>`;
+}
+
 export interface ListPageOpts {
   title: string;
   scope?: string | null;
@@ -66,7 +72,6 @@ export function listPageTpl(o: ListPageOpts): TemplateResult {
           </label>`
         : nothing
     }
-    ${o.filters ?? nothing}
-    ${o.rows.length ? html`<div class="list-rows">${o.rows}</div>` : html`<div class="empty compact">${o.empty}</div>`}
+    ${o.filters ?? nothing} ${o.rows.length ? listRowsTpl(o.rows) : html`<div class="empty compact">${o.empty}</div>`}
   `;
 }

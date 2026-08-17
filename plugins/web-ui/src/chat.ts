@@ -81,7 +81,7 @@ import {
   harnessSupportsEffort,
   harnessSupportsFastMode,
 } from "./model-options";
-import { browserRenderableImage, formatBytes, icon, relTime } from "./ui";
+import { browserRenderableImage, formatBytes, icon, relTime, waveLoader } from "./ui";
 import { appState, renderSidebarTop, switchView, syncUrlFromState } from "./shell";
 import { contextsState, scopeTitle } from "./contexts";
 import { openProjectPage, scopeToolCount, sessionTopbarTpl, setScopedSession } from "./session-scope";
@@ -126,6 +126,19 @@ const CHAT_CTAS = [
   "Where shall we set sail?",
   "What's the heading, captain?",
 ];
+const CTA_INDEX_KEY = "web-ui:chat-cta";
+
+function nextChatCta(): string {
+  let index = 0;
+  try {
+    const stored = Number(localStorage.getItem(CTA_INDEX_KEY));
+    index = (Number.isInteger(stored) ? stored + 1 : 0) % CHAT_CTAS.length;
+    localStorage.setItem(CTA_INDEX_KEY, String(index));
+  } catch {
+    void 0;
+  }
+  return CHAT_CTAS[index]!;
+}
 const connectedConnectors = new Set<string>();
 const redrawHooks = new Set<() => void>();
 let proactiveOpenerStarted = false;
@@ -198,7 +211,7 @@ export function createChatSurface(
   });
 
   let ctaThreadRef: string | null = null;
-  let ctaIndex = -1;
+  let ctaText = CHAT_CTAS[0]!;
   let workTicker: ReturnType<typeof setInterval> | null = null;
   let revealedTailLen = 0;
   let liveWorkExpanded = false;
@@ -780,7 +793,7 @@ export function createChatSurface(
     host.className = "custom-chat";
     render(
       html`<div class="custom-chat-shell">
-        <div class="chat-loading"><span class="spinner"></span></div>
+        <div class="chat-loading">${waveLoader()}</div>
       </div>`,
       host,
     );
@@ -934,9 +947,9 @@ export function createChatSurface(
   function chatCta(): string {
     if (chatState.threadRef !== ctaThreadRef) {
       ctaThreadRef = chatState.threadRef;
-      ctaIndex = (ctaIndex + 1) % CHAT_CTAS.length;
+      ctaText = nextChatCta();
     }
-    return CHAT_CTAS[ctaIndex]!;
+    return ctaText;
   }
 
   function setTranscriptWindow(anchorSeq: number | null, earlierCount: number, hasEarlier = earlierCount > 0): void {
@@ -1508,7 +1521,9 @@ export function createChatSurface(
   }
 
   function typingRow(): TemplateResult {
-    return html`<div class="thinking-placeholder">${sheenLabel("Thinking", true)}</div>`;
+    return html`<div class="thinking-placeholder">
+      ${waveLoader({ width: 14.1, label: "Thinking" })}${sheenLabel("Thinking", true)}
+    </div>`;
   }
 
   function syncWorkTicker(): void {

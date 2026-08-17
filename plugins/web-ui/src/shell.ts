@@ -1,6 +1,5 @@
 import { html, nothing, render, type TemplateResult } from "lit";
-import { ArrowLeft, House, LayoutGrid, LogOut, PanelLeft, Plus, RefreshCw, Search, type IconNode } from "lucide";
-import "@mariozechner/mini-lit/dist/ThemeToggle.js";
+import { House, LayoutGrid, LogOut, PanelLeft, Plus, RefreshCw, Search, Settings, type IconNode } from "lucide";
 import {
   api,
   fetchRuntimeConfig,
@@ -12,7 +11,7 @@ import {
 } from "./core-bridge";
 import { applyRuntimeOptions } from "./model-options";
 import { errMessage, swallow } from "../../chassis/src/errors";
-import { brandMark, brandName, icon, initials } from "./ui";
+import { brandMark, brandName, icon } from "./ui";
 import { markConnectorConnected } from "./chat";
 import { clearSkillsCache, resyncModelSelection, seedRuntimeConfig } from "./composer";
 import { ensureDeliveryStream, mainConversation, onExitCanvas } from "./conversations";
@@ -51,6 +50,7 @@ import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeych
 import { renderDeploys } from "./deploys";
 import { renderMemory, resetMemoryState } from "./memory";
 import { renderSkills } from "./skills";
+import { applyTheme, renderSettings, watchSystemTheme } from "./settings";
 import { contextsState, ensureContexts, renderContexts, resetContextsState, resolveProjectScope } from "./contexts";
 import { appState, isView, type AuthMode, type Me, type View } from "./shell-state";
 import { trapDialogFocus } from "./dialog-focus";
@@ -58,6 +58,29 @@ export { appState, can, type Me, type View } from "./shell-state";
 
 let authMode: AuthMode = "portal";
 let shellMounted = false;
+let userMenuOpen = false;
+let footerEl: HTMLElement | null = null;
+
+applyTheme();
+watchSystemTheme();
+
+function toggleUserMenu(e: Event): void {
+  e.stopPropagation();
+  userMenuOpen = !userMenuOpen;
+  renderSidebarFooter();
+}
+
+export function closeUserMenu(): void {
+  if (!userMenuOpen) return;
+  userMenuOpen = false;
+  renderSidebarFooter();
+}
+
+function signOutFromMenu(): void {
+  userMenuOpen = false;
+  renderSidebarFooter();
+  void signOut();
+}
 
 setSigninRequiredHandler((detail) => {
   authMode = detail.mode ?? authMode;
@@ -395,19 +418,7 @@ export function mountShell(): void {
           </div>
           <div id="sidebar-top"></div>
           <div class="list" id="sidebar-body"></div>
-          <div class="sidebar-footer">
-            <div class="user-pill">
-              <span class="avatar">${initials(appState.me?.user ?? "?")}</span>
-              <span class="user-name">${appState.me?.user ?? ""}</span>
-            </div>
-            <a class="icon-btn subtle" href=${ADMIN_HOME_URL} aria-label="Back to admin" ${tip("Back to admin")}
-              >${icon(ArrowLeft, 17)}</a
-            >
-            <theme-toggle .includeSystem=${true} ${tip("Color scheme: light / dark / system")}></theme-toggle>
-            <button class="icon-btn subtle" aria-label="Sign out" ${tip("Sign out")} @click=${signOut}>
-              ${icon(LogOut, 17)}
-            </button>
-          </div>
+          <div class="sidebar-footer" id="sidebar-footer"></div>
         </aside>
         <button class="sidebar-scrim" type="button" aria-label="Close sidebar" @click=${toggleSidebar}></button>
         <div
@@ -429,10 +440,44 @@ export function mountShell(): void {
   appState.topEl = (appEl as HTMLElement).querySelector("#sidebar-top");
   appState.listEl = (appEl as HTMLElement).querySelector("#sidebar-body");
   appState.mainEl = (appEl as HTMLElement).querySelector("#main");
+  footerEl = (appEl as HTMLElement).querySelector("#sidebar-footer");
+  renderSidebarFooter();
   renderSidebarTop();
   updateSidebarToggleLabels();
   syncSidebarAccessibility(false);
   shellMounted = true;
+}
+
+export function renderSidebarFooter(): void {
+  if (!footerEl) return;
+  render(
+    html`
+      <div class="user-menu ${userMenuOpen ? "menu-open" : ""}">
+        <button
+          class="user-pill"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded=${userMenuOpen ? "true" : "false"}
+          @click=${toggleUserMenu}
+        >
+          <span class="user-name">${appState.me?.user ?? ""}</span>
+        </button>
+        ${
+          userMenuOpen
+            ? html`<div class="session-menu-popover user-menu-popover" role="menu">
+                <button class="session-menu-option" type="button" role="menuitem" @click=${signOutFromMenu}>
+                  ${icon(LogOut, 15)}<span>Sign out</span>
+                </button>
+              </div>`
+            : nothing
+        }
+      </div>
+      <button class="icon-btn subtle" aria-label="Settings" ${tip("Settings")} @click=${() => switchView("settings")}>
+        ${icon(Settings, 17)}
+      </button>
+    `,
+    footerEl,
+  );
 }
 
 export function renderSidebarTop(): void {
@@ -546,6 +591,9 @@ export function switchView(v: View): void {
     case "skills":
       void renderSkills();
       break;
+    case "settings":
+      renderSettings();
+      break;
   }
 }
 
@@ -576,6 +624,9 @@ function refreshActiveView(v: View): void {
       break;
     case "skills":
       void renderSkills();
+      break;
+    case "settings":
+      renderSettings();
       break;
   }
 }

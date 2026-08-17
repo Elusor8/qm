@@ -44,7 +44,7 @@ import {
 } from "./split-layout";
 import { preservingFocus } from "./pane-focus";
 import { attachTooltip, tip } from "./tooltip";
-import { icon } from "./ui";
+import { icon, workingWave } from "./ui";
 import { contextsState, scopeTitle } from "./contexts";
 import type { DensityTier } from "./density";
 import { appState } from "./shell-state";
@@ -980,7 +980,7 @@ class PaneTab implements ITabRenderer {
     attachTooltip(this.element, crumb ? `${crumb} / ${title}` : title);
     render(
       html`
-        ${working ? html`<span class="working-dot" ${ref(syncWorkingPulse)} aria-label="Agent is working"></span>` : nothing}
+        ${working ? html`<span class="working-mark" ${ref(syncWorkingPulse)}>${workingWave()}</span>` : nothing}
         ${awaiting ? html`<span class="awaiting-dot" aria-label="Waiting for your reply"></span>` : nothing}
         ${
           background

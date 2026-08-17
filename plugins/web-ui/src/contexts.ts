@@ -7,7 +7,6 @@ import {
   Folder,
   FolderPlus,
   Hash,
-  ListFilter,
   Lock,
   Plus,
   RefreshCw,
@@ -297,7 +296,7 @@ export function scopeFilterControl(current: string | null, onSelect: (scopeId: s
   return html`
     <div class="menu-control form-menu-control scope-filter">
       <button class="menu-button" type="button" aria-haspopup="menu" aria-expanded="false" @click=${toggleFormMenu}>
-        ${icon(ListFilter, 14)}<span class="menu-label">Filter by: ${label}</span>${icon(ChevronDown, 14)}
+        <span class="menu-label">Filter by: ${label}</span>${icon(ChevronDown, 14)}
       </button>
       <div class="menu-popover" role="menu" hidden>
         <div class="menu-title">Filter by context</div>
