@@ -535,30 +535,30 @@ export function createTurnHandler(deps: {
       const tDeliverStart = performance.now();
       let finalizedTaskList = false;
       try {
-      if (result.attachments?.length) {
-        let uploadError: unknown;
-        try {
-          await uploadAttachments(
-            client,
-            inc.channel,
-            replyThreadTs,
-            result.attachments,
-            fetchBlobFromCore,
-            fetchFileArtifactFromCore,
-          );
-        } catch (err) {
-          uploadError = err;
-          console.error("[slack-plugin] file upload failed:", (err as Error).message);
+        if (result.attachments?.length) {
+          let uploadError: unknown;
+          try {
+            await uploadAttachments(
+              client,
+              inc.channel,
+              replyThreadTs,
+              result.attachments,
+              fetchBlobFromCore,
+              fetchFileArtifactFromCore,
+            );
+          } catch (err) {
+            uploadError = err;
+            console.error("[slack-plugin] file upload failed:", (err as Error).message);
+          }
+          await settleAck();
+          if (postText) finalizedTaskList = (await taskList?.finalize(postText)) ?? false;
+          if (postText && !finalizedTaskList) await postReply(postText);
+          if (uploadError) await postReply(uploadFailureNote(uploadError));
+        } else {
+          await settleAck();
+          if (postText) finalizedTaskList = (await taskList?.finalize(postText)) ?? false;
+          if (postText && !finalizedTaskList) await postReply(postText);
         }
-        await settleAck();
-        if (postText) finalizedTaskList = (await taskList?.finalize(postText)) ?? false;
-        if (postText && !finalizedTaskList) await postReply(postText);
-        if (uploadError) await postReply(uploadFailureNote(uploadError));
-      } else {
-        await settleAck();
-        if (postText) finalizedTaskList = (await taskList?.finalize(postText)) ?? false;
-        if (postText && !finalizedTaskList) await postReply(postText);
-      }
       } catch (err) {
         // The run finished but the reply never reached Slack. Do NOT ack the run's recovery
         // delivery — release the pin so the delivery poller redelivers it after the grace period.

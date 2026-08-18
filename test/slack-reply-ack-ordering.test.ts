@@ -17,10 +17,18 @@ function fakeCore(pending: Map<string, { text: string }>, events: string[]) {
       pending.delete(`run:${runId}`);
     },
     async signalRunAbort() {},
-    async activeRunForThread() { return undefined; },
-    async stageBlob() { return { blobId: "b", sizeBytes: 0 }; },
-    async readBlob() { return Buffer.alloc(0); },
-    async readFileArtifact() { return Buffer.alloc(0); },
+    async activeRunForThread() {
+      return undefined;
+    },
+    async stageBlob() {
+      return { blobId: "b", sizeBytes: 0 };
+    },
+    async readBlob() {
+      return Buffer.alloc(0);
+    },
+    async readFileArtifact() {
+      return Buffer.alloc(0);
+    },
     async reportTurnMetrics() {},
     async reportRunEditRef() {},
   } as any;
@@ -68,16 +76,27 @@ test("delivery tracker retries a given-up delivery after the bench window", asyn
   let posts = 0;
   let acked = false;
   const failing = {
-    tracker, id: "d1",
-    post: async () => { posts++; throw new Error("slack 429"); },
-    ack: async () => { acked = true; },
+    tracker,
+    id: "d1",
+    post: async () => {
+      posts++;
+      throw new Error("slack 429");
+    },
+    ack: async () => {
+      acked = true;
+    },
     onError: () => {},
   };
   for (let i = 0; i < 6; i++) await deliverWithRetry(failing);
   assert.equal(posts, 5, "benched after 5 attempts");
 
   // Slack recovers; within the bench window nothing happens…
-  const healthy = { ...failing, post: async () => { posts++; } };
+  const healthy = {
+    ...failing,
+    post: async () => {
+      posts++;
+    },
+  };
   await deliverWithRetry(healthy);
   assert.equal(posts, 5);
   // …but after it expires, delivery resumes and completes.
