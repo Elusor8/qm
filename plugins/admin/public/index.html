@@ -6636,7 +6636,7 @@
           };
           if (!ackEmojiCatalogLoaded) {
             ackEmojiCatalogLoaded = true;
-            api("GET", "/v1/admin/slack-emoji")
+            api("GET", "/api/slack-emoji")
               .then((res) => {
                 if (res && res.ok && res.data && res.data.emoji) ackEmojiCatalog = res.data.emoji;
                 renderAckChips();
