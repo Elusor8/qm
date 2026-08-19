@@ -66,8 +66,10 @@ test("served CSP carries the hash of the LF-normalized inline script", async () 
   const csp = r.headers["content-security-policy"];
   assert.ok(typeof csp === "string", "CSP header present");
 
-  const script = r.body.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? "";
-  assert.ok(script.length > 0, "inline script present in served HTML");
+  const scriptStart = r.body.indexOf("<script>");
+  const scriptEnd = r.body.indexOf("</script>", scriptStart);
+  assert.ok(scriptStart >= 0 && scriptEnd > scriptStart, "inline script present in served HTML");
+  const script = r.body.slice(scriptStart + "<script>".length, scriptEnd);
 
   // This is exactly what a browser does before checking the CSP source.
   const browserHash = createHash("sha256").update(script.replace(/\r\n?/g, "\n")).digest("base64");
