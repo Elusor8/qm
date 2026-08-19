@@ -181,7 +181,8 @@
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
         overflow: hidden;
       }
-      .emoji-picker input {
+      .emoji-picker input[type="text"] {
+        width: auto;
         margin: 8px;
         flex: 0 0 auto;
       }
@@ -4589,7 +4590,7 @@
                           + Add emoji
                         </button>
                         <div class="emoji-picker hidden" id="ack-emoji-picker">
-                          <input id="ack-emoji-search" placeholder="Search emoji" autocomplete="off" />
+                          <input type="text" id="ack-emoji-search" placeholder="Search emoji" autocomplete="off" />
                           <div class="emoji-picker-scroll" id="ack-emoji-results"></div>
                         </div>
                       </span>
