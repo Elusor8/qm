@@ -166,6 +166,7 @@ export interface Destination {
   target: string;
   audienceScopeId?: ScopeId;
   onBehalfOf?: string;
+  threadTs?: string;
   editRef?: string;
   taskList?: Array<{
     id: string;
@@ -461,7 +462,7 @@ export interface PendingApproval {
   approvalKey?: string;
   grantModes?: ApprovalGrantModes;
   blocksInput?: boolean;
-  kind?: "approval";
+  kind?: "approval" | "input";
 }
 
 export interface PendingApprovalRecord {
