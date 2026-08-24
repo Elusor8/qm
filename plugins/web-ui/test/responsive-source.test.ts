@@ -37,7 +37,7 @@ test("mobile sidebar is modal, dismissible, and sized for touch", () => {
   assert.match(sessions, /data-menu-id=\$\{s\.id\}/);
   assert.match(sessions, /focusSessionMenuButton\(menuKey\)/);
   assert.match(shell, /trapDialogFocus\(event, \(\) => setSidebarOpen\(false\)\)/);
-  assert.match(css, /\.layout\.sidebar-closed \.sidebar \{\s*position: static;\s*box-shadow: none;/);
+  assert.match(css, /\.layout\.sidebar-closed \.sidebar \{\s*position: static;/);
   assert.match(
     shell,
     /setSidebarOpen\(false, false\);\s*requestAnimationFrame\(\(\) => appState\.mainEl\?\.focus\(\{ preventScroll: true \}\)\)/,

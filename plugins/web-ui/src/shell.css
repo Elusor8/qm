@@ -601,7 +601,6 @@ a.chat-row-open {
 }
 .session-row.title-refreshing .session .title {
   color: color-mix(in srgb, var(--foreground) 78%, var(--muted-foreground));
-  text-shadow: 0 0 14px color-mix(in srgb, var(--foreground) 16%, transparent);
 }
 .session-row.title-refreshing .title-sheen {
   max-width: 100%;
@@ -941,7 +940,6 @@ a.chat-row-open {
   min-width: 0;
   padding: 4px;
   border-radius: var(--radius-sm);
-  box-shadow: none;
 }
 .user-menu-popover .session-menu-option {
   padding-left: 6px;
@@ -1010,7 +1008,6 @@ a.chat-row-open {
 .settings-choice-option.selected {
   background: var(--background);
   color: var(--foreground);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 10%);
 }
 
 .main {
@@ -1075,7 +1072,6 @@ a.chat-row-open {
   color: var(--foreground);
   font-size: 15px;
   font-weight: 500;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
 }
 .drop-overlay-card svg {
   color: var(--cta);
@@ -2421,7 +2417,6 @@ a.chat-row-open {
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--background);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 5%);
 }
 .composer-input {
   width: 100%;
@@ -2623,11 +2618,9 @@ a.chat-row-open {
     transform: scale(1);
   }
   38% {
-    filter: drop-shadow(0 0 5px color-mix(in srgb, var(--cta) 45%, transparent));
     transform: scale(1.22) rotate(-8deg);
   }
   64% {
-    filter: drop-shadow(0 0 7px color-mix(in srgb, var(--cta-hover) 45%, transparent));
     transform: scale(0.94) rotate(4deg);
   }
   100% {
@@ -2724,9 +2717,6 @@ a.chat-row-open {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--background);
-  box-shadow:
-    0 8px 18px rgb(0 0 0 / 22%),
-    0 22px 55px rgb(0 0 0 / 26%);
 }
 .slash-empty {
   padding: 7px 8px;
@@ -3051,11 +3041,9 @@ a.chat-row-open {
   background: color-mix(in srgb, var(--background) 92%, var(--secondary));
   color: var(--muted-foreground);
   cursor: pointer;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
   transition:
     background 0.12s ease,
     border-color 0.12s ease,
-    box-shadow 0.12s ease,
     color 0.12s ease,
     transform 0.12s ease;
 }
@@ -3063,12 +3051,6 @@ a.chat-row-open {
   border-color: color-mix(in srgb, var(--foreground) 18%, var(--border));
   background: var(--secondary);
   color: var(--foreground);
-  box-shadow:
-    0 2px 5px color-mix(in srgb, var(--foreground) 10%, transparent),
-    0 8px 22px color-mix(in srgb, var(--foreground) 8%, transparent);
-}
-.pane-refresh:active {
-  transform: translateY(1px);
 }
 .pane-refresh:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--foreground) 34%, transparent);
@@ -3969,7 +3951,6 @@ a.chat-row-open {
   border: 1px solid color-mix(in srgb, var(--destructive, #c00) 28%, var(--border));
   border-radius: var(--radius-lg);
   background: var(--background);
-  box-shadow: 0 24px 70px color-mix(in srgb, #000 24%, transparent);
 }
 .kc-confirm h2 {
   margin-top: 6px;
@@ -4406,7 +4387,6 @@ a.chat-row-open {
     padding-bottom: calc(10px + env(safe-area-inset-bottom));
     padding-left: max(8px, env(safe-area-inset-left));
     z-index: 10;
-    box-shadow: 18px 0 40px rgb(0 0 0 / 30%);
   }
   .layout {
     /* left safe-area inset + the 44px touch-size toggle + its 8px right padding */
@@ -4419,7 +4399,6 @@ a.chat-row-open {
   }
   .layout.sidebar-closed .sidebar {
     position: static;
-    box-shadow: none;
   }
   .sidebar-resize-handle {
     display: none;
@@ -5393,7 +5372,6 @@ a.chat-row-open {
   border-radius: var(--radius-md);
   background: var(--background);
   color: var(--foreground);
-  box-shadow: 0 20px 60px rgb(0 0 0 / 38%);
 }
 .project-dialog-head {
   display: flex;
@@ -5575,7 +5553,6 @@ a.chat-row-open {
   backdrop-filter: blur(6px);
   font-size: 12px;
   color: var(--muted-foreground);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
 }
 .context-banner strong {
   font-weight: 600;
@@ -6066,7 +6043,6 @@ a.chat-row-open {
   border-radius: var(--radius-md);
   background: var(--foreground);
   color: var(--background);
-  box-shadow: 0 12px 38px rgb(0 0 0 / 34%);
   font-size: 13px;
 }
 .deploy-toast > span {
@@ -6601,6 +6577,7 @@ h3.ambient-field-label {
 .dockview-theme-qm {
   --dv-tabs-and-actions-container-height: 43px; /* 42px content + 1px separator (border-box) */
   --dv-separator-border: transparent;
+  --dv-floating-box-shadow: none;
   --dv-tabs-and-actions-container-font-size: 12.5px;
   --dv-drag-over-background-color: color-mix(in srgb, var(--primary) 20%, transparent);
   --dv-drag-over-border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
@@ -6716,7 +6693,6 @@ h3.ambient-field-label {
 
 .dockview-theme-qm .dv-tabs-and-actions-container:not(.dv-single-tab) .dv-tab.dv-active-tab {
   border-color: var(--border);
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
 }
 
 .dockview-theme-qm
@@ -6768,9 +6744,6 @@ h3.ambient-field-label {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--background);
-  box-shadow:
-    0 8px 18px rgb(0 0 0 / 22%),
-    0 22px 55px rgb(0 0 0 / 26%);
 }
 
 .dv-tabs-overflow-container .dv-tab {
@@ -7020,7 +6993,8 @@ h3.ambient-field-label {
 }
 
 .split-canvas.session-dragging .dv-tabs-and-actions-container {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--primary) 55%, var(--border));
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, var(--border));
+  outline-offset: -2px;
   background: color-mix(in srgb, var(--primary) 6%, transparent);
 }
 
@@ -7072,7 +7046,6 @@ h3.ambient-field-label {
   background: var(--foreground);
   color: var(--background);
   font-size: 12.5px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
 }
 
 [data-density="compact"] .chat-scroll {
@@ -7279,7 +7252,6 @@ h3.ambient-field-label {
   line-height: 1.35;
   color: var(--background, #fff);
   background: color-mix(in srgb, var(--foreground) 92%, transparent);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.1s ease;
@@ -7313,7 +7285,6 @@ h3.ambient-field-label {
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--background);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
 }
 .chat-search-inputrow {
   display: flex;

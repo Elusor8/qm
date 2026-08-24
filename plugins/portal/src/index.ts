@@ -363,13 +363,11 @@ const CARD_STYLE = `<style>
   :root{
     --bg:#ffffff; --surface:#ffffff; --text:#0a0a0a; --muted:#737373;
     --border:#e5e5e5; --secondary:#f5f5f5; --warn:#b42318; --warn-bg:#fdeceb;
-    --shadow:0 1px 3px rgba(0,0,0,.05), 0 4px 12px rgba(0,0,0,.05);
     --radius-md:10px; --radius-lg:16px;
   }
   @media (prefers-color-scheme:dark){
     :root{ --bg:#0a0a0a; --surface:#171717; --text:#fafafa; --muted:#a3a3a3;
-      --border:#2a2a2a; --secondary:#262626; --warn:#ff8a80; --warn-bg:#2a1a1a;
-      --shadow:0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.4); }
+      --border:#2a2a2a; --secondary:#262626; --warn:#ff8a80; --warn-bg:#2a1a1a; }
   }
   *{ box-sizing:border-box; }
   html,body{ height:100%; }
@@ -381,7 +379,7 @@ const CARD_STYLE = `<style>
   main{ margin:auto; padding:32px 20px; width:100%; display:grid; place-items:center; }
   .card{
     width:100%; max-width:420px; background:var(--surface); border:1px solid var(--border);
-    border-radius:var(--radius-lg); box-shadow:var(--shadow); padding:34px 32px 30px; text-align:center;
+    border-radius:var(--radius-lg); padding:34px 32px 30px; text-align:center;
   }
   .card.wide{ max-width:440px; }
   .icon{ width:52px; height:52px; margin:0 auto 18px; border-radius:var(--radius-md); background:var(--secondary);

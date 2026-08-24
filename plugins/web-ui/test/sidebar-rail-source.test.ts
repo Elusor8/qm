@@ -45,7 +45,7 @@ test("the collapsed rail keeps icon-only navigation instead of going empty", () 
 test("narrow viewports keep the rail in flow and size it for touch + safe area", () => {
   const narrow = css.slice(css.indexOf("@media (max-width: 860px)"));
   assert.match(narrow, /--rail-w: calc\(max\(8px, env\(safe-area-inset-left\)\) \+ 52px\)/);
-  assert.match(narrow, /\.layout\.sidebar-closed \.sidebar \{\s*position: static;\s*box-shadow: none;/);
+  assert.match(narrow, /\.layout\.sidebar-closed \.sidebar \{\s*position: static;/);
   assert.match(narrow, /\.sidebar \{[^}]*transition: none;/);
 });
 

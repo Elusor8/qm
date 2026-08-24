@@ -25,7 +25,6 @@
         --header-safe-top: env(safe-area-inset-top);
         --header-total-h: calc(var(--header-h) + var(--header-safe-top));
         --sidebar-w: 280px;
-        --shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
         --maxw: 1180px;
         --readw: 900px;
       }
@@ -361,7 +360,6 @@
         border: 0;
         border-radius: 0;
         background: transparent;
-        box-shadow: none;
       }
       .shell-stats .kpi .n {
         color: var(--text);
@@ -457,11 +455,9 @@
         border: 1px solid var(--border);
         border-radius: var(--radius);
         background: var(--surface);
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
       }
       .card.dirty {
         border-color: #d0a85c;
-        box-shadow: 0 0 0 1px rgba(208, 168, 92, 0.18);
       }
       .card > .head {
         margin: 0 0 16px;
@@ -511,7 +507,6 @@
       }
       input[aria-invalid="true"] {
         border-color: var(--danger);
-        box-shadow: 0 0 0 1px var(--danger);
       }
       input:disabled,
       textarea:disabled,
@@ -528,15 +523,14 @@
       textarea:focus,
       select:focus,
       button:focus-visible {
-        outline: none;
         border-color: var(--text);
-        box-shadow: 0 0 0 1px var(--text);
+        outline: 1px solid var(--text);
+        outline-offset: 0;
       }
       .tab:focus-visible,
       .chip:focus-visible,
       .link:focus-visible,
       .icon:focus-visible {
-        box-shadow: none;
         outline: 2px solid var(--text);
         outline-offset: 2px;
       }
@@ -709,7 +703,6 @@
         border: 1px solid var(--border);
         border-radius: var(--radius);
         background: var(--surface);
-        box-shadow: 0 12px 32px rgba(16, 24, 40, 0.12);
       }
       .scope-menu.hidden {
         display: none;
@@ -1147,7 +1140,6 @@
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
-        box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
       }
       .ovmenu.hidden {
         display: none;
@@ -1397,13 +1389,13 @@
       }
 
       tr.monologue-row td {
-        background: color-mix(in srgb, var(--trigger) 3%, transparent);
+        background-color: color-mix(in srgb, var(--trigger) 3%, transparent);
       }
       tr.monologue-row td:first-child {
-        box-shadow: inset 2px 0 0 var(--trigger);
+        background-image: linear-gradient(to right, var(--trigger) 0 2px, transparent 2px);
       }
       tr.monologue-row.openable:hover td {
-        background: color-mix(in srgb, var(--trigger) 8%, transparent);
+        background-color: color-mix(in srgb, var(--trigger) 8%, transparent);
       }
       td .open,
       td a {
@@ -1732,7 +1724,6 @@
         border-radius: var(--radius);
         background: var(--surface);
         padding: 8px 4px;
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
         max-height: 520px;
         overflow-y: auto;
       }
@@ -1743,7 +1734,6 @@
         border: 1px solid var(--border);
         border-radius: var(--radius);
         background: var(--surface);
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
         padding: 14px 16px;
         max-height: 520px;
         overflow: auto;
@@ -1762,7 +1752,6 @@
         border: 1px solid var(--border);
         border-radius: var(--radius);
         background: var(--surface);
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
       }
       .judg-decision .badges {
         margin-bottom: 8px;
@@ -2050,7 +2039,6 @@
         border: 0;
         border-radius: 0;
         background: transparent;
-        box-shadow: none;
       }
       .tool-entry + .tool-entry {
         margin-top: 2px;
@@ -2371,7 +2359,6 @@
         font-weight: 700;
         line-height: 1;
         padding: 0;
-        box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
       }
       .disclosure:hover {
         color: var(--text);
@@ -2896,7 +2883,6 @@
         border: 1px solid var(--border);
         border-radius: 999px;
         background: var(--surface);
-        box-shadow: var(--shadow);
       }
       .governance-scope::before {
         content: "";
@@ -2947,7 +2933,6 @@
         border: 1px solid #d7dce3;
         border-radius: 12px;
         background: linear-gradient(145deg, #fff 0%, #f7f8fa 100%);
-        box-shadow: 0 8px 24px rgba(16, 24, 40, 0.045);
       }
       .governance-overview-head {
         display: flex;
@@ -3083,7 +3068,6 @@
         margin-bottom: 10px;
         padding: 17px 18px;
         border-radius: 10px;
-        box-shadow: none;
       }
       #view-governance .card > .head {
         display: grid;
@@ -3235,7 +3219,6 @@
         height: 12px;
         border-radius: 999px;
         background: #fff;
-        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.28);
         transition: transform 0.14s;
       }
       .setting-toggle input:checked + .setting-switch {
@@ -3437,7 +3420,6 @@
         border-radius: 12px;
         background: var(--surface);
         color: var(--text);
-        box-shadow: 0 24px 64px rgba(16, 24, 40, 0.24);
       }
       dialog.review-dialog::backdrop {
         background: rgba(16, 24, 40, 0.48);

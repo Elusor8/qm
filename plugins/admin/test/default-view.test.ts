@@ -295,3 +295,11 @@ test("governance SOUL workbench shows draft diff, history, and conflict-safe res
   assert.match(html, /function refreshSoulConflict\(\)/);
   assert.match(html, /Restore SOUL version/);
 });
+
+test("the admin shell paints no shadows", () => {
+  const painted = [...html.matchAll(/(?:box|text)-shadow\s*:\s*([^;}]+)/g)]
+    .map((m) => m[1].trim())
+    .filter((v) => v !== "none");
+  assert.deepEqual(painted, [], "shadows are not part of this app's surface treatment");
+  assert.doesNotMatch(html, /drop-shadow\(/);
+});
