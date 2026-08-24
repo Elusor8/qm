@@ -3044,8 +3044,7 @@ a.chat-row-open {
   transition:
     background 0.12s ease,
     border-color 0.12s ease,
-    color 0.12s ease,
-    transform 0.12s ease;
+    color 0.12s ease;
 }
 .pane-refresh:hover {
   border-color: color-mix(in srgb, var(--foreground) 18%, var(--border));
