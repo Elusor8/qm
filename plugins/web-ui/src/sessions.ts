@@ -559,7 +559,6 @@ export function drawChatsPage(): void {
           )}
         </div>
         <div class="list-select">
-          <span>Surface</span>
           ${selectMenu({
             ariaLabel: "Filter by surface",
             value: chatsPageSurface,
