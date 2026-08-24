@@ -28,6 +28,7 @@ const BASE_HTML = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "../public/index.html"),
   "utf8",
 ).replaceAll("__ADMIN_BASE__", () => ADMIN_BASE_PATH);
+const BRAND_MARK = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/brand-mark.jpg"));
 const ADMIN_SCRIPT = BASE_HTML.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? "";
 const ADMIN_CSP = [
   "default-src 'self'",
@@ -332,6 +333,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return void res.end(gz ? shell.gzip : shell.html);
   };
   if (method === "GET" && pathname === "/") return serveShell();
+  if (method === "GET" && pathname === "/brand-mark.jpg") {
+    res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "public, max-age=86400" });
+    return void res.end(BRAND_MARK);
+  }
   if (method === "GET" && pathname === "/healthz") return json(res, 200, { ok: true });
 
   if (method === "GET" && (pathname === "/api/me" || pathname === "/api/whoami")) {

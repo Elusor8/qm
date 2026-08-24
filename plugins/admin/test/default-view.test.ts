@@ -6,8 +6,12 @@ const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf
 
 test("admin shell uses the QM identity with org-injectable branding", () => {
   assert.match(html, /<title>QM Admin<\/title>/);
-  assert.match(html, /<meta name="brand-self-label" content="Agent" \/>/);
-  assert.match(html, /<div class="brand"><span id="brand-product">Agent<\/span>&nbsp;Admin /);
+  assert.match(html, /<meta name="brand-self-label" content="QM" \/>/);
+  assert.match(
+    html,
+    /<span class="brand-name"><span data-brand-product>QM<\/span> <span class="brand-suffix">\(admin\)<\/span><\/span>/,
+  );
+  assert.match(html, /<aside class="admin-sidebar"[^>]*>\s*<div class="brand">/, "the lockup sits in the sidebar");
   assert.doesNotMatch(html, new RegExp(["Work", "Claw"].join(" "), "i"));
   assert.doesNotMatch(html, new RegExp(["Quarter", "master"].join(""), "i"));
 });

@@ -52,8 +52,9 @@ test("cold start: the FIRST shell render already carries the org branding", asyn
 
 test("the shell's badge and product name are branding-driven, not hardcoded", () => {
   const shell = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
-  assert.match(shell, /content:\s*var\(--brand-mark,\s*"A"\)/, "badge glyph reads --brand-mark");
-  assert.match(shell, /id="brand-product"/, "header product name is script-addressable");
+  assert.match(shell, /content:\s*var\(--brand-mark\)/, "badge glyph reads --brand-mark");
+  assert.match(shell, /--brand-mark:\s*none;/, "and falls back to the shipped mark when the org sets none");
+  assert.match(shell, /\[data-brand-product\]/, "every product name is script-addressable");
 });
 
 test("a branding save acks only after the shell reflects it — the post-save reload can't be stale", async () => {

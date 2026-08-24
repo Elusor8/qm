@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>QM Admin</title>
-    <meta name="brand-self-label" content="Agent" />
+    <meta name="brand-self-label" content="QM" />
     <style>
       :root {
         --bg: #fbfbfa;
@@ -19,10 +19,12 @@
         --warn: #b54708;
         --trigger: #6b5cf0;
         --radius: 8px;
+        --brand-font: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+        --brand-mark: none;
         --header-h: 56px;
         --header-safe-top: env(safe-area-inset-top);
         --header-total-h: calc(var(--header-h) + var(--header-safe-top));
-        --sidebar-w: 258px;
+        --sidebar-w: 280px;
         --shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
         --maxw: 1180px;
         --readw: 900px;
@@ -42,7 +44,7 @@
         background: var(--bg);
         color: var(--text);
         font:
-          14.5px/1.6 ui-sans-serif,
+          14px/1.5 ui-sans-serif,
           system-ui,
           -apple-system,
           "Segoe UI",
@@ -68,43 +70,79 @@
         min-height: var(--header-total-h);
         max-width: none;
         margin: 0;
-        padding: var(--header-safe-top) max(20px, env(safe-area-inset-right)) 0 max(20px, env(safe-area-inset-left));
-        border-bottom: 1px solid var(--border);
-        background: color-mix(in srgb, var(--surface) 92%, var(--bg));
-        backdrop-filter: blur(14px);
+        padding: var(--header-safe-top) max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+        border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+        background: color-mix(in srgb, var(--bg) 94%, var(--subtle));
+      }
+      body:has(#app-view:not(.hidden)) header {
+        margin-left: var(--sidebar-w);
+      }
+      body:has(#app-view.hidden) header {
+        display: none;
       }
       .brand {
         display: flex;
         align-items: center;
+        gap: 7.5px;
         min-width: 0;
-        font-weight: 650;
-        font-size: 15px;
+        min-height: 51px;
+        padding: 8px 8.5px 9px;
+        font-size: 17px;
+        font-weight: 600;
         letter-spacing: 0;
+        line-height: 1;
         white-space: nowrap;
       }
-      .brand::before {
-        content: var(--brand-mark, "A");
+      .brand-mark {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 23px;
-        height: 23px;
-        margin-right: 9px;
+        width: 22px;
+        height: 22px;
+        flex: 0 0 22px;
+        overflow: hidden;
         border-radius: 5px;
-        background: var(--brand-accent, #4f46e5);
+        background: var(--brand-accent, #4f46e5) url("./brand-mark.jpg") center / cover no-repeat;
         color: #fff;
-        font-size: 13px;
-        font-weight: 650;
+        font-size: 16px;
+        font-weight: 500;
         line-height: 1;
       }
-      .brand span {
+      .brand-mark::before {
+        content: var(--brand-mark);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        background: var(--brand-accent, #4f46e5);
+      }
+      .brand-name {
         min-width: 0;
-        margin-left: 4px;
         overflow: hidden;
-        color: var(--muted);
-        font-weight: 400;
+        color: var(--text);
+        font-family: var(--brand-font);
+        font-size: 18px;
+        letter-spacing: 0.01em;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      #org-tag {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .signin-brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin: 0 0 4px;
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: 0;
+        line-height: 1;
       }
       .header-controls {
         display: flex;
@@ -213,30 +251,25 @@
         display: none;
       }
       .admin-sidebar {
-        position: sticky;
-        top: var(--header-total-h);
-        align-self: start;
+        position: fixed;
+        top: 0;
+        left: 0;
+        z-index: 45;
         display: flex;
         flex-direction: column;
-        height: calc(100dvh - var(--header-total-h));
+        width: var(--sidebar-w);
+        height: 100dvh;
         min-height: 0;
         min-width: 0;
         overflow: hidden;
-        padding: 16px 10px;
+        padding: calc(10px + var(--header-safe-top)) 4px 10px 8px;
         border-right: 1px solid var(--border);
-        background: color-mix(in srgb, var(--subtle) 76%, var(--surface));
-      }
-      .sidebar-title {
-        padding: 0 10px 10px;
-        color: var(--muted);
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
+        background: color-mix(in srgb, var(--subtle) 42%, var(--surface));
       }
       .admin-main {
+        grid-column: 2;
         min-width: 0;
-        padding: 28px clamp(18px, 4vw, 44px) 72px;
+        padding: 28px 28px 40px;
       }
       .admin-inner {
         width: min(var(--maxw), 100%);
@@ -299,12 +332,13 @@
         background: var(--subtle);
       }
       .shell-tab.active {
-        color: #fff;
-        border-color: var(--ink);
-        background: var(--ink);
+        color: var(--text);
+        border-color: var(--border);
+        background: color-mix(in srgb, var(--text) 4%, transparent);
+        font-weight: 500;
       }
       .shell-tab.active:hover {
-        background: var(--ink);
+        background: color-mix(in srgb, var(--text) 4%, transparent);
       }
       .shell-spacer {
         flex: 1 1 auto;
@@ -354,40 +388,31 @@
         display: flex;
         flex: 1 1 auto;
         flex-direction: column;
-        gap: 2px;
+        gap: 1px;
         min-height: 0;
         overflow-x: hidden;
         overflow-y: auto;
+        scrollbar-gutter: stable;
         max-width: 100%;
-        padding: 0 2px 12px 0;
+        padding: 0;
         border: 0;
         border-radius: 0;
         margin: 0;
         background: transparent;
-        scrollbar-width: thin;
-        scrollbar-color: #d0d5dd transparent;
-      }
-      nav.tabs::-webkit-scrollbar {
-        width: 6px;
-      }
-      nav.tabs::-webkit-scrollbar-thumb {
-        background: #d0d5dd;
-        border-radius: 999px;
       }
       .tab {
         display: flex;
         align-items: center;
         width: 100%;
-        min-height: 34px;
         border: none;
         background: none;
-        padding: 7px 10px;
+        padding: 6px 11px;
         color: var(--muted);
-        border-radius: 6px;
+        border-radius: var(--radius);
         cursor: pointer;
         font: inherit;
-        font-size: 13px;
-        font-weight: 500;
+        font-size: 14px;
+        font-weight: 400;
         white-space: nowrap;
         text-align: left;
         overflow: hidden;
@@ -396,13 +421,12 @@
       }
       .tab:hover {
         color: var(--text);
-        background: color-mix(in srgb, var(--surface) 72%, transparent);
+        background: color-mix(in srgb, var(--text) 4%, transparent);
       }
       .tab.active {
         color: var(--text);
-        background: var(--surface);
-        box-shadow: var(--shadow);
-        font-weight: 650;
+        background: color-mix(in srgb, var(--text) 4%, transparent);
+        font-weight: 500;
       }
       .tab:disabled {
         color: color-mix(in srgb, var(--muted) 45%, transparent);
@@ -417,17 +441,14 @@
         margin-right: 7px;
       }
       .tab-top {
-        font-weight: 600;
-        color: var(--text);
+        font-weight: 400;
       }
       .tab-section {
         flex: 0 0 auto;
-        padding: 16px 10px 4px;
-        color: color-mix(in srgb, var(--muted) 78%, transparent);
-        font-size: 10.5px;
-        font-weight: 700;
-        letter-spacing: 0.07em;
-        text-transform: uppercase;
+        padding: 12px 11px 6px 9px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 400;
       }
 
       section.card {
@@ -995,9 +1016,10 @@
         padding: 4px 9px;
       }
       .seg.active {
-        color: #fff;
-        border-color: var(--ink);
-        background: var(--ink);
+        color: var(--text);
+        border-color: var(--border);
+        background: color-mix(in srgb, var(--text) 4%, transparent);
+        font-weight: 500;
       }
       .dense-preview .delivery-chip {
         margin: 0 8px 0 0;
@@ -1469,7 +1491,7 @@
         border-top: 0;
       }
       .dense-row:hover {
-        background: #fafafa;
+        background: color-mix(in srgb, var(--text) 4%, transparent);
       }
       .dense-icon {
         flex: none;
@@ -1695,9 +1717,7 @@
         margin: 0 0 8px;
         color: var(--muted);
         font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
+        font-weight: 500;
       }
       .judg-extlink {
         display: inline-flex;
@@ -2477,9 +2497,6 @@
       body.context-fullpage header {
         position: static;
       }
-      body.context-fullpage .admin-sidebar {
-        position: static;
-      }
       body.context-fullpage .shellbar {
         position: static;
       }
@@ -2701,8 +2718,7 @@
       .editor-panel h3 {
         margin: 0 0 8px;
         font-size: 12px;
-        letter-spacing: 0.035em;
-        text-transform: uppercase;
+        font-weight: 500;
       }
       .capability-summary {
         display: grid;
@@ -2858,9 +2874,7 @@
         margin: 0 0 3px;
         color: var(--muted);
         font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.075em;
-        text-transform: uppercase;
+        font-weight: 400;
       }
       .governance-page-head h1 {
         margin: 0;
@@ -2894,9 +2908,7 @@
       .governance-scope span {
         color: var(--muted);
         font-size: 11px;
-        font-weight: 650;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
+        font-weight: 500;
       }
       .governance-scope strong {
         max-width: 260px;
@@ -2972,10 +2984,8 @@
         display: block;
         margin-bottom: 5px;
         color: var(--muted);
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 400;
       }
       .governance-status .v {
         display: flex;
@@ -3148,10 +3158,8 @@
       }
       #view-governance .setting-row > .body label:not(.setting-toggle) {
         margin-bottom: 4px;
-        font-size: 10.5px;
-        font-weight: 700;
-        letter-spacing: 0.045em;
-        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 500;
       }
       #view-governance .setting-row > .body select,
       #view-governance .setting-row > .body input[type="text"],
@@ -3262,10 +3270,8 @@
         gap: 5px;
         margin-left: 7px;
         color: var(--muted);
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.045em;
-        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 400;
         vertical-align: 1px;
       }
       .governance-effective::before {
@@ -3356,10 +3362,8 @@
       .egress-state .k {
         display: block;
         color: var(--muted);
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 400;
       }
       .egress-state .v {
         display: block;
@@ -3505,6 +3509,9 @@
           padding-right: max(14px, env(safe-area-inset-right));
           padding-left: max(14px, env(safe-area-inset-left));
         }
+        body:has(#app-view:not(.hidden)) header {
+          margin-left: 0;
+        }
         .admin-app {
           display: block;
         }
@@ -3514,6 +3521,7 @@
           z-index: 20;
           display: block;
           width: 100%;
+          left: auto;
           max-width: 100vw;
           height: auto;
           min-height: 0;
@@ -3524,8 +3532,8 @@
           border-bottom: 1px solid var(--border);
           background: color-mix(in srgb, var(--surface) 94%, var(--bg));
         }
-        .sidebar-title {
-          display: none;
+        .brand {
+          min-height: 0;
         }
         .tab-section {
           display: none;
@@ -3629,7 +3637,11 @@
         h1 {
           font-size: 21px;
         }
-        .brand span {
+        .brand {
+          padding: 2px 2px 8px;
+        }
+        .brand-suffix,
+        #org-tag {
           display: none;
         }
         .who {
@@ -3776,11 +3788,10 @@
   </head>
   <body>
     <header>
-      <div class="brand"><span id="brand-product">Agent</span>&nbsp;Admin <span id="org-tag"></span></div>
       <div class="header-controls" id="header-controls" aria-label="Page controls"></div>
       <div class="who hidden" id="who">
-        <a class="header-button" href="/" id="dashboard-link">Dashboard</a><span class="pill" id="who-name"></span
-        ><button class="link" id="signout">Sign out</button>
+        <span id="org-tag"></span><a class="header-button" href="/" id="dashboard-link">Dashboard</a
+        ><span class="pill" id="who-name"></span><button class="link" id="signout">Sign out</button>
       </div>
     </header>
 
@@ -3793,12 +3804,20 @@
 
     <div class="center" id="loading-view" aria-busy="true">
       <div class="signin">
+        <div class="signin-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name"><span data-brand-product>QM</span> <span class="brand-suffix">(admin)</span></span>
+        </div>
         <p class="lead" role="status">Checking your access…</p>
       </div>
     </div>
 
     <div class="center hidden" id="signin-view">
       <div class="signin">
+        <div class="signin-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name"><span data-brand-product>QM</span> <span class="brand-suffix">(admin)</span></span>
+        </div>
         <h1>Sign in through the portal</h1>
         <p class="lead">This admin surface is reached through the portal. Sign in there to continue.</p>
         <div class="card">
@@ -3809,6 +3828,10 @@
 
     <div class="center hidden" id="unavailable-view">
       <div class="signin">
+        <div class="signin-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name"><span data-brand-product>QM</span> <span class="brand-suffix">(admin)</span></span>
+        </div>
         <h1>Admin is temporarily unavailable</h1>
         <p class="lead">
           We couldn't verify your admin access right now — the backend didn't answer. This is usually temporary.
@@ -3826,6 +3849,10 @@
 
     <div class="center hidden" id="notadmin-view">
       <div class="signin">
+        <div class="signin-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name"><span data-brand-product>QM</span> <span class="brand-suffix">(admin)</span></span>
+        </div>
         <h1>You don't have admin access</h1>
         <p class="lead">
           The Admin area is limited to governance admins. Your account is signed in and verified — it just isn't granted
@@ -3849,7 +3876,11 @@
 
     <main class="admin-app hidden" id="app-view">
       <aside class="admin-sidebar" aria-label="Admin navigation">
-        <div class="sidebar-title">Admin</div>
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name"><span data-brand-product>QM</span> <span class="brand-suffix">(admin)</span></span>
+        </div>
+        <div class="tab-section">Admin</div>
         <nav class="tabs" id="tabs"></nav>
       </aside>
 
@@ -4951,9 +4982,9 @@
       let orgId = "acme";
 
       const brandSelfLabel = () =>
-        document.querySelector('meta[name="brand-self-label"]')?.getAttribute("content") || "Agent";
+        document.querySelector('meta[name="brand-self-label"]')?.getAttribute("content") || "QM";
       // The header's product name and the tab title follow the org's assistant label.
-      document.getElementById("brand-product").textContent = brandSelfLabel();
+      for (const el of document.querySelectorAll("[data-brand-product]")) el.textContent = brandSelfLabel();
       document.title = `${brandSelfLabel()} Admin`;
       let page = 1;
 
@@ -5474,7 +5505,7 @@
           if (me.status !== 401) return showView("unavailable-view", "Admin is temporarily unavailable.");
           return showView("signin-view", "Sign in through the portal to continue.");
         }
-        $("org-tag").textContent = "· " + me.data.org;
+        $("org-tag").textContent = me.data.org;
         orgId = me.data.org;
         $("who-name").textContent = me.data.principal;
         if (me.data.isAdmin === false) {
