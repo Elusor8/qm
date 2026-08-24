@@ -2,6 +2,7 @@ import { html, render, type TemplateResult } from "lit";
 import { ExternalLink, Monitor, Moon, Sun, type IconNode } from "lucide";
 import { icon } from "./ui";
 import { ADMIN_HOME_URL, appState } from "./shell";
+import { sessionsState, setWebOnly } from "./sessions";
 
 export type ThemeChoice = "light" | "dark" | "system";
 
@@ -75,6 +76,40 @@ function themeRow(): TemplateResult {
   `;
 }
 
+const SURFACE_OPTIONS: Array<{ webOnly: boolean; label: string }> = [
+  { webOnly: false, label: "All conversations" },
+  { webOnly: true, label: "Web only" },
+];
+
+function sidebarSurfaceRow(): TemplateResult {
+  return html`
+    <div class="settings-row">
+      <div class="settings-row-copy">
+        <div class="settings-row-title">Sidebar conversations</div>
+        <div class="settings-row-note">Web only hides the Slack channels and DMs the agent also works in.</div>
+      </div>
+      <div class="settings-choice" role="radiogroup" aria-label="Sidebar conversations">
+        ${SURFACE_OPTIONS.map(
+          (option) => html`
+            <button
+              class="settings-choice-option ${sessionsState.webOnly === option.webOnly ? "selected" : ""}"
+              type="button"
+              role="radio"
+              aria-checked=${sessionsState.webOnly === option.webOnly ? "true" : "false"}
+              @click=${() => {
+                setWebOnly(option.webOnly);
+                drawSettings();
+              }}
+            >
+              <span>${option.label}</span>
+            </button>
+          `,
+        )}
+      </div>
+    </div>
+  `;
+}
+
 function adminRow(): TemplateResult {
   return html`
     <div class="settings-row">
@@ -104,7 +139,7 @@ function settingsPane(): TemplateResult {
     <div class="list-page-head">
       <h1 class="pane-title">Settings</h1>
     </div>
-    <div class="settings-group">${themeRow()} ${adminRow()} ${accountRow()}</div>
+    <div class="settings-group">${themeRow()} ${sidebarSurfaceRow()} ${adminRow()} ${accountRow()}</div>
   `;
 }
 

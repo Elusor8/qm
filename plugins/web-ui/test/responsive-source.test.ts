@@ -24,7 +24,7 @@ test("mobile sidebar is modal, dismissible, and sized for touch", () => {
   assert.match(shell, /main\.inert = modal/);
   assert.match(
     css,
-    /\.layout\.sidebar-closed \.sidebar > :not\(\.brand\):not\(#sidebar-top\),\s*\.layout\.sidebar-closed \.brand-lockup \{[^}]*opacity: 0;\s*visibility: hidden;/,
+    /\.layout\.sidebar-closed \.sidebar > :not\(\.brand\):not\(#sidebar-top\):not\(#sidebar-footer\),\s*\.layout\.sidebar-closed \.brand-lockup \{[^}]*opacity: 0;\s*visibility: hidden;/,
   );
   assert.match(shell, /sidebar\.setAttribute\("role", modal \? "dialog" : "navigation"\)/);
   assert.match(
@@ -46,7 +46,7 @@ test("mobile sidebar is modal, dismissible, and sized for touch", () => {
   assert.match(compactCss, /\.layout\.sidebar-closed \.sidebar-scrim \{\s*display: none;/);
   assert.match(
     compactCss,
-    /\.navrow,[\s\S]*\.browse-tile,[\s\S]*\.web-only-toggle,[\s\S]*\.session-menu-option,[\s\S]*\.archived-toggle \{\s*min-height: 44px;/,
+    /\.navrow,[\s\S]*\.browse-tile,[\s\S]*\.settings-choice-option,[\s\S]*\.session-menu-option,[\s\S]*\.archived-toggle \{\s*min-height: 44px;/,
   );
   assert.match(compactCss, /\.session-menu-btn,[\s\S]*\.recent-project-new-chat \{\s*width: 44px;\s*height: 44px;/);
   assert.match(compactCss, /\.session-menu\s*\{\s*right:\s*0;\s*margin-top:\s*-22px;\s*\}/);

@@ -1030,14 +1030,13 @@ function toggleShowArchived(): void {
   renderList();
 }
 
-export function toggleWebOnly(): void {
-  sessionsState.webOnly = !sessionsState.webOnly;
+export function setWebOnly(webOnly: boolean): void {
+  sessionsState.webOnly = webOnly;
   try {
-    localStorage.setItem(WEB_ONLY_KEY, sessionsState.webOnly ? "1" : "0");
+    localStorage.setItem(WEB_ONLY_KEY, webOnly ? "1" : "0");
   } catch {
     void 0;
   }
-  renderSidebarTop();
   renderList();
 }
 

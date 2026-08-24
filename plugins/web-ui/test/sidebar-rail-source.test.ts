@@ -19,7 +19,7 @@ test("hidden sidebar innards are out of the focus order and keep their layout wh
   assert.match(css, /\.sidebar > :not\(\.brand\) \{\s*min-width: calc\(var\(--sidebar-w\) - 16px\);/);
   assert.match(
     css,
-    /\.layout\.sidebar-closed \.sidebar > :not\(\.brand\):not\(#sidebar-top\),\s*\.layout\.sidebar-closed \.brand-lockup \{[^}]*opacity: 0;\s*visibility: hidden;\s*\}/,
+    /\.layout\.sidebar-closed \.sidebar > :not\(\.brand\):not\(#sidebar-top\):not\(#sidebar-footer\),\s*\.layout\.sidebar-closed \.brand-lockup \{[^}]*opacity: 0;\s*visibility: hidden;\s*\}/,
   );
   assert.doesNotMatch(css, /transition:[^;}]*visibility/);
   assert.doesNotMatch(shell, /sidebar\.inert/);
@@ -35,6 +35,9 @@ test("the collapsed rail keeps icon-only navigation instead of going empty", () 
     /\.layout\.sidebar-closed #sidebar-top \.navrow span,\s*\.layout\.sidebar-closed #sidebar-top \.section-label \{\s*display: none;/,
   );
   assert.match(css, /\.layout\.sidebar-closed #sidebar-top \.navrow \{\s*justify-content: center;/);
+  // Settings stays reachable from the rail; the identity pill has no room there.
+  assert.match(css, /\.layout\.sidebar-closed #sidebar-footer \{\s*min-width: 0;\s*justify-content: center;\s*\}/);
+  assert.match(css, /\.layout\.sidebar-closed #sidebar-footer \.user-menu \{\s*display: none;\s*\}/);
   // Icon-only rows need tooltips to carry their labels.
   assert.match(shell, /class="navrow[^`]*\$\{tip\(sidebarOpen \? "" : label\)\}/);
 });

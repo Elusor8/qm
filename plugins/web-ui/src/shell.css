@@ -100,7 +100,7 @@ body.resizing-sidebar .sidebar {
 .sidebar > :not(.brand) {
   min-width: calc(var(--sidebar-w) - 16px);
 }
-.layout.sidebar-closed .sidebar > :not(.brand):not(#sidebar-top),
+.layout.sidebar-closed .sidebar > :not(.brand):not(#sidebar-top):not(#sidebar-footer),
 .layout.sidebar-closed .brand-lockup {
   /* Untransitioned on purpose: the hide must be instant so nothing in the closed rail
      stays focusable or exposed to assistive tech while the width animates shut. */
@@ -114,6 +114,14 @@ body.resizing-sidebar .sidebar {
   /* Short viewports: the rail's icons scroll rather than clip out of reach. */
   min-height: 0;
   overflow-y: auto;
+}
+/* The rail keeps settings reachable: the footer stays, minus the identity pill. */
+.layout.sidebar-closed #sidebar-footer {
+  min-width: 0;
+  justify-content: center;
+}
+.layout.sidebar-closed #sidebar-footer .user-menu {
+  display: none;
 }
 .layout.sidebar-closed #sidebar-top .navrow span,
 .layout.sidebar-closed #sidebar-top .section-label {
@@ -222,13 +230,6 @@ body.resizing-sidebar {
 }
 .sidebar-collapse-toggle {
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  color: var(--muted-foreground);
-  opacity: 0.72;
-}
-.sidebar-collapse-toggle:hover {
-  opacity: 1;
 }
 .icon {
   display: block;
@@ -244,9 +245,6 @@ body.resizing-sidebar {
   margin-bottom: 4px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
-}
-.quick-nav svg {
-  opacity: 0.85;
 }
 a.navrow,
 a.session,
@@ -265,20 +263,16 @@ a.chat-row-open {
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted-foreground);
+  color: var(--foreground);
   cursor: pointer;
   text-align: left;
-  transition:
-    background 0.12s ease,
-    color 0.12s ease;
+  transition: background 0.12s ease;
 }
 .navrow:hover {
   background: var(--secondary);
-  color: var(--foreground);
 }
 .navrow.active {
   background: var(--secondary);
-  color: var(--foreground);
   font-weight: 500;
 }
 .navrow svg {
@@ -311,52 +305,6 @@ a.chat-row-open {
   overflow-x: hidden;
   scrollbar-gutter: stable;
 }
-.web-only-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-  opacity: 0.55;
-  transition: opacity 0.12s ease;
-}
-.web-only-toggle:hover {
-  opacity: 1;
-}
-.web-only-toggle.on {
-  opacity: 0.85;
-}
-.web-only-toggle .mini-switch {
-  position: relative;
-  width: 18px;
-  height: 10px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--muted-foreground) 35%, transparent);
-  transition: background 0.12s ease;
-}
-.web-only-toggle.on .mini-switch {
-  background: color-mix(in srgb, var(--foreground) 60%, transparent);
-}
-.web-only-toggle .mini-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--background);
-  transition: left 0.12s ease;
-}
-.web-only-toggle.on .mini-knob {
-  left: 10px;
-}
-
 .sidebar .list {
   flex: 1;
   overflow-y: auto;
@@ -4499,7 +4447,7 @@ a.chat-row-open {
   .browse-tile,
   .recent-project-toggle,
   .session,
-  .web-only-toggle,
+  .settings-choice-option,
   .session-menu-option,
   .archived-toggle {
     min-height: 44px;
