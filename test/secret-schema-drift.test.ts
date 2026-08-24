@@ -96,3 +96,21 @@ test("production rejects weak encryption key material for managed credentials", 
   assert.deepEqual(validateCoreSecretEnv(env), []);
   assert.deepEqual(validateCoreSecretEnv({ ...env, CONNECTOR_SECRET_KEY: "short" }), ["CONNECTOR_SECRET_KEY"]);
 });
+
+test("porter sandbox backend requires PORTER_SANDBOX_TOKEN", () => {
+  const missing = validateCoreSecretEnv({ SANDBOX_BACKEND: "porter" } as NodeJS.ProcessEnv);
+  assert.ok(missing.includes("PORTER_SANDBOX_TOKEN"));
+  const ok = validateCoreSecretEnv({ SANDBOX_BACKEND: "porter", PORTER_SANDBOX_TOKEN: "t-1" } as NodeJS.ProcessEnv);
+  assert.ok(!ok.includes("PORTER_SANDBOX_TOKEN"));
+});
+
+test("porter deploy provider requires PORTER_DEPLOY_API_TOKEN unless the sandbox token is present", () => {
+  assert.ok(
+    validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter" } as NodeJS.ProcessEnv).includes("PORTER_DEPLOY_API_TOKEN"),
+  );
+  assert.ok(
+    !validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter", PORTER_SANDBOX_TOKEN: "t" } as NodeJS.ProcessEnv).includes(
+      "PORTER_DEPLOY_API_TOKEN",
+    ),
+  );
+});
