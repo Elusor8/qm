@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/gkestenberg/qm
+  repository: ghcr.io/porter-dev/qm
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -30,8 +30,8 @@ secretEnv:
   PORTER_DEPLOY_URL: ""
   PORTER_DEPLOY_PROJECT_ID: ""
   PORTER_DEPLOY_CLUSTER_ID: ""
-  PORTER_SANDBOX_IMAGE: "ghcr.io/gkestenberg/qm-sandbox:latest"
-  PORTER_DEPLOY_RUNNER_IMAGE: "ghcr.io/gkestenberg/qm-app-runner:latest"
+  PORTER_SANDBOX_IMAGE: "ghcr.io/porter-dev/qm-sandbox:latest"
+  PORTER_DEPLOY_RUNNER_IMAGE: "ghcr.io/porter-dev/qm-app-runner:latest"
   PORTER_DEPLOY_APPS_DOMAIN: ""
   AUTH_ALLOWED_EMAILS: ""
   AUTH_CLIENT_ID: ""
