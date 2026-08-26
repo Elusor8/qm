@@ -1577,7 +1577,7 @@ export function serverDeps(
     ...(config.requireSignedPortalIdentity ? { requireSignedPortalIdentity: true } : {}),
     ...(built.replayDedupe ? { replayDedupe: built.replayDedupe } : {}),
     config: built.config,
-    baseModelDefault: defaultModelForHarness(config.harness, configuredModel, baseModelProviders(config)),
+    ...(configuredModel ? { baseModelDefault: configuredModel } : {}),
     ...(carriedModelAuth ? { harnessCarriedModelAuth: carriedModelAuth } : {}),
     modelProviders: modelProviderAvailabilityFor(config.harness, providerKeysPresent(config)),
     providerKeys: providerKeysPresent(config),
