@@ -891,7 +891,9 @@ async function getSurfaceConfig(ctx: ApiCtx): Promise<void> {
     webuiModels: configuredPicker.length ? configuredPicker : allowed,
     baseModel: resolvedBase,
     harnessId,
-    ...(providerStatus && { modelProviderConfigured: Object.values(providerStatus).some(Boolean) }),
+...(providerStatus && {
+      modelProviderConfigured: Object.values(providerStatus).some(Boolean) || Boolean(deps.harnessCarriedModelAuth),
+    }),
     externalSlackParticipants,
     ...(Object.keys(resolvedBranding).length ? { branding: resolvedBranding } : {}),
   });
