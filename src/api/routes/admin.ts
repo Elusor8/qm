@@ -31,8 +31,16 @@ import {
   listSlackMirrorContainers,
   listSlackMirrorMessages,
 } from "./admin/slack-mirror.ts";
-import { deleteSlackInstallation, getSlackInstallation, putSlackInstallation } from "./admin/slack-installation.ts";
+import {
+  deleteSlackInstallation,
+  getSlackEmojiList,
+  getSlackInstallation,
+  putSlackInstallation,
+} from "./admin/slack-installation.ts";
 import { deleteModelProvider, getModelProviders, putModelProvider } from "./admin/model-providers.ts";
+import { deleteCustomProvider, getCustomProviders, putCustomProvider } from "./admin/custom-providers.ts";
+import { deleteMcpServer, getMcpServers, putMcpServer } from "./admin/mcp-servers.ts";
+import { listSecurityFlags, releaseSecurityTaint } from "./admin/security.ts";
 
 const timed =
   (handle: (ctx: ApiCtx) => void | Promise<void>) =>
@@ -53,11 +61,18 @@ const timed =
 
 const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "GET", path: "/v1/admin/slack-installation", auth: "either", handle: getSlackInstallation },
+  { method: "GET", path: "/v1/admin/slack-emoji", auth: "either", handle: getSlackEmojiList },
   { method: "PUT", path: "/v1/admin/slack-installation", auth: "either", handle: putSlackInstallation },
   { method: "DELETE", path: "/v1/admin/slack-installation", auth: "either", handle: deleteSlackInstallation },
   { method: "GET", path: "/v1/admin/model-providers", auth: "either", handle: getModelProviders },
   { method: "PUT", path: "/v1/admin/model-providers/:provider", auth: "either", handle: putModelProvider },
+  { method: "GET", path: "/v1/admin/mcp-servers", auth: "either", handle: getMcpServers },
+  { method: "PUT", path: "/v1/admin/mcp-servers/:id", auth: "either", handle: putMcpServer },
+  { method: "DELETE", path: "/v1/admin/mcp-servers/:id", auth: "either", handle: deleteMcpServer },
   { method: "DELETE", path: "/v1/admin/model-providers/:provider", auth: "either", handle: deleteModelProvider },
+  { method: "GET", path: "/v1/admin/custom-providers", auth: "either", handle: getCustomProviders },
+  { method: "PUT", path: "/v1/admin/custom-providers/:provider", auth: "either", handle: putCustomProvider },
+  { method: "DELETE", path: "/v1/admin/custom-providers/:provider", auth: "either", handle: deleteCustomProvider },
   { method: "PUT", path: "/v1/admin/scopes/:scope/:resource", auth: "either", handle: putScopeConfig },
   { method: "GET", path: "/v1/admin/whoami", auth: "either", handle: whoami },
   { method: "GET", path: "/v1/admin/scopes", auth: "either", handle: listAdminScopes },
@@ -81,6 +96,8 @@ const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "GET", path: "/v1/admin/files", auth: "either", handle: listAdminFiles },
   { method: "GET", path: "/v1/admin/errors", auth: "either", handle: listAdminErrors },
   { method: "GET", path: "/v1/admin/audit", auth: "either", handle: listAdminAudit },
+  { method: "GET", path: "/v1/admin/security/flags", auth: "either", handle: listSecurityFlags },
+  { method: "POST", path: "/v1/admin/security/release", auth: "either", handle: releaseSecurityTaint },
   {
     match: (m, p) =>
       m === "GET" && (p === "/v1/admin/crons" || p === "/v1/admin/deployments" || p === "/v1/admin/skills"),

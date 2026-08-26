@@ -1,5 +1,7 @@
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { providerBaseUrl } from "./provider-endpoints.ts";
+import { isCustomModelId, resolveCustomModel } from "./custom-providers.ts";
 
 const getModel = getBuiltinModel as unknown as (provider: string, id: string) => Model<Api> | undefined;
 
@@ -92,9 +94,10 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
 ];
 
 const REGISTRY_BY_ID = new Map(MODEL_REGISTRY.map((m) => [m.id, m]));
+const OPENROUTER_CATALOG_MODELS = new Map<string, PiModel>();
 
 export function modelDisplayName(id: string): string {
-  return REGISTRY_BY_ID.get(id)?.name ?? id;
+  return REGISTRY_BY_ID.get(id)?.name ?? OPENROUTER_CATALOG_MODELS.get(id)?.name ?? id;
 }
 
 export const DEFAULT_WEBUI_MODEL_IDS: readonly string[] = MODEL_REGISTRY.filter((m) => m.webui).map((m) => m.id);
@@ -106,7 +109,12 @@ export const SELECTABLE_BASE_MODELS: ReadonlyArray<{ id: string; name: string }>
 function builtinModel(id: string): PiModel | undefined {
   for (const provider of MODEL_PROVIDERS) {
     const m = getModel(provider, id);
-    if (m) return m;
+    if (!m) continue;
+    // Endpoint overrides apply here, at the single choke point every
+    // resolution passes through — including clones, whose template is
+    // spread by cloneModel, so an overridden template covers its clones.
+    const override = providerBaseUrl(String(m.provider ?? provider));
+    return override ? { ...m, baseUrl: override } : m;
   }
   return undefined;
 }
@@ -123,6 +131,35 @@ function cloneModel(model: PiModel, id: string, name: string, overrides: Partial
     ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
     ...(model.compat ? { compat: { ...(model.compat as Record<string, unknown>) } as PiModel["compat"] } : {}),
   };
+}
+
+export interface OpenRouterCatalogModel {
+  id: string;
+  name: string;
+  contextWindow: number;
+  maxTokens: number;
+  input: ("text" | "image")[];
+  reasoning: boolean;
+  cost: { input: number; output: number };
+}
+
+export function registerOpenRouterCatalogModel(definition: OpenRouterCatalogModel): PiModel | undefined {
+  const template = builtinModel("openrouter/auto");
+  if (!template) return undefined;
+  const model = cloneModel(template, definition.id, definition.name, {
+    contextWindow: definition.contextWindow,
+    maxTokens: definition.maxTokens,
+    reasoning: definition.reasoning,
+    cost: {
+      input: definition.cost.input,
+      output: definition.cost.output,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+  });
+  model.input = [...definition.input];
+  OPENROUTER_CATALOG_MODELS.set(model.id, model);
+  return model;
 }
 
 export function resolveModel(id: string): PiModel | undefined {
@@ -142,7 +179,9 @@ export function resolveModel(id: string): PiModel | undefined {
         })
       : undefined;
   }
-  return builtinModel(id);
+  return (
+    builtinModel(id) ?? (resolveCustomModel(id) as unknown as PiModel | undefined) ?? OPENROUTER_CATALOG_MODELS.get(id)
+  );
 }
 
 export function auxiliaryModelForProvider(provider: string): string | undefined {
@@ -168,6 +207,8 @@ export function contextTokenBudgetForModel(id: string): number | undefined {
 
 export function modelSupportedByHarness(id: string | undefined, harness: string): boolean {
   if (!id) return false;
+  if (isCustomModelId(id) && !REGISTRY_BY_ID.has(id))
+    return harness === "pi" || harness === "opencode" || harness === "mock";
   if (harness === "pi" || harness === "opencode" || harness === "mock") return Boolean(resolveModel(id));
   const provider = resolveModel(id)?.provider;
   if (harness === "claude") return provider === "anthropic" || /^claude-/i.test(id);
@@ -203,6 +244,7 @@ function providerFlags(value: ModelProviderAvailability): ModelProviderAvailabil
 export function modelServiceable(id: string, providers: ModelProviderAvailability): boolean {
   const provider = resolveModel(id)?.provider;
   if (!provider) return false;
+  if (isCustomModelId(id) && !REGISTRY_BY_ID.has(id)) return true;
   if (provider === "openai") return providers.openai;
   if (provider === "anthropic") return providers.anthropic;
   if (provider === "openrouter") return providers.openrouter;

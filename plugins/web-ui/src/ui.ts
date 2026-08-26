@@ -1,5 +1,6 @@
-import { html, type TemplateResult } from "lit";
-import { createElement, type IconNode } from "lucide";
+import { html, nothing, type TemplateResult } from "lit";
+import { live } from "lit/directives/live.js";
+import { Check, ChevronDown, createElement, type IconNode } from "lucide";
 
 export function brandName(): string {
   if (typeof document === "undefined") return "QM";
@@ -20,6 +21,36 @@ export function icon(node: IconNode, size = 18): SVGElement {
     "stroke-width": 1.9,
   });
   return el;
+}
+
+export function fieldSelect(props: {
+  options: TemplateResult | TemplateResult[];
+  onChange: (value: string, event: Event) => void;
+  value?: string;
+  id?: string;
+  ariaLabel?: string;
+  describedBy?: string;
+  focusKey?: string;
+  disabled?: boolean;
+  compact?: boolean;
+  className?: string;
+}): TemplateResult {
+  return html`<span
+    class=${`field-select${props.compact ? " compact" : ""}${props.className ? ` ${props.className}` : ""}`}
+  >
+    <select
+      id=${props.id ?? nothing}
+      aria-label=${props.ariaLabel ?? nothing}
+      aria-describedby=${props.describedBy ?? nothing}
+      data-focus-key=${props.focusKey ?? nothing}
+      .value=${props.value === undefined ? nothing : live(props.value)}
+      ?disabled=${props.disabled ?? false}
+      @change=${(e: Event) => props.onChange((e.currentTarget as HTMLSelectElement).value, e)}
+    >
+      ${props.options}
+    </select>
+    ${icon(ChevronDown, 16)}
+  </span>`;
 }
 
 export function initials(s: string): string {
@@ -112,4 +143,22 @@ export function toggleFormMenu(e: Event): void {
   control.querySelector<HTMLButtonElement>(".menu-button")?.setAttribute("aria-expanded", open ? "true" : "false");
   const menu = control.querySelector<HTMLElement>(".menu-popover");
   if (menu) menu.hidden = !open;
+}
+
+export function setFormMenuValue(control: HTMLElement | null, value: string, labelText: string): void {
+  if (!control) return;
+  const input = control.querySelector<HTMLInputElement>('input[type="hidden"]');
+  if (input) input.value = value;
+  const label = control.querySelector<HTMLElement>(".menu-label");
+  if (label) label.textContent = labelText;
+  control.querySelectorAll<HTMLButtonElement>(".menu-option").forEach((option) => {
+    const active = option.dataset.value === value;
+    option.classList.toggle("active", active);
+    option.setAttribute("aria-checked", active ? "true" : "false");
+    option.querySelector("svg")?.remove();
+  });
+  const activeOption = Array.from(control.querySelectorAll<HTMLButtonElement>(".menu-option")).find((option) =>
+    option.classList.contains("active"),
+  );
+  if (activeOption) activeOption.append(icon(Check, 15));
 }

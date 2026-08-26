@@ -1,5 +1,7 @@
-import type { Cron, CronFireLogEntry, CronSchedule, Destination, Principal } from "../types.ts";
+import { isDeepStrictEqual } from "node:util";
+import type { Cron, CronFireLogEntry, CronSchedule, Destination, Principal, Webhook } from "../types.ts";
 import type { CreateCronInput, CronPatch } from "../cron/cron-store.ts";
+import type { CreateWebhookInput } from "../webhooks/webhook-store.ts";
 import type { CapabilityClaims } from "../auth/capability-token.ts";
 import type { Scheduler } from "../cron/scheduler.ts";
 import { DEFAULT_CRON_TIMEZONE } from "../cron/schedule.ts";
@@ -10,6 +12,7 @@ import { sendConsentNotice } from "../triggers/consent-notice.ts";
 import { notifyOwnerOfCronEdit, type CronEditDetail } from "../triggers/edit-notice.ts";
 import { errMessage, swallow } from "../util/errors.ts";
 import { AdminError } from "../admin/admin-service.ts";
+import type { AdminService } from "../admin/admin-service.ts";
 import {
   livePersonCapability,
   resolveShareTarget,
@@ -32,6 +35,7 @@ export interface CronCreateRequest {
   destinationKey?: string;
   runAs?: "owner" | "scopeFloor" | "scopeShared";
   unfurlLinks?: boolean;
+  unattendedGrants?: string[];
 }
 
 export type CronCreateResult =
@@ -55,10 +59,22 @@ export type CronCreateResult =
         | "identity_unverified"
         | "unknown_destination"
         | "members_unavailable"
+        | "forbidden"
         | "cron_create_failed";
       message: string;
       candidates?: Array<{ id: string; label: string }>;
     };
+
+export interface WebhookCreateRequest {
+  action: string;
+  verification: Webhook["verification"];
+  filters?: Webhook["filters"];
+  destinationKey?: string;
+}
+
+export type WebhookCreateResult =
+  | { ok: true; webhook: Webhook; url: string; secret?: string }
+  | { ok: false; code: "bad_request" | "unknown_destination" | "webhook_create_failed"; message: string };
 
 export interface CronPatchRequest {
   title?: string;
@@ -69,6 +85,7 @@ export interface CronPatchRequest {
   archived?: boolean;
   unfurlLinks?: boolean;
   runAs?: "owner" | "scopeFloor" | "scopeShared";
+  unattendedGrants?: string[];
 }
 
 export interface CronRunsRequest {
@@ -80,6 +97,9 @@ export interface CronRunsResult {
   runs: CronFireLogEntry[];
   total: number;
 }
+
+export const CRON_PATCH_NOTHING_TO_CHANGE =
+  "nothing to change — pass title, task, schedule, enabled, archived, unfurlLinks, runAs, or unattendedGrants";
 
 export type ControlOk<T> = { ok: true } & T;
 export type ControlErr<C extends string> = { ok: false; code: C; message: string };
@@ -119,6 +139,16 @@ export interface ControlService {
     destinationKey: string,
     claims: CapabilityClaims,
   ): Promise<ControlOk<{ cron: Cron }> | ControlErr<"not_found" | "forbidden" | "unknown_destination">>;
+  createWebhook(
+    req: WebhookCreateRequest,
+    claims: CapabilityClaims,
+    publicBase: string | undefined,
+  ): Promise<WebhookCreateResult>;
+  listWebhooks(claims: CapabilityClaims): Promise<Webhook[]>;
+  disableWebhook(
+    id: string,
+    claims: CapabilityClaims,
+  ): Promise<ControlOk<Record<never, never>> | ControlErr<"not_found" | "forbidden">>;
   readSoul(claims: CapabilityClaims): { effectiveSoul: string; soul: string | null; soulVersion: number };
   writeSoul(
     content: string,
@@ -141,6 +171,18 @@ export async function canAdministerCron(
   return app.managesScope(actorId, cron.ownerScopeId);
 }
 
+export async function canAdministerWebhook(
+  app: Pick<App, "membershipControlsScope" | "managesScope" | "samePerson">,
+  webhook: Webhook,
+  actorId: string,
+  isActor?: (id: string) => Promise<boolean>,
+): Promise<boolean> {
+  if (await app.membershipControlsScope(webhook.ownerScopeId)) {
+    return app.managesScope(actorId, webhook.ownerScopeId);
+  }
+  return isActor ? isActor(webhook.owner) : app.samePerson(webhook.owner, actorId);
+}
+
 function withDefaultTimezone(schedule: CronSchedule, cap: CapabilityClaims): CronSchedule {
   if (schedule.cron === undefined || schedule.timezone !== undefined) return schedule;
   const tz = typeof cap.timezone === "string" && cap.timezone.trim() ? cap.timezone : DEFAULT_CRON_TIMEZONE;
@@ -149,6 +191,26 @@ function withDefaultTimezone(schedule: CronSchedule, cap: CapabilityClaims): Cro
 
 function scopeIsMembershipControlled(scope: string, cap: { scopeId: string; privateScope?: boolean }): boolean {
   return cap.privateScope === true && cap.scopeId === scope;
+}
+
+function hasCronPatchField(req: CronPatchRequest): boolean {
+  return (
+    req.title !== undefined ||
+    req.action !== undefined ||
+    req.text !== undefined ||
+    req.schedule !== undefined ||
+    req.enabled !== undefined ||
+    req.archived !== undefined ||
+    req.unfurlLinks !== undefined ||
+    req.runAs !== undefined ||
+    req.unattendedGrants !== undefined
+  );
+}
+
+function cronPatchChanges(before: Cron, patch: CronPatch): boolean {
+  return (Object.entries(patch) as Array<[keyof CronPatch, unknown]>).some(
+    ([key, value]) => !isDeepStrictEqual(before[key as keyof Cron], value),
+  );
 }
 
 export async function resolveRunAsChange(
@@ -197,25 +259,16 @@ async function patchFromCronPatchRequest(
   req: CronPatchRequest,
   capability: CapabilityClaims,
 ): Promise<CronPatch | ControlErr<"bad_request" | "forbidden">> {
-  const mode = await resolveRunAsChange(app, before, req.runAs, capability);
-  if (!mode.ok) return mode;
-  const changesMode = mode.patch.runAs !== undefined;
-  if (
-    req.title === undefined &&
-    req.action === undefined &&
-    req.text === undefined &&
-    req.schedule === undefined &&
-    req.enabled === undefined &&
-    req.archived === undefined &&
-    req.unfurlLinks === undefined &&
-    !changesMode
-  ) {
+  if (!hasCronPatchField(req)) {
     return {
       ok: false,
       code: "bad_request",
-      message: "nothing to change — pass title, task, schedule, enabled, archived, unfurlLinks, or runAs",
+      message: CRON_PATCH_NOTHING_TO_CHANGE,
     };
   }
+  const mode = await resolveRunAsChange(app, before, req.runAs, capability);
+  if (!mode.ok) return mode;
+  const changesMode = mode.patch.runAs !== undefined;
   if (req.unfurlLinks !== undefined && !before.destination) {
     return {
       ok: false,
@@ -243,7 +296,29 @@ async function patchFromCronPatchRequest(
   };
 }
 
-export function createControlService(app: App, scheduler?: Scheduler): ControlService {
+const UNATTENDED_GRANTS = new Set(["admin.sessions.read"]);
+
+function validateUnattendedGrants(grants: string[]): string | null {
+  if (!grants.every((grant) => UNATTENDED_GRANTS.has(grant))) return "unknown unattended grant";
+  return null;
+}
+
+async function unattendedGrantRefusal(
+  app: App,
+  admin: AdminService | undefined,
+  cron: Pick<Cron, "owner" | "ownerScopeId" | "runAs">,
+  capability: CapabilityClaims,
+): Promise<string | null> {
+  if (capability.liveActor !== true) return "unattended grants require a live turn started by the cron owner";
+  if (!(await app.samePerson(cron.owner, capability.actorId))) return "only the cron owner may set unattended grants";
+  if (!cron.ownerScopeId.startsWith("personal:") || (cron.runAs !== undefined && cron.runAs !== "owner"))
+    return "unattended grants require a personal-scope cron that runs as its owner";
+  const status = await admin?.adminStatusOf({ id: capability.actorId, type: "internal" }).catch(() => undefined);
+  if (!status?.isAdmin) return "unattended grants require the cron owner to be a current org admin";
+  return null;
+}
+
+export function createControlService(app: App, scheduler?: Scheduler, admin?: AdminService): ControlService {
   const notifyEdit = (
     cron: Cron,
     cap: CapabilityClaims,
@@ -260,6 +335,10 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
     });
   return {
     async createCron(req, capability): Promise<CronCreateResult> {
+      if (req.unattendedGrants !== undefined) {
+        const invalid = validateUnattendedGrants(req.unattendedGrants);
+        if (invalid) return { ok: false, code: "bad_request", message: invalid };
+      }
       if (req.action === undefined && req.text === undefined) {
         return { ok: false, code: "bad_request", message: "task (what to do) or text (exact text to send) required" };
       }
@@ -391,6 +470,18 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
             "scopeShared needs a private channel or group DM you're in — not a public channel, a DM, or a different named channel",
         };
       }
+      if (req.unattendedGrants !== undefined) {
+        const refusal = await unattendedGrantRefusal(
+          app,
+          admin,
+          { owner: capability.actorId, ownerScopeId, runAs },
+          capability,
+        );
+        if (refusal) {
+          const code = refusal.includes("personal-scope") ? "bad_request" : "forbidden";
+          return { ok: false, code, message: refusal };
+        }
+      }
 
       if (req.unfurlLinks !== undefined && !destination) {
         return {
@@ -417,6 +508,7 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
           ? { recipientConsent: { recipientId: consentRecipient, status: "pending" as const } }
           : {}),
         ...(runAs === "scopeFloor" || runAs === "scopeShared" ? { runAs, members: capability.members } : {}),
+        ...(req.unattendedGrants !== undefined ? { unattendedGrants: req.unattendedGrants } : {}),
       };
       try {
         const cron = await app.createCron(input);
@@ -472,9 +564,8 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
       if (req.limit !== undefined && (!Number.isInteger(req.limit) || req.limit < 1)) {
         return { ok: false, code: "bad_request", message: "limit must be a positive integer" };
       }
-      const fireLog = cron.fireLog ?? [];
-      const runs = req.limit !== undefined ? fireLog.slice(-req.limit) : fireLog;
-      return { ok: true, cron, runs, total: fireLog.length };
+      const { runs, total } = await app.getCronRuns(id, req.limit);
+      return { ok: true, cron, runs, total };
     },
 
     async patchCron(id, req, capability) {
@@ -482,8 +573,31 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
       if (!before) return { ok: false, code: "not_found", message: `no cron ${id}` };
       if (!(await canAdministerCron(app, before, capability.actorId, capability.scopeId)))
         return { ok: false, code: "forbidden", message: "not your cron" };
+      if (req.unattendedGrants !== undefined) {
+        const invalid = validateUnattendedGrants(req.unattendedGrants);
+        if (invalid) return { ok: false, code: "bad_request", message: invalid };
+      }
       const patch = await patchFromCronPatchRequest(app, before, req, capability);
       if ("ok" in patch) return patch;
+      if (req.unattendedGrants !== undefined) patch.unattendedGrants = req.unattendedGrants;
+      else if ((before.unattendedGrants?.length ?? 0) > 0) patch.unattendedGrants = before.unattendedGrants;
+      if (!cronPatchChanges(before, patch)) return { ok: true, cron: before };
+      if ((before.unattendedGrants?.length ?? 0) > 0 || req.unattendedGrants !== undefined) {
+        const refusal = await unattendedGrantRefusal(
+          app,
+          admin,
+          {
+            owner: before.owner,
+            ownerScopeId: before.ownerScopeId,
+            runAs: req.runAs ?? before.runAs,
+          },
+          capability,
+        );
+        if (refusal) {
+          const code = refusal.includes("personal-scope") ? "bad_request" : "forbidden";
+          return { ok: false, code, message: refusal };
+        }
+      }
       try {
         const cron = await app.updateCron(id, patch);
         if (!cron) return { ok: false, code: "not_found", message: `no cron ${id}` };
@@ -519,6 +633,10 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
       if (!cron) return { ok: false, code: "not_found", message: `no cron ${id}` };
       if (!(await canAdministerCron(app, cron, capability.actorId, capability.scopeId)))
         return { ok: false, code: "forbidden", message: "not your cron" };
+      if (enabled && (cron.unattendedGrants?.length ?? 0) > 0) {
+        const refusal = await unattendedGrantRefusal(app, admin, cron, capability);
+        if (refusal) return { ok: false, code: "forbidden", message: refusal };
+      }
       await app.setCronEnabled(id, enabled);
       await notifyEdit(cron, capability, [`enabled=${enabled}`], `enabled=${enabled}`);
       const after = await app.getCron(id);
@@ -530,6 +648,10 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
       if (!cron) return { ok: false, code: "not_found", message: `no cron ${id}` };
       if (!(await canAdministerCron(app, cron, capability.actorId, capability.scopeId)))
         return { ok: false, code: "forbidden", message: "not your cron" };
+      if ((cron.unattendedGrants?.length ?? 0) > 0) {
+        const refusal = await unattendedGrantRefusal(app, admin, cron, capability);
+        if (refusal) return { ok: false, code: "forbidden", message: refusal };
+      }
       if (!scheduler)
         return {
           ok: false,
@@ -551,6 +673,10 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
       if (!cron) return { ok: false, code: "not_found", message: `no cron ${id}` };
       if (!(await canAdministerCron(app, cron, capability.actorId, capability.scopeId)))
         return { ok: false, code: "forbidden", message: "not your cron" };
+      if ((cron.unattendedGrants?.length ?? 0) > 0) {
+        const refusal = await unattendedGrantRefusal(app, admin, cron, capability);
+        if (refusal) return { ok: false, code: "forbidden", message: refusal };
+      }
       const resolved = resolveCapabilityDestination(capability, destinationKey);
       if (!resolved.ok) {
         return {
@@ -569,6 +695,79 @@ export function createControlService(app: App, scheduler?: Scheduler): ControlSe
         destLabel ? { destinationLabel: destLabel } : undefined,
       );
       return { ok: true, cron: updated ?? cron };
+    },
+
+    async createWebhook(req, capability, publicBase): Promise<WebhookCreateResult> {
+      const resolved = resolveCapabilityDestination(capability, req.destinationKey);
+      if (!resolved.ok) {
+        return {
+          ok: false,
+          code: "unknown_destination",
+          message: "destinationKey is not one of the destinations available for this conversation",
+        };
+      }
+      // A webhook is standing (event-driven); a third-party-principal destination needs the
+      // recipient's consent, same as a recurring cron. (Today destinationKey only resolves the
+      // current conversation, so this won't fire — the gate is here so it stays correct if webhook
+      // addressing ever widens.)
+      const consentRecipient = consentRequiredRecipient({
+        owner: capability.actorId,
+        standing: true,
+        destination: resolved.destination,
+      });
+      const input: CreateWebhookInput = {
+        action: req.action,
+        verification: req.verification,
+        owner: capability.actorId,
+        createdBy: capability.actorId,
+        ownerScopeId: capability.scopeId,
+        ...(req.filters?.length ? { filters: req.filters } : {}),
+        ...(resolved.destination ? { destination: resolved.destination } : {}),
+        ...(consentRecipient
+          ? { recipientConsent: { recipientId: consentRecipient, status: "pending" as const } }
+          : {}),
+      };
+      try {
+        const webhook = await app.createWebhook(input);
+        if (consentRecipient) {
+          const ownerMember = await app.directoryMember(capability.actorId);
+          await sendConsentNotice((i) => app.enqueueDelivery(i), {
+            triggerId: webhook.id,
+            recipientId: consentRecipient,
+            ownerId: capability.actorId,
+            ...(ownerMember?.displayName ? { ownerName: ownerMember.displayName } : {}),
+            what: "an event-triggered message",
+          });
+        }
+        const incomingPath = `/v1/webhooks/incoming/${webhook.id}`;
+        const base = publicBase ? publicBase.replace(/\/$/, "") : "";
+        return {
+          ok: true,
+          webhook,
+          url: base ? `${base}${incomingPath}` : incomingPath,
+          ...(webhook.verification.secret ? { secret: webhook.verification.secret } : {}),
+        };
+      } catch (e) {
+        return { ok: false, code: "webhook_create_failed", message: errMessage(e) };
+      }
+    },
+
+    async listWebhooks(capability) {
+      const all = await app.listWebhooks();
+      const isActor = await app.personMatcher(capability.actorId);
+      const allowed = await Promise.all(
+        all.map((webhook) => canAdministerWebhook(app, webhook, capability.actorId, isActor)),
+      );
+      return all.filter((_webhook, index) => allowed[index]);
+    },
+
+    async disableWebhook(id, capability) {
+      const webhook = await app.getWebhook(id);
+      if (!webhook) return { ok: false, code: "not_found", message: `no webhook ${id}` };
+      if (!(await canAdministerWebhook(app, webhook, capability.actorId)))
+        return { ok: false, code: "forbidden", message: "not your webhook" };
+      await app.setWebhookEnabled(id, false);
+      return { ok: true };
     },
 
     readSoul(capability) {

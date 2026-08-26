@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import type { Pool, PoolClient } from "pg";
 import { swallowAs } from "../util/errors.ts";
+import { errMessage } from "../util/errors.ts";
 
 export type { Pool, PoolClient };
 
@@ -43,11 +45,23 @@ export function assertOneStatement(stmt: string): void {
   }
 }
 
+export function concurrentIndexName(stmt: string): string | undefined {
+  return /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+([a-z_][a-z0-9_$]*)\b/i.exec(stmt)?.[1];
+}
+
 async function applyDdl(pool: Pool, statements: string[]): Promise<void> {
   const ddl = await pool.connect();
   try {
     await ddl.query("SELECT pg_advisory_lock(hashtext('agent-platform:schema-init'))");
     for (const stmt of statements) {
+      const indexName = concurrentIndexName(stmt);
+      if (indexName) {
+        const existing = await ddl.query(
+          "SELECT NOT indisvalid OR NOT indisready AS invalid FROM pg_index WHERE indexrelid = to_regclass($1)",
+          [indexName],
+        );
+        if (existing.rows[0]?.invalid) await ddl.query(`DROP INDEX CONCURRENTLY ${indexName}`);
+      }
       await ddl.query(stmt);
     }
   } finally {
@@ -58,6 +72,41 @@ async function applyDdl(pool: Pool, statements: string[]): Promise<void> {
   }
 }
 
+/**
+ * Extra root-CA trust for the Postgres connection, with full verification
+ * semantics kept. Managed providers (Supabase's pooler, RDS, …) often pin a
+ * private root the container's trust store doesn't carry; without a supported
+ * way to add it, operators were left choosing between sslmode=no-verify and
+ * forking the image. DATABASE_CA_CERT carries PEM content (a secret-store
+ * value); DATABASE_CA_CERT_FILE points at a mounted file. Parsed once at the
+ * process boundary (config.ts / a script's own env read), installed here, and
+ * applied to every pg pool and client this process opens — database CA trust
+ * is inherently process-global, like NODE_EXTRA_CA_CERTS.
+ */
+export function resolvePgCaTrust(opts: { cert?: string; certFile?: string }): { ssl?: { ca: string } } {
+  if (opts.cert?.trim()) return { ssl: { ca: opts.cert } };
+  if (opts.certFile?.trim()) {
+    try {
+      return { ssl: { ca: readFileSync(opts.certFile, "utf8") } };
+    } catch (e) {
+      throw new Error(`DATABASE_CA_CERT_FILE is set but unreadable (${opts.certFile}): ${errMessage(e)}`, {
+        cause: e,
+      });
+    }
+  }
+  return {};
+}
+
+let installedCaTrust: { ssl?: { ca: string } } = {};
+
+export function configurePgCaTrust(opts: { cert?: string; certFile?: string }): void {
+  installedCaTrust = resolvePgCaTrust(opts);
+}
+
+export function pgCaOptions(): { ssl?: { ca: string } } {
+  return installedCaTrust;
+}
+
 export function createPgPool(connectionString: string, statements: string[]): PgPool {
   const schema = statements.map((s) => s.trim()).filter((s) => s.length > 0);
   for (const stmt of schema) assertOneStatement(stmt);
@@ -66,8 +115,8 @@ export function createPgPool(connectionString: string, statements: string[]): Pg
     if (!poolP) {
       poolP = (async () => {
         const pg = (await import("pg")).default;
-        const p = new pg.Pool({ connectionString });
-        p.on("error", (err) => console.error("[pg] idle client error:", err));
+        const p = new pg.Pool({ connectionString, ...pgCaOptions() });
+        p.on("error", (err) => console.error("[pg] idle client error:", errMessage(err)));
         try {
           await applyDdl(p, schema);
         } catch (e) {

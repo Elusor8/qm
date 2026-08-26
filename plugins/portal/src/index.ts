@@ -35,6 +35,7 @@ import {
   FORWARD_DEPLOYMENT_LAYER_HEADERS,
   FORWARD_OAUTH_HEADERS,
   FORWARD_BROKER_HEADERS,
+  FORWARD_WEBHOOK_HEADERS,
 } from "./proxy.ts";
 import { signedHeaders, withSourceAuthNonce } from "../../chassis/src/core-client.ts";
 import { coreClaimStore, withinRateLimit } from "../../chassis/src/claims.ts";
@@ -118,6 +119,15 @@ const UPSTREAMS: Record<string, string> = {
 };
 const COOKIE_FOR: Record<string, string> = { "web-ui": "webuiuser", admin: "admin" };
 
+function isSlackIssuer(issuer: string): boolean {
+  try {
+    const host = new URL(issuer).hostname;
+    return host === "slack.com" || host.endsWith(".slack.com");
+  } catch {
+    return false;
+  }
+}
+
 const OIDC: OidcConfig = {
   authEndpoint: process.env.OIDC_AUTH_ENDPOINT ?? "https://slack.com/openid/connect/authorize",
   tokenEndpoint: process.env.OIDC_TOKEN_ENDPOINT ?? "https://slack.com/api/openid.connect.token",
@@ -192,12 +202,12 @@ export function consumeState(state: string): boolean {
 }
 
 const ADMIN_TTL_MS = 60_000;
-const ADMIN_PROBE_TIMEOUT_MS = 1500;
+const ADMIN_PROBE_TIMEOUT_MS = 6_500;
+const ADMIN_PROBE_ATTEMPTS = 2;
+const ADMIN_PROBE_RETRY_DELAY_MS = 250;
 const adminCache = new LRUCache<string, boolean>({ max: 10_000, ttl: ADMIN_TTL_MS });
 
-async function adminProbe(sub: string): Promise<{ isAdmin: boolean; failed: boolean }> {
-  const hit = adminCache.get(sub);
-  if (hit !== undefined) return { isAdmin: hit, failed: false };
+async function adminProbeAttempt(sub: string): Promise<boolean | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ADMIN_PROBE_TIMEOUT_MS);
   try {
@@ -209,16 +219,38 @@ async function adminProbe(sub: string): Promise<{ isAdmin: boolean; failed: bool
       );
     }
     const r = await fetch(`${UPSTREAMS.admin}/api/whoami`, { headers, signal: ctrl.signal });
-    if (!r.ok) return { isAdmin: false, failed: true };
-    const j = (await r.json()) as { isAdmin?: boolean };
-    const v = j.isAdmin === true;
-    adminCache.set(sub, v);
-    return { isAdmin: v, failed: false };
-  } catch {
-    return { isAdmin: false, failed: true };
+    if (!r.ok) {
+      console.warn(`[portal] admin probe returned HTTP ${r.status}`);
+      return null;
+    }
+    const j = (await r.json()) as { isAdmin?: unknown };
+    if (typeof j.isAdmin !== "boolean") {
+      console.warn("[portal] admin probe returned an invalid admin status");
+      return null;
+    }
+    return j.isAdmin;
+  } catch (error) {
+    console.warn(`[portal] admin probe failed: ${errMessage(error)}`);
+    return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function adminProbe(sub: string): Promise<{ isAdmin: boolean; failed: boolean }> {
+  const hit = adminCache.get(sub);
+  if (hit !== undefined) return { isAdmin: hit, failed: false };
+  for (let attempt = 0; attempt < ADMIN_PROBE_ATTEMPTS; attempt++) {
+    const isAdmin = await adminProbeAttempt(sub);
+    if (isAdmin === null) {
+      if (attempt + 1 < ADMIN_PROBE_ATTEMPTS)
+        await new Promise((resolve) => setTimeout(resolve, ADMIN_PROBE_RETRY_DELAY_MS));
+      continue;
+    }
+    adminCache.set(sub, isAdmin);
+    return { isAdmin, failed: false };
+  }
+  return { isAdmin: false, failed: true };
 }
 
 async function isAdmin(sub: string): Promise<boolean> {
@@ -812,7 +844,7 @@ function renewSessionCookie(req: IncomingMessage, res: ServerResponse): void {
 
 const server = createServer((req, res) => {
   void handle(req, res).catch((err: unknown) => {
-    console.error(`[portal] 500 ${req.method ?? "?"} ${(req.url ?? "?").split("?")[0]}:`, err);
+    console.error("[portal] 500 %s %s: %s", req.method ?? "?", (req.url ?? "?").split("?")[0], String(err));
     if (!res.headersSent) json(res, 500, { error: "internal_error" });
     else res.end();
   });
@@ -921,6 +953,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const rawPath = rawTarget.split("?")[0] ?? "";
   if (/%2f|%5c|%2e%2e|\\|\x00/i.test(rawPath) || rawPath.includes("//") || pathname.includes("/..")) {
     return json(res, 400, { error: "bad_request", message: "illegal path" });
+  }
+
+  if (method === "POST" && /^\/v1\/webhooks\/incoming\/[^/]+$/.test(pathname)) {
+    return proxyToUpstream(req, res, { baseUrl: CORE, path: pathname, search: url.search }, FORWARD_WEBHOOK_HEADERS);
   }
 
   const consentBounce = (): void => {
@@ -1260,7 +1296,7 @@ export function bootChecks(): void {
     if (OIDC.expectedTeamId !== undefined && isMissingOrPlaceholder(OIDC.expectedTeamId)) {
       problems.push("PORTAL_EXPECTED_TEAM_ID is optional, but may not be a placeholder when configured");
     }
-    if (OIDC.issuer !== "https://slack.com" && !OIDC_JWKS_CONFIGURED) {
+    if (!isSlackIssuer(OIDC.issuer) && !OIDC_JWKS_CONFIGURED) {
       problems.push("OIDC_JWKS_URI is required for a non-Slack issuer");
     }
     if (SESSION_SECRET && CORE_SIGNING_SECRET && SESSION_SECRET === CORE_SIGNING_SECRET) {

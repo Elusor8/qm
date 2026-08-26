@@ -1,6 +1,5 @@
 import { html, nothing, render, type TemplateResult } from "lit";
 import {
-  ArrowLeft,
   Box,
   Brain,
   ChevronDown,
@@ -14,6 +13,9 @@ import {
   Plus,
   RefreshCw,
   Rocket,
+  Search,
+  ShieldCheck,
+  Webhook,
   type IconNode,
 } from "lucide";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
@@ -29,26 +31,20 @@ import {
 import { applyRuntimeOptions } from "./model-options";
 import { errMessage, swallow } from "../../chassis/src/errors";
 import { brandMark, brandName, icon, initials } from "./ui";
-import {
-  chatState,
-  markConnectorConnected,
-  mountContinuable,
-  newChat,
-  postCurrentPaneState,
-  resetChatState,
-  teardownActiveChat,
-} from "./chat";
-import { composerState, resetComposer, resyncModelSelection } from "./composer";
+import { markConnectorConnected } from "./chat";
+import { clearSkillsCache, resyncModelSelection, seedRuntimeConfig } from "./composer";
+import { ensureDeliveryStream, mainConversation, onExitCanvas } from "./conversations";
 import { clearAllDrafts, saveDraft, storedDraft } from "./drafts";
-import { deepLinkPath, parseDeepLink, UI_BASE } from "./deep-link";
-import { embedMode } from "./embed";
+import { deepLinkPath, isPlainLeftClick, parseDeepLink, UI_BASE } from "./deep-link";
 import {
   addBlankPane,
+  adoptRemoteSplit,
   canvasToast,
   drawCanvas,
   exitSplitIfActive,
   loadPersistedSplit,
   mountRestoredCanvas,
+  restoredCanvasNeedsSessionList,
   splitState,
 } from "./split";
 import { activityOf } from "./session-list";
@@ -63,14 +59,18 @@ import {
   sessionsState,
   toggleWebOnly,
 } from "./sessions";
-import { renderCronsPage, resetActiveCron } from "./crons";
+import { openCronById, renderCronsPage, resetActiveCron, routeCronsHistory } from "./crons";
+import { openWebhookById, renderWebhooksPage, resetActiveWebhook, routeWebhooksHistory } from "./webhooks";
 import { renderFiles } from "./files";
+import { setScopedSession } from "./session-scope";
+import { openChatSearch, SEARCH_HOTKEY_LABEL } from "./search";
+import { hideTooltip, showTooltip } from "./tooltip";
 import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeychainState } from "./connectors";
 import { renderDeploys } from "./deploys";
 import { renderMemory, resetMemoryState } from "./memory";
 import { renderSkills } from "./skills";
-import { contextsState, ensureContexts, renderContexts, resetContextsState } from "./contexts";
-import { appState, isView, type AuthMode, type Me, type View } from "./shell-state";
+import { contextsState, ensureContexts, renderContexts, resetContextsState, resolveProjectScope } from "./contexts";
+import { appState, can, isView, type AuthMode, type Me, type View } from "./shell-state";
 import { trapDialogFocus } from "./dialog-focus";
 export { appState, can, type Me, type View } from "./shell-state";
 
@@ -82,27 +82,19 @@ setSigninRequiredHandler((detail) => {
   renderAuthGate(gateFor(authMode, detail.reason));
 });
 
+onExitCanvas(() => exitSplitIfActive());
+
 export const ADMIN_BASE = (() => {
   const base = ((import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/").replace(/\/$/, "");
   return base ? base.replace(/\/[^/]+$/, "/admin") : "/admin";
 })();
 export const ADMIN_HOME_URL = `${ADMIN_BASE}/`;
 
-export function adminSessionLogUrl(sessionId: string, scopeId: string): string {
-  const q = new URLSearchParams({ view: "history", scope: scopeId, session: sessionId });
-  return `${ADMIN_BASE}/?${q.toString()}`;
-}
-
-export function syncUrlFromState(): void {
-  if (embedMode) {
-    postCurrentPaneState();
-    if (parseDeepLink(UI_BASE, location.pathname, location.search).view === "app-edit") return;
-    const sessionId = chatState.sessionId ?? chatState.rememberedSessionId;
-    const next = sessionId ? `${deepLinkPath(UI_BASE, "chats", sessionId)}&embed=1` : `${UI_BASE}/?embed=1`;
-    if (`${location.pathname}${location.search}` !== next) history.replaceState(null, "", next);
-    return;
-  }
-  const sessionId = splitState.active ? null : (chatState.sessionId ?? chatState.rememberedSessionId);
+export function syncUrlFromState(sessionOverride?: string | null): void {
+  const chatState = mainConversation().state;
+  const fromState =
+    sessionOverride !== undefined ? sessionOverride : (chatState.sessionId ?? chatState.rememberedSessionId);
+  const sessionId = splitState.active ? null : fromState;
   const next = deepLinkPath(UI_BASE, appState.currentView, sessionId, contextsState.selected);
   if (`${location.pathname}${location.search}` !== next) history.replaceState(null, "", next);
 }
@@ -159,9 +151,9 @@ const NAV_WORKSPACE_KEY = "web-ui:nav-workspace";
 
 function loadNavOpen(key: string): boolean {
   try {
-    return localStorage.getItem(key) !== "0";
+    return localStorage.getItem(key) === "1";
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -188,6 +180,7 @@ const ICON = {
   files: Files,
   keychain: KeyRound,
   deploys: Rocket,
+  webhooks: Webhook,
   crons: Clock,
   memory: Brain,
   skills: Box,
@@ -204,14 +197,15 @@ export async function signOut(): Promise<void> {
   }
   appState.me = null;
   clearAllDrafts();
-  resetChatState();
+  exitSplitIfActive();
+  mainConversation().resetChatState();
   resetSessionsState();
   appState.currentView = "chats";
-  composerState.skillsCache = null;
+  clearSkillsCache();
   resetMemoryState();
   resetContextsState();
   resetKeychainState();
-  resetComposer();
+  mainConversation().composer.resetComposer();
   if (!portal) {
     renderAuthGate({ kind: "dev" });
     return;
@@ -427,19 +421,6 @@ function gateFor(mode: AuthMode, reason: "unauthenticated" | "not_allowed" | und
 }
 
 export function mountShell(): void {
-  if (embedMode) {
-    render(
-      html`<div class="layout embed-layout">
-        <section class="main" id="main"><div class="empty">Loading…</div></section>
-      </div>`,
-      appEl as HTMLElement,
-    );
-    appState.topEl = null;
-    appState.listEl = null;
-    appState.mainEl = (appEl as HTMLElement).querySelector("#main");
-    shellMounted = true;
-    return;
-  }
   applySavedSidebarWidth();
   const impersonatedBy = appState.me?.impersonatedBy ?? null;
   let banner: TemplateResult | null = null;
@@ -469,10 +450,7 @@ export function mountShell(): void {
               <span class="avatar">${initials(appState.me?.user ?? "?")}</span>
               <span class="user-name">${appState.me?.user ?? ""}</span>
             </div>
-            <a class="icon-btn subtle" href=${ADMIN_HOME_URL} title="Back to admin" aria-label="Back to admin"
-              >${icon(ArrowLeft, 17)}</a
-            >
-            <theme-toggle></theme-toggle>
+            <theme-toggle .includeSystem=${true} title="Color scheme: light / dark / system"></theme-toggle>
             <button class="icon-btn subtle" title="Sign out" aria-label="Sign out" @click=${signOut}>
               ${icon(LogOut, 17)}
             </button>
@@ -507,9 +485,14 @@ export function mountShell(): void {
 export function renderSidebarTop(): void {
   if (!appState.topEl) return;
   const navRow = (v: View, glyph: IconNode, label: string) =>
-    html`<button class="navrow ${appState.currentView === v ? "active" : ""}" type="button" data-view=${v}>
+    html`<a
+      class="navrow ${appState.currentView === v ? "active" : ""}"
+      href=${deepLinkPath(UI_BASE, v, null)}
+      data-view=${v}
+      title=${label}
+    >
       ${icon(glyph, 17)}<span>${label}</span>
-    </button>`;
+    </a>`;
   const navGroup = (id: string, title: string, open: boolean, toggle: () => void, rows: TemplateResult) => html`
     <button
       class="nav-section-toggle"
@@ -530,9 +513,10 @@ export function renderSidebarTop(): void {
     html`
       <button
         class="new-chat"
+        title=${splitState.active ? "New session" : "New chat"}
         @click=${() => {
           closeSidebarOnNarrowView();
-          if (!addBlankPane()) newChat();
+          if (!addBlankPane()) mainConversation().newChat();
         }}
       >
         ${icon(ICON.newChat, 17)}<span>${splitState.active ? "New session" : "New chat"}</span>
@@ -546,30 +530,49 @@ export function renderSidebarTop(): void {
           html`
             ${navRow("contexts", ICON.contexts, "Projects")} ${navRow("chats", ICON.chats, "Chats")}
             ${navRow("files", ICON.files, "Files")} ${navRow("crons", ICON.crons, "Crons")}
-            ${navRow("keychain", ICON.keychain, "Keychain")} ${navRow("deploys", ICON.deploys, "Apps")}
-            ${navRow("memory", ICON.memory, "Memory")} ${navRow("skills", ICON.skills, "Skills")}
+            ${navRow("webhooks", ICON.webhooks, "Webhooks")} ${navRow("keychain", ICON.keychain, "Keychain")}
+            ${navRow("deploys", ICON.deploys, "Apps")} ${navRow("memory", ICON.memory, "Memory")}
+            ${navRow("skills", ICON.skills, "Skills")}
+            ${
+              can("admin")
+                ? html`<a class="navrow" href=${ADMIN_HOME_URL} title="Admin">
+                    ${icon(ShieldCheck, 17)}<span>Admin</span>
+                  </a>`
+                : nothing
+            }
           `,
         )}
       </nav>
-      ${
-        appState.currentView === "chats"
-          ? html`
-              <div class="section-label recents-label">
-                <span>Sessions</span>
-                <button
-                  class="web-only-toggle ${sessionsState.webOnly ? "on" : ""}"
-                  type="button"
-                  role="switch"
-                  aria-checked=${sessionsState.webOnly ? "true" : "false"}
-                  title=${sessionsState.webOnly ? "Showing web chats only" : "Hide non-web conversations"}
-                  @click=${toggleWebOnly}
-                >
-                  <span>Web only</span><span class="mini-switch"><span class="mini-knob"></span></span>
-                </button>
-              </div>
-            `
-          : ""
-      }
+      ${html`
+        <div class="section-label recents-label">
+          <span>Sessions</span>
+          <button
+            class="chat-search-open"
+            type="button"
+            aria-label="Search your chats"
+            @click=${() => {
+              hideTooltip();
+              openChatSearch();
+            }}
+            @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, `Search your chats · ${SEARCH_HOTKEY_LABEL}`)}
+            @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+            @focus=${(e: Event) => showTooltip(e.currentTarget as Element, `Search your chats · ${SEARCH_HOTKEY_LABEL}`)}
+            @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+          >
+            ${icon(Search, 13)}
+          </button>
+          <button
+            class="web-only-toggle ${sessionsState.webOnly ? "on" : ""}"
+            type="button"
+            role="switch"
+            aria-checked=${sessionsState.webOnly ? "true" : "false"}
+            title=${sessionsState.webOnly ? "Showing web chats only" : "Hide non-web conversations"}
+            @click=${toggleWebOnly}
+          >
+            <span>Web only</span><span class="mini-switch"><span class="mini-knob"></span></span>
+          </button>
+        </div>
+      `}
     `,
     appState.topEl,
   );
@@ -577,12 +580,14 @@ export function renderSidebarTop(): void {
 
 function onNavClick(e: Event): void {
   const target = e.target as Element | null;
-  const row = target?.closest<HTMLButtonElement>(".navrow[data-view]");
+  const row = target?.closest<HTMLAnchorElement>(".navrow[data-view]");
   const view = row?.dataset.view;
-  if (isView(view)) {
-    switchView(view);
-    closeSidebarOnNarrowView();
-  }
+  if (!isView(view)) return;
+  if (e instanceof MouseEvent && !isPlainLeftClick(e)) return;
+  e.preventDefault();
+  setScopedSession(null);
+  switchView(view);
+  closeSidebarOnNarrowView();
 }
 
 export function switchView(v: View): void {
@@ -596,17 +601,20 @@ export function switchView(v: View): void {
   sessionsState.openMenuId = null;
   sessionsState.renamingId = null;
   if (v !== "chats") {
-    teardownActiveChat();
-    resetComposer();
+    mainConversation().teardown();
+    mainConversation().composer.resetComposer();
   }
   renderSidebarTop();
   syncUrlFromState();
-  if (v !== "chats" && appState.listEl) render(nothing, appState.listEl);
   switch (v) {
     case "chats":
       if (splitState.active) drawCanvas();
       else void renderChatsPage();
       renderList();
+      break;
+    case "webhooks":
+      resetActiveWebhook();
+      void renderWebhooksPage();
       break;
     case "crons":
       resetActiveCron();
@@ -642,6 +650,9 @@ function refreshActiveView(v: View): void {
     case "contexts":
       void renderContexts();
       break;
+    case "webhooks":
+      void renderWebhooksPage();
+      break;
     case "crons":
       void renderCronsPage();
       break;
@@ -666,7 +677,7 @@ function refreshActiveView(v: View): void {
 
 export function showMainEmpty(text: string): void {
   exitSplitIfActive();
-  chatState.host = null;
+  mainConversation().state.host = null;
   if (appState.mainEl)
     appState.mainEl.replaceChildren(
       Object.assign(document.createElement("div"), { className: "empty", textContent: text }),
@@ -772,8 +783,16 @@ export function replacePanePreservingFocus(host: HTMLElement): void {
   replaceChildrenPreservingFocus(appState.mainEl, host);
 }
 
+window.addEventListener("popstate", () => {
+  if (appState.currentView !== "crons" && appState.currentView !== "webhooks") return;
+  const { view, item } = parseDeepLink(UI_BASE, location.pathname, location.search);
+  if (view !== appState.currentView) return;
+  if (view === "crons") routeCronsHistory(item);
+  else routeWebhooksHistory(item);
+});
+
 window.addEventListener("focus", () => {
-  if (!appState.me || embedMode) return;
+  if (!appState.me) return;
   if (appState.currentView === "contexts") void renderContexts();
   else if (appState.currentView === "chats") void refreshSessions({ silent: true, refreshContexts: true });
 });
@@ -794,7 +813,7 @@ function openAppEditChat(slug: string): void {
     return;
   }
   if (!storedDraft(threadRef)) saveDraft(threadRef, `Update my deployed app "${slug}": `);
-  mountContinuable(threadRef, null, null, []);
+  mainConversation().mountContinuable(threadRef, null, null, []);
   renderList();
 }
 
@@ -829,26 +848,39 @@ export async function boot(): Promise<void> {
   appState.me = (await r.json()) as Me;
   authMode = appState.me.mode ?? "portal";
   clearPortalAttempt();
-  const runtimeConfig = await fetchRuntimeConfig(`personal:${appState.me.user}`);
-  if (runtimeConfig)
+  const personalScope = `personal:${appState.me.user}`;
+  const runtimeConfig = await fetchRuntimeConfig(personalScope);
+  if (runtimeConfig) {
     applyRuntimeOptions(
+      personalScope,
       runtimeConfig.approvedHarnesses,
       runtimeConfig.modelsByHarness,
       runtimeConfig.effective,
       runtimeConfig.modelCatalog,
     );
+    seedRuntimeConfig(personalScope, runtimeConfig);
+  }
   resyncModelSelection();
   mountShell();
+  ensureDeliveryStream();
   warmDeferredChunks();
   loadPersistedSplit();
+  await adoptRemoteSplit();
 
   const params = new URLSearchParams(location.search);
-  const { view: wanted, session: wantedSession } = parseDeepLink(UI_BASE, location.pathname, location.search);
+  const {
+    view: wanted,
+    session: wantedSession,
+    item: wantedItem,
+  } = parseDeepLink(UI_BASE, location.pathname, location.search);
   const connectedProvider = params.get("status") === "connected" ? params.get("connector") : null;
   if (connectedProvider) markConnectorConnected(connectedProvider);
   const viewIntent = isView(wanted) && wanted !== "chats";
   const entriesPrefetch =
     wantedSession && !viewIntent ? fetchTranscript(wantedSession, { tailTurns: TAIL_TURNS }).catch(() => null) : null;
+
+  const bareEntry = !viewIntent && !wantedSession && wanted !== "app-edit" && !connectedProvider;
+  if (bareEntry && !restoredCanvasNeedsSessionList()) mountRestoredCanvas();
 
   await refreshSessions({ showLoading: true });
 
@@ -862,19 +894,6 @@ export async function boot(): Promise<void> {
     return;
   }
 
-  if (embedMode) {
-    if (wantedSession) {
-      const match = sessionsState.list.find((s) => s.id === wantedSession);
-      if (match) await openSession(match, entriesPrefetch ?? undefined);
-      else showMainEmpty("That conversation wasn't found, or you don't have access to it.");
-    } else {
-      const scope = params.get("scope");
-      const context = scope ? (await ensureContexts()).find((c) => c.scopeId === scope) : undefined;
-      newChat(context ? { scopeId: context.scopeId, name: context.name ?? null } : undefined);
-    }
-    return;
-  }
-
   if (wanted === "keychain") {
     const provider = params.get("connector");
     const status = params.get("status");
@@ -882,9 +901,12 @@ export async function boot(): Promise<void> {
     switchView("keychain");
   } else if (viewIntent) {
     if (wanted === "contexts" || wanted === "files" || wanted === "deploys") {
-      const scope = params.get("scope");
+      const scope =
+        params.get("scope") ?? (wantedItem ? resolveProjectScope(await ensureContexts(), wantedItem) : null);
       if (scope) contextsState.selected = scope;
     }
+    if (wanted === "crons" && wantedItem) openCronById(wantedItem);
+    if (wanted === "webhooks" && wantedItem) openWebhookById(wantedItem);
     switchView(wanted as View);
   } else if (wantedSession) {
     const match = sessionsState.list.find((s) => s.id === wantedSession);
@@ -902,7 +924,7 @@ export async function boot(): Promise<void> {
     const recent = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a))[0]!;
     exitSplitIfActive();
     await openSession(recent);
-  } else if (!mountRestoredCanvas()) {
-    newChat();
+  } else if (!mountRestoredCanvas() && !mainConversation().state.threadRef) {
+    mainConversation().newChat();
   }
 }

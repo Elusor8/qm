@@ -27,6 +27,7 @@ import {
   encodeDeliveryTarget,
   groupDmDisplayName,
   hasContent,
+  hydrateSlackFiles,
   isExternallyShared,
   isMpim,
   type SurfaceHeaderClient,
@@ -46,7 +47,7 @@ import {
   uploadAttachments,
   uploadFailureNote,
 } from "./lib.ts";
-import type { TurnResult } from "../types.ts";
+import type { GatewayContext, TurnResult } from "../types.ts";
 import type { AckGate } from "./deferred-ack.ts";
 import type { CoreBridge, CoreTurnBody } from "./core-bridge.ts";
 import type { BotIdentity, Directory } from "./directory.ts";
@@ -67,6 +68,7 @@ interface Incoming {
   kind: "dm" | "channel";
   channel: string;
   userId: string;
+  actor?: ActorAssertion;
   authorName?: string;
   rawText: string;
   files: SlackFile[];
@@ -125,6 +127,7 @@ export function createTurnHandler(deps: {
   serializer: ConversationSerializer;
   approvals: Approvals;
   ackEmoji: AckEmojiPicker;
+  ackEmojiCandidates?: () => readonly string[] | null;
   ids: BotIdentity;
   threads: ReturnType<typeof createThreadTracker>;
   deduper: ReturnType<typeof createDeduper>;
@@ -132,7 +135,13 @@ export function createTurnHandler(deps: {
   markEvent?: () => void;
   botToken: string;
   trustedFileHost?: string;
-  ensureHeader?: (client: SurfaceHeaderClient, channel: string, scopeId: string, kind: "dm" | "channel") => void;
+  ensureHeader?: (
+    client: SurfaceHeaderClient,
+    channel: string,
+    scopeId: string,
+    kind: "dm" | "channel",
+    ensureOpts?: { pinNew?: boolean },
+  ) => void;
 }): TurnHandler {
   const {
     bridge,
@@ -183,9 +192,14 @@ export function createTurnHandler(deps: {
       inc.recvWall !== undefined && inc.eventTs !== undefined
         ? Math.max(0, Math.round(inc.recvWall - inc.eventTs * 1000))
         : undefined;
-    const classified = inc.prefetched
-      ? { actor: inc.prefetched.actor, ...(inc.prefetched.timezone ? { timezone: inc.prefetched.timezone } : {}) }
-      : await classifyUserCached(client, inc.userId);
+    let classified: { actor: ActorAssertion; timezone?: string };
+    if (inc.actor) classified = { actor: inc.actor };
+    else if (inc.prefetched)
+      classified = {
+        actor: inc.prefetched.actor,
+        ...(inc.prefetched.timezone ? { timezone: inc.prefetched.timezone } : {}),
+      };
+    else classified = await classifyUserCached(client, inc.userId);
     const actor = classified.actor;
     const timezone = classified.timezone;
     const text = stripMention(inc.rawText, ids.botUserId);
@@ -243,6 +257,55 @@ export function createTurnHandler(deps: {
       replyThreadTs = root;
     }
 
+    let queuedRunId: string | undefined;
+    let taskList: TaskListPresenter | undefined;
+
+    if (inc.kind === "channel") {
+      const membership = inc.prefetched
+        ? {
+            audience: inc.prefetched.audience,
+            publishMembers: inc.prefetched.publishMembers,
+            slackIdsByPrincipal: inc.prefetched.slackIdsByPrincipal,
+          }
+        : await channelMembership(client, inc.channel, actor, inc.userId, channelInfo);
+      audience = membership.audience;
+      publishMembers = membership.publishMembers;
+      slackIdsByPrincipal = membership.slackIdsByPrincipal;
+      if (conversationKind === "group") channelName = groupDmDisplayName(audience) ?? channelName;
+    }
+
+    const gatewayContext: GatewayContext =
+      inc.kind === "dm"
+        ? {
+            location: "a direct message with the user",
+            details: { channel: inc.channel, ...(inc.threadTs ? { thread_ts: inc.threadTs } : {}) },
+            instructions: slackSurfaceInstructions(inc.kind),
+            reactionGuidance: REACTION_DETECT_GUIDANCE,
+            ...(ids.botHandle ? { botHandle: ids.botHandle } : {}),
+          }
+        : {
+            location: channelLocation(conversationKind, channelName, inc.channel),
+            details: {
+              channel: inc.channel,
+              ...(channelName
+                ? { channel_name: conversationPlaceLabel(conversationKind, channelName, inc.channel) }
+                : {}),
+              ...(replyThreadTs ? { thread_ts: replyThreadTs } : {}),
+            },
+            instructions: slackSurfaceInstructions(inc.kind),
+            reactionGuidance: REACTION_DETECT_GUIDANCE,
+            ...(ids.botHandle ? { botHandle: ids.botHandle } : {}),
+          };
+
+    if (audience.some((a) => a.isExternalGuest) && !(await externalParticipantsEnabled())) {
+      if (!inc.unprompted) {
+        await ephemeralOrSay(
+          "I can't respond here — this conversation isn't fully internal. Try a DM or a fully-internal channel.",
+        );
+      }
+      return;
+    }
+
     if (!inc.unprompted) {
       const intercepted = await maybeInterceptStop({
         text,
@@ -255,8 +318,6 @@ export function createTurnHandler(deps: {
       if (intercepted) return;
     }
 
-    let queuedRunId: string | undefined;
-    let taskList: TaskListPresenter | undefined;
     const ack = inc.unprompted
       ? undefined
       : createAckPresenter({
@@ -269,7 +330,10 @@ export function createTurnHandler(deps: {
           addReaction: (name) => client.reactions.add({ channel: inc.channel, timestamp: inc.ts, name }).then(() => {}),
           removeReaction: (name) =>
             client.reactions.remove({ channel: inc.channel, timestamp: inc.ts, name }).then(() => {}),
-          emojiCandidates: [...DEFAULT_ACK_REACTIONS],
+          emojiCandidates: (() => {
+            const override = deps.ackEmojiCandidates?.();
+            return override?.length ? [...override] : [...DEFAULT_ACK_REACTIONS];
+          })(),
           emojiPick: ackEmoji.requestAckEmoji(text, ackEmoji.ackPickCandidates(client), {
             channel: inc.channel,
             ts: inc.ts,
@@ -293,56 +357,6 @@ export function createTurnHandler(deps: {
     const settleAck = async (): Promise<void> => {
       await ack?.settle().catch(swallowAs("slack: ack settle", undefined));
     };
-
-    if (inc.kind === "channel") {
-      const membership = inc.prefetched
-        ? {
-            audience: inc.prefetched.audience,
-            publishMembers: inc.prefetched.publishMembers,
-            slackIdsByPrincipal: inc.prefetched.slackIdsByPrincipal,
-          }
-        : await channelMembership(client, inc.channel, actor, inc.userId, channelInfo);
-      audience = membership.audience;
-      publishMembers = membership.publishMembers;
-      slackIdsByPrincipal = membership.slackIdsByPrincipal;
-      if (conversationKind === "group") channelName = groupDmDisplayName(audience) ?? channelName;
-    }
-
-    const gatewayContext: {
-      location?: string;
-      details?: Record<string, string>;
-      instructions?: string;
-      reactionGuidance?: string;
-    } =
-      inc.kind === "dm"
-        ? {
-            location: "a direct message with the user",
-            details: { channel: inc.channel, ...(inc.threadTs ? { thread_ts: inc.threadTs } : {}) },
-            instructions: slackSurfaceInstructions(inc.kind),
-            reactionGuidance: REACTION_DETECT_GUIDANCE,
-          }
-        : {
-            location: channelLocation(conversationKind, channelName, inc.channel),
-            details: {
-              channel: inc.channel,
-              ...(channelName
-                ? { channel_name: conversationPlaceLabel(conversationKind, channelName, inc.channel) }
-                : {}),
-              ...(replyThreadTs ? { thread_ts: replyThreadTs } : {}),
-            },
-            instructions: slackSurfaceInstructions(inc.kind),
-            reactionGuidance: REACTION_DETECT_GUIDANCE,
-          };
-
-    if (audience.some((a) => a.isExternalGuest) && !(await externalParticipantsEnabled())) {
-      await settleAck();
-      if (!inc.unprompted) {
-        await ephemeralOrSay(
-          "I can't respond here — this conversation isn't fully internal. Try a DM or a fully-internal channel.",
-        );
-      }
-      return;
-    }
 
     {
       const containerName = inc.kind === "dm" ? actor.displayName?.trim() || undefined : channelName;
@@ -387,7 +401,13 @@ export function createTurnHandler(deps: {
     }
 
     const ownFiles = inc.files.map((f) => (f.user || !inc.userId ? f : { ...f, user: inc.userId }));
-    const inboundFiles = earlierFiles.length ? [...ownFiles, ...earlierFiles] : ownFiles;
+    const inboundFiles = await hydrateSlackFiles(
+      earlierFiles.length ? [...ownFiles, ...earlierFiles] : ownFiles,
+      async (id) => {
+        const response = await client.files.info({ file: id });
+        return response?.file as SlackFile | undefined;
+      },
+    );
     const resolveFileAuthor = async (userId: string | undefined): Promise<string | undefined> =>
       userId ? (await classifyUserCached(client, userId)).actor.displayName : undefined;
     const { attachments, issues } = await processInboundFiles(
@@ -430,6 +450,7 @@ export function createTurnHandler(deps: {
               : { entryTs: inc.ts, ...(actor.isBot || inc.botAuthored ? {} : { liveActor: true }) }),
           }
         : { liveActor: true, triggerTs: inc.ts }),
+      ...(actor.isBot ? { botActor: true } : {}),
       ...(conversationHeader ? { conversationHeader } : {}),
       ...(priorTurns ? { priorTurns } : {}),
       ...(overheard ? { overheard } : {}),

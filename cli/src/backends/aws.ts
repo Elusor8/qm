@@ -24,6 +24,7 @@ import { manifestRef } from "../manifest.ts";
 import { computedSecrets, runtimeSecretNames, secretsForService, type ComputedSecret } from "../secrets.ts";
 import {
   brokerWiring,
+  brandEnvOf,
   orgEnv,
   runnableServices,
   serviceDef,
@@ -55,8 +56,32 @@ import {
   deploymentLayerBody,
   syncDeploymentLayerBody,
   type DeploymentLayerSyncResult,
+  httpDeploymentLayerTransport,
+  type DeploymentLayerTransport,
 } from "../deployment-layer.ts";
 
+/**
+ * Deployment-layer transport for AWS: signed HTTP to the public core URL,
+ * with a Secrets Manager fallback for CORE_SIGNING_SECRET and a 60s timeout.
+ */
+export const awsDeploymentLayerTransport: DeploymentLayerTransport = httpDeploymentLayerTransport({
+  secretFallback: (config) =>
+    config.aws
+      ? capture(process.env.AWS_BIN ?? "aws", [
+          "secretsmanager",
+          "get-secret-value",
+          "--secret-id",
+          `${config.aws.secretsPrefix}CORE_SIGNING_SECRET`,
+          "--query",
+          "SecretString",
+          "--output",
+          "text",
+          "--region",
+          config.aws.region,
+        ]).trim()
+      : undefined,
+  timeoutMs: 60_000,
+});
 export interface AwsUpOpts {
   dryRun?: boolean;
   yes?: boolean;
@@ -220,7 +245,7 @@ export function serviceEnvironment(config: QmConfig, service: ServiceName): Reco
         }
       : {};
   const env: Record<string, string> = {
-    ...orgEnv(service, config.orgId, config.publicUrl, config.services.includes("portal")),
+    ...orgEnv(service, config.orgId, config.publicUrl, config.services.includes("portal"), brandEnvOf(config)),
     ...(service === "core" ? {} : { CORE_API_URL: coreUrl }),
     ...coreEnv,
     ...config.env[service],
@@ -287,7 +312,7 @@ function workloadEnvironment(config: QmConfig, workload: string): Record<string,
   return Object.fromEntries(
     Object.entries({
       CORE_API_URL: `http://core.${requireAws(config).networking.cloudMapNamespace}:8080`,
-      ...orgEnv(workload, config.orgId, config.publicUrl, config.services.includes("portal")),
+      ...orgEnv(workload, config.orgId, config.publicUrl, config.services.includes("portal"), brandEnvOf(config)),
       ...plugin?.env,
       PORT: "8080",
     }).sort(([a], [b]) => a.localeCompare(b)),
@@ -748,8 +773,73 @@ interface EcsServiceState {
   desiredCount?: number;
   runningCount?: number;
   taskDefinition?: string;
+  networkConfiguration?: {
+    awsvpcConfiguration?: {
+      subnets?: string[];
+      securityGroups?: string[];
+      assignPublicIp?: "ENABLED" | "DISABLED";
+    };
+  };
   deployments?: EcsDeploymentState[];
   tags?: Array<{ key?: string; value?: string }>;
+}
+
+function awsLiveSession(config: QmConfig, core: EcsServiceState): void {
+  const aws = requireAws(config);
+  if (!core.taskDefinition) throw new Error("core service has no live task definition");
+  if (!core.networkConfiguration?.awsvpcConfiguration) throw new Error("core service has no VPC network configuration");
+  const started = awsJson<{
+    tasks?: Array<{ taskArn?: string }>;
+    failures?: Array<{ arn?: string; reason?: string; detail?: string }>;
+  }>(aws, [
+    "ecs",
+    "run-task",
+    "--cluster",
+    aws.cluster,
+    "--task-definition",
+    core.taskDefinition,
+    "--launch-type",
+    "FARGATE",
+    "--network-configuration",
+    JSON.stringify(core.networkConfiguration),
+    "--overrides",
+    JSON.stringify({
+      containerOverrides: [
+        {
+          name: "core",
+          command: [
+            "node",
+            "src/deployment/postdeploy-smoke.ts",
+            "session",
+            `http://core.${aws.networking.cloudMapNamespace}:8080`,
+          ],
+        },
+      ],
+    }),
+    "--count",
+    "1",
+  ]);
+  const taskArn = started.tasks?.[0]?.taskArn;
+  if (!taskArn) {
+    const failure = started.failures?.[0];
+    throw new Error(
+      `could not start canary task: ${failure?.reason ?? failure?.detail ?? failure?.arn ?? "no task returned"}`,
+    );
+  }
+  awsText(aws, ["ecs", "wait", "tasks-stopped", "--cluster", aws.cluster, "--tasks", taskArn]);
+  const stopped = awsJson<{
+    tasks?: Array<{
+      stoppedReason?: string;
+      containers?: Array<{ name?: string; exitCode?: number; reason?: string }>;
+    }>;
+  }>(aws, ["ecs", "describe-tasks", "--cluster", aws.cluster, "--tasks", taskArn]);
+  const task = stopped.tasks?.[0];
+  const coreContainer = task?.containers?.find((container) => container.name === "core");
+  if (coreContainer?.exitCode !== 0) {
+    throw new Error(
+      `canary task exited ${coreContainer?.exitCode ?? "without a code"}: ${coreContainer?.reason ?? task?.stoppedReason ?? "unknown reason"}`,
+    );
+  }
 }
 
 type DeploymentImageProvenance =
@@ -1662,7 +1752,7 @@ export async function awsUp(config: QmConfig, _configDir: string, opts: AwsUpOpt
       if (current || before.counts.core !== 0) {
         const previousState = await currentDeploymentLayerState({
           config,
-          target: "aws",
+          transport: awsDeploymentLayerTransport,
           configDir: _configDir,
           ...(opts.envFile ? { envFile: opts.envFile } : {}),
         });
@@ -1688,7 +1778,7 @@ export async function awsUp(config: QmConfig, _configDir: string, opts: AwsUpOpt
       if (!layerChanged) {
         const state = await currentDeploymentLayerState({
           config,
-          target: "aws",
+          transport: awsDeploymentLayerTransport,
           configDir: _configDir,
           ...(opts.envFile ? { envFile: opts.envFile } : {}),
         });
@@ -1760,7 +1850,12 @@ export async function awsUp(config: QmConfig, _configDir: string, opts: AwsUpOpt
     if (desiredLayerBody) {
       layerAttempted = true;
       await syncAwsLayerAfterRoll(
-        { config, target: "aws", configDir: _configDir, ...(opts.envFile ? { envFile: opts.envFile } : {}) },
+        {
+          config,
+          transport: awsDeploymentLayerTransport,
+          configDir: _configDir,
+          ...(opts.envFile ? { envFile: opts.envFile } : {}),
+        },
         desiredLayerBody,
         desiredLayer!,
       );
@@ -1811,7 +1906,12 @@ export async function awsUp(config: QmConfig, _configDir: string, opts: AwsUpOpt
     if (layerAttempted && previousLayerBody && !previousLayerBootstrapped) {
       try {
         await syncAwsLayerAfterRoll(
-          { config, target: "aws", configDir: _configDir, ...(opts.envFile ? { envFile: opts.envFile } : {}) },
+          {
+            config,
+            transport: awsDeploymentLayerTransport,
+            configDir: _configDir,
+            ...(opts.envFile ? { envFile: opts.envFile } : {}),
+          },
           previousLayerBody,
           createHash("sha256").update(previousLayerBody).digest("hex"),
         );
@@ -2004,7 +2104,7 @@ export async function awsRollback(
         await syncAwsLayerAfterRoll(
           {
             config,
-            target: "aws",
+            transport: awsDeploymentLayerTransport,
             configDir: layerOpts.configDir,
             ...(layerOpts.envFile ? { envFile: layerOpts.envFile } : {}),
           },
@@ -2031,7 +2131,7 @@ export async function awsRollback(
         await syncAwsLayerAfterRoll(
           {
             config,
-            target: "aws",
+            transport: awsDeploymentLayerTransport,
             configDir: layerOpts.configDir,
             ...(layerOpts.envFile ? { envFile: layerOpts.envFile } : {}),
           },
@@ -3141,7 +3241,7 @@ async function checkLive(
       await retryLiveProbe(async () => {
         const state = await currentDeploymentLayerState({
           config,
-          target: "aws",
+          transport: awsDeploymentLayerTransport,
           configDir,
           ...(opts.envFile ? { envFile: opts.envFile } : {}),
         });
@@ -3152,6 +3252,14 @@ async function checkLive(
       });
     } catch (error) {
       failures.push(`deployment layer drift: ${errMessage(error)}`);
+    }
+  }
+  if (!failures.length) {
+    try {
+      awsLiveSession(config, states.get("core")!);
+      if (opts.report ?? true) step("core: private live session smoke passed");
+    } catch (error) {
+      failures.push(`core: private live session smoke failed: ${errMessage(error)}`);
     }
   }
   if (failures.length)
@@ -3240,7 +3348,7 @@ export async function awsPinSandbox(
       await assertAwsPublicNetwork(config);
       const liveLayer = await currentDeploymentLayerState({
         config,
-        target: "aws",
+        transport: awsDeploymentLayerTransport,
         configDir: layerOpts.configDir,
         ...(layerOpts.envFile ? { envFile: layerOpts.envFile } : {}),
       });
@@ -3300,7 +3408,7 @@ export async function awsPinSandbox(
       await syncAwsLayerAfterRoll(
         {
           config,
-          target: "aws",
+          transport: awsDeploymentLayerTransport,
           configDir: layerOpts.configDir,
           ...(layerOpts.envFile ? { envFile: layerOpts.envFile } : {}),
         },
@@ -3335,7 +3443,7 @@ export async function awsPinSandbox(
         await syncAwsLayerAfterRoll(
           {
             config,
-            target: "aws",
+            transport: awsDeploymentLayerTransport,
             configDir: layerOpts.configDir,
             ...(layerOpts.envFile ? { envFile: layerOpts.envFile } : {}),
           },

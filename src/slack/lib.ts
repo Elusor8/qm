@@ -27,6 +27,7 @@ export {
   computeChannelAudience,
   computePublishMembers,
   allInternalChannelMembers,
+  internalChannelMembers,
   resolveChannelMembership,
 } from "./identity.ts";
 export {
@@ -49,6 +50,7 @@ export {
 } from "./message-gating.ts";
 export {
   type SlackFile,
+  hydrateSlackFiles,
   MAX_ATTACHMENT_BYTES,
   isOversize,
   type ThreadMessage,
@@ -101,6 +103,7 @@ export {
   buildContextWindow,
   type RecentMessage,
   MAX_RECENT_MESSAGES,
+  MAX_TOP_LEVEL_CONTEXT_AGE_S,
   recentWindow,
   resolveMentions,
   type ConversationView,
@@ -118,6 +121,8 @@ export {
   channelWelcomeMessage,
   surfaceHeaderText,
   headerUpdate,
+  isSurfaceHeaderMessage,
+  findHeaderPin,
   createSurfaceHeaderEnsurer,
   scopeSurfaceUrl,
   type SurfaceHeaderClient,

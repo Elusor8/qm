@@ -19,10 +19,12 @@ const READ_ONLY_BLOCKED_PREFIXES = [
   "!run ",
   "!scratch ",
   "!owner ",
+  "!credential ",
   "!reach ",
   "!paused-approval ",
   "!collect-approval ",
   "!collect-exec ",
+  "!screened-run ",
   "!double-exec ",
   "!read ",
   "!write ",
@@ -31,6 +33,7 @@ const READ_ONLY_BLOCKED_PREFIXES = [
   "!postthread ",
   "!broadcast ",
   "!post ",
+  "!postfiles ",
   "!react ",
   "!edit ",
   "!delete ",
@@ -118,7 +121,7 @@ export function createMockHarness(): Harness {
           turnSeq: userEntry.seq,
           step: 0,
           model: "mock",
-          request: {
+          promptEnvelope: {
             model: "mock",
             system: turn.systemPrompt,
             messages: [...mockProviderMessages(turn.history), { role: "user", content: modelPrompt }],
@@ -132,6 +135,7 @@ export function createMockHarness(): Harness {
         });
 
         let reply: string;
+        let muteReply = false;
         let usedTool = false;
         let silent = false;
         const collected: Array<{
@@ -189,6 +193,10 @@ export function createMockHarness(): Harness {
             usedTool = true;
             reply = r.ok ? "(posted after nudge)" : `[not sent] ${r.message ?? "failed"}`;
           }
+        } else if (command0.startsWith("!shedmute")) {
+          shedSessions.add(turn.session.id);
+          reply = "worklog: did the thing but never posted";
+          muteReply = true;
         } else if (command0.startsWith("!shed")) {
           shedSessions.add(turn.session.id);
           reply = "worklog: did the thing but never posted";
@@ -257,6 +265,22 @@ export function createMockHarness(): Harness {
             scopeLabel: turn.scopeLabel,
           });
           reply = "thought about it";
+        } else if (command0.startsWith("!credential ")) {
+          const rest = command0.slice("!credential ".length);
+          const split = rest.indexOf(" ");
+          const service = split === -1 ? rest : rest.slice(0, split);
+          const args = split === -1 ? [] : (JSON.parse(rest.slice(split + 1)) as string[]);
+          if (!turn.tools.credentialExec) throw new Error("credential_exec unavailable");
+          await turn.emit({
+            type: "tool_call",
+            payload: { tool: "credential_exec", service, args },
+            scopeLabel: turn.scopeLabel,
+          });
+          const result = await turn.tools.credentialExec(service, args);
+          await turn.emit({ type: "tool_result", payload: result, scopeLabel: turn.scopeLabel });
+          turn.onProgress?.({ toolCalls: 1 });
+          usedTool = true;
+          reply = result.stdout.trim() || result.stderr.trim() || `(exit ${result.code})`;
         } else if (command0.startsWith("!run ") || command0.startsWith("!scratch ") || command0.startsWith("!owner ")) {
           let tag = "!run ";
           if (command0.startsWith("!scratch ")) tag = "!scratch ";
@@ -281,6 +305,34 @@ export function createMockHarness(): Harness {
             usedTool = true;
             reply = result.stdout.trim() || result.stderr.trim() || `(exit ${result.code})`;
           }
+        } else if (command0.startsWith("!screened-run ")) {
+          const command = cmd.slice(cmd.indexOf("!screened-run ") + "!screened-run ".length);
+          await turn.emit({ type: "tool_call", payload: { tool: "execute", command }, scopeLabel: turn.scopeLabel });
+          const result = await turn.tools.execute(command);
+          const output = result.stdout.trim() || result.stderr.trim() || `(exit ${result.code})`;
+          const screen = turn.screenToolResult
+            ? await turn.screenToolResult("execute", output, false).catch(() => "unscreened" as const)
+            : true;
+          if (screen === false) {
+            const stub = "[tool output quarantined by Auto security posture]";
+            await turn.emit({
+              type: "tool_result",
+              payload: {
+                tool: "execute",
+                quarantined: true,
+                quarantineReason: "screen_verdict",
+                result: stub,
+                isError: true,
+              },
+              scopeLabel: turn.scopeLabel,
+            });
+            reply = stub;
+          } else {
+            await turn.emit({ type: "tool_result", payload: result, scopeLabel: turn.scopeLabel });
+            reply = output;
+          }
+          turn.onProgress?.({ toolCalls: 1 });
+          usedTool = true;
         } else if (command0.startsWith("!reach ")) {
           const rest = command0.slice("!reach ".length);
           const sp = rest.indexOf(" ");
@@ -474,6 +526,20 @@ export function createMockHarness(): Harness {
           });
           usedTool = true;
           reply = r.ok ? "(posted)" : `[not sent] ${r.message ?? "failed"}`;
+        } else if (command0.startsWith("!postfiles ")) {
+          // !postfiles <path>[,<path>...] <message>
+          const rest = cmd.slice(cmd.indexOf("!postfiles ") + "!postfiles ".length);
+          const sp = rest.indexOf(" ");
+          const paths = (sp === -1 ? rest : rest.slice(0, sp)).split(",").filter(Boolean);
+          const msg = sp === -1 ? "" : rest.slice(sp + 1);
+          const r = await turn.tools.post(msg, undefined, paths);
+          await turn.emit({
+            type: "tool_result",
+            payload: { tool: "post", ok: r.ok, ...(r.deliveryId ? { deliveryId: r.deliveryId } : {}) },
+            scopeLabel: turn.scopeLabel,
+          });
+          usedTool = true;
+          reply = r.ok ? "(posted files)" : `[not sent] ${r.message ?? "failed"}`;
         } else if (command0.startsWith("!react ")) {
           const [, ts, emoji] = command0.split(/\s+/);
           const r = await turn.tools.react({ ts: ts ?? "", emoji: emoji ?? "" });
@@ -616,7 +682,7 @@ export function createMockHarness(): Harness {
             turnSeq: userEntry.seq,
             step: 1,
             model: "mock",
-            request: {
+            promptEnvelope: {
               model: "mock",
               system: turn.systemPrompt,
               messages: [...mockProviderMessages(turn.history), { role: "user", content: modelPrompt }],
@@ -653,6 +719,7 @@ export function createMockHarness(): Harness {
               modelCalls,
             }
           : { reply, modelCalls };
+        if (muteReply) base.reply = "";
         return { ...base, ...(silent ? { silent: true as const } : {}), cacheUsage };
       },
 
@@ -724,7 +791,7 @@ export function createMockHarness(): Harness {
           turnSeq: null,
           step: -1,
           model,
-          request: { system: SECURITY_SCREEN_SYSTEM_PROMPT, messages: [{ role: "user", content: payload }] },
+          promptEnvelope: { system: SECURITY_SCREEN_SYSTEM_PROMPT, messages: [{ role: "user", content: payload }] },
           truncated: false,
         });
         if (/!security-screen-hang/i.test(payload)) {

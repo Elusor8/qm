@@ -30,9 +30,9 @@ export function getBaseModel(id: string, fallback?: { name: string; provider: st
     const template = builtinModel(clone.template);
     if (template) return cloneModel(template, id, clone.name);
   }
-  if (fallback?.provider === "openrouter") {
+  if (fallback) {
     const template = getModel("openrouter", "openrouter/auto" as Parameters<typeof getModel>[1]) as PiModel | undefined;
-    if (template) return cloneModel(template, id, fallback.name);
+    if (template) return { ...cloneModel(template, id, fallback.name), provider: fallback.provider };
   }
   throw new Error(`Unsupported model: ${id}`);
 }
@@ -41,12 +41,15 @@ function cloneModel(model: PiModel, id: string, name: string): PiModel {
   return { ...structuredClone(model), id, name };
 }
 
-let fastModeModelIds = new Set<string>();
+const fastModeByScope = new Map<string, Set<string>>();
+let lastFastModeIds = new Set<string>();
 
-export function setFastModeModelIds(ids: readonly string[] | undefined): void {
-  fastModeModelIds = new Set(ids ?? []);
+export function setFastModeModelIds(scopeKey: string | null, ids: readonly string[] | undefined): void {
+  lastFastModeIds = new Set(ids ?? []);
+  if (scopeKey !== null) fastModeByScope.set(scopeKey, lastFastModeIds);
 }
 
-export function modelSupportsFastMode(modelId: string | undefined): boolean {
-  return !!modelId && fastModeModelIds.has(modelId);
+export function modelSupportsFastMode(scopeKey: string | null, modelId: string | undefined): boolean {
+  const ids = (scopeKey !== null ? fastModeByScope.get(scopeKey) : undefined) ?? lastFastModeIds;
+  return !!modelId && ids.has(modelId);
 }

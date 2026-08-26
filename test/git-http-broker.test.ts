@@ -79,6 +79,7 @@ async function ctx(
 
 test("git HTTP broker streams a smart-HTTP request through the pinned service credential", async () => {
   let seen: { url: string; method: string; headers: Record<string, string>; body: string } | undefined;
+  let authorized: unknown;
   const deps: ServerDeps = {
     control: {} as ServerDeps["control"],
     serviceCreds: {
@@ -106,10 +107,34 @@ test("git HTTP broker streams a smart-HTTP request through the pinned service cr
     },
   };
   const c = await ctx("/v1/credentials/git/gitlab/acme/repo.git/git-receive-pack", "POST", deps, "PACK");
+  c.req.headers["x-agent-capability"] = await mintCapabilityToken(
+    {
+      actorId: "B-LEGACY",
+      scopeId: "channel:C1",
+      aud: CREDENTIAL_BROKER_AUD,
+      credentials: ["gitlab"],
+      botActor: true,
+      liveActor: true,
+      members: [{ id: "B-LEGACY", type: "internal" }],
+      exp: Date.now() + CAPABILITY_TTL_MS,
+    },
+    SECRET,
+  );
+  c.app.authorizesCapabilityScope = async (claims) => {
+    authorized = claims;
+    return true;
+  };
   await brokerGitHttp(c);
 
   assert.equal(await text(c.res), "0000");
   assert.equal(c.res.statusCode, 200);
+  assert.deepEqual(authorized, {
+    actorId: "B-LEGACY",
+    scopeId: "channel:C1",
+    botActor: true,
+    liveActor: true,
+    members: [{ id: "B-LEGACY", type: "internal" }],
+  });
   assert.equal(c.res.capturedHeaders?.["content-type"], "application/x-git-receive-pack-result");
   assert.deepEqual(seen, {
     url: "https://gitlab.example/acme/repo.git/git-receive-pack",
@@ -201,4 +226,38 @@ test("git HTTP broker refuses an env-delivery record like a missing credential",
   await brokerGitHttp(c);
   assert.equal(c.res.statusCode, 404);
   assert.equal(fetched, false, "no upstream git fetch happens");
+});
+
+test("git HTTP broker refuses encoded parent traversal past the repo path", async () => {
+  for (const path of [
+    "/v1/credentials/git/gitlab/acme/repo.git/..%2fother-repo.git/info/refs",
+    "/v1/credentials/git/gitlab/acme/repo.git/%2e%2e%2fother-repo.git/info/refs",
+    "/v1/credentials/git/gitlab/acme/repo.git/%252e%252e%252fother/info/refs",
+  ]) {
+    let fetched = false;
+    const deps: ServerDeps = {
+      control: {} as ServerDeps["control"],
+      serviceCreds: {
+        getServiceCredentialSecret: async () => ({
+          slug: "gitlab",
+          name: "GitLab git",
+          secret: "dXNlcjp0b2tlbg==",
+          host: "gitlab.example",
+          injection: { scheme: "Basic " },
+          allowedMethods: ["GET", "POST"],
+          allowedPathPrefixes: ["/acme/repo.git"],
+          enabled: true,
+        }),
+      } as unknown as ServerDeps["serviceCreds"],
+      gitHttpFetch: async () => {
+        fetched = true;
+        return { status: 200, headers: {}, body: Readable.from(["0000"]) };
+      },
+    };
+    const c = await ctx(path, "GET", deps);
+    await brokerGitHttp(c);
+    assert.equal(c.res.statusCode, 403, path);
+    assert.match(await text(c.res), /path_not_allowed/);
+    assert.equal(fetched, false, "no upstream git fetch happens");
+  }
 });

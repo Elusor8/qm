@@ -4,6 +4,7 @@ import { api } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
 import { icon } from "./ui";
 import { appState, replacePanePreservingFocus } from "./shell";
+import { scopedSession, scopedViewTopbar } from "./session-scope";
 import { focusDialogCancel, restoreDialogFocus, trapDialogFocus } from "./dialog-focus";
 import { isActiveGrant, isExpiredCredential, KeychainOperations, keychainSummary } from "./keychain-state";
 
@@ -132,6 +133,7 @@ let keychainConnectorCredentials: KeychainConnectorCredential[] = [];
 let keychainGrants: KeychainGrant[] = [];
 let keychainAsks: KeychainAsk[] = [];
 let keychainUsage: KeychainUsage[] = [];
+let keychainScopeNames: Record<string, string> = {};
 let connectorNotice = "";
 let addingCredential: { service: string; envKey: string; purpose: string } | null = null;
 let secureDropUrl: string | null = null;
@@ -147,6 +149,7 @@ export function resetKeychainState(): void {
   keychainGrants = [];
   keychainAsks = [];
   keychainUsage = [];
+  keychainScopeNames = {};
   connectorNotice = "";
   addingCredential = null;
   secureDropUrl = null;
@@ -245,10 +248,28 @@ function credentialCard(c: KeychainCredential): TemplateResult {
   `;
 }
 
+// Raw Slack IDs (C0…, G0…) mean nothing to people — always prefer a resolved
+// name, and fall back to a human description. The raw ID appears only as a
+// parenthetical of last resort, to disambiguate when no name is available.
 function scopeName(scope: string): string {
+  const resolved = keychainScopeNames[scope];
+  if (resolved) return resolved;
   const [kind, ...rest] = scope.split(":");
-  const name = rest.join(":");
-  return `${kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Context"}: ${name}`;
+  const ref = rest.join(":");
+  switch (kind) {
+    case "personal":
+      return ref || "a personal DM";
+    case "channel":
+      return ref ? `a Slack channel (${ref})` : "a Slack channel";
+    case "group":
+      return "a group DM";
+    case "team":
+      return ref ? `a team (${ref})` : "a team";
+    case "org":
+      return "the whole org";
+    default:
+      return scope;
+  }
 }
 
 function addCredentialCard(): TemplateResult {
@@ -256,9 +277,12 @@ function addCredentialCard(): TemplateResult {
   return html`<section class="kc-add-card" aria-labelledby="kc-add-title">
     <div class="kc-panel-head">
       <div>
-        <span class="kc-eyebrow">Secure drop</span>
+        <span class="kc-eyebrow">New credential</span>
         <h2 id="kc-add-title">Add a credential</h2>
-        <p>The secret goes directly to your encrypted keychain. It never enters chat or this page.</p>
+        <p>
+          Describe the credential here, then paste the secret itself on a private one-time page. It goes straight to
+          your encrypted keychain — it is never shown in chat or stored on this page.
+        </p>
       </div>
       <div class="kc-panel-icon">${icon(LockKeyhole, 20)}</div>
     </div>
@@ -266,10 +290,11 @@ function addCredentialCard(): TemplateResult {
       secureDropUrl
         ? html`
             <div class="kc-success" role="status">
-              <strong>Secure form ready</strong><span>Open it in a new tab to enter the credential.</span>
+              <strong>Your one-time page is ready</strong><span>Open it in a new tab and paste the secret there.</span>
             </div>
             <div class="kc-form-actions">
-              <a class="btn primary" href=${secureDropUrl} target="_blank" rel="noopener noreferrer">Open secure form</a
+              <a class="btn primary" href=${secureDropUrl} target="_blank" rel="noopener noreferrer"
+                >Open the one-time page</a
               ><button
                 class="btn"
                 type="button"
@@ -340,7 +365,7 @@ function addCredentialCard(): TemplateResult {
                 ?disabled=${keychainOperations.dropInFlight}
                 @click=${() => void createDrop()}
               >
-                ${keychainOperations.dropInFlight ? "Creating…" : "Create secure form"}
+                ${keychainOperations.dropInFlight ? "Preparing…" : "Continue"}
               </button>
             </div>
           `
@@ -476,9 +501,10 @@ function drawConnectors(loading = false): void {
   });
   if (!appState.mainEl) return;
   const host = document.createElement("div");
-  host.className = "pane keychain-page";
+  host.className = scopedSession.active ? "pane keychain-page scoped-view" : "pane keychain-page";
   render(
     html`
+      ${scopedViewTopbar("keychain", () => drawConnectors())}
       <div class="kc-page-content" ?inert=${Boolean(confirmation)}>
         <header class="kc-hero">
           <div class="kc-hero-copy">
@@ -490,17 +516,6 @@ function drawConnectors(loading = false): void {
           </div>
           <div class="kc-hero-actions">
             <button
-              class="btn primary"
-              type="button"
-              @click=${() => {
-                addingCredential = { service: "", envKey: "", purpose: "" };
-                secureDropUrl = null;
-                drawConnectors();
-              }}
-            >
-              ${icon(Plus, 16)} Add credential
-            </button>
-            <button
               class="pane-refresh"
               type="button"
               aria-label="Refresh keychain"
@@ -511,6 +526,17 @@ function drawConnectors(loading = false): void {
               }}
             >
               ${icon(RefreshCw, 17)}
+            </button>
+            <button
+              class="btn primary"
+              type="button"
+              @click=${() => {
+                addingCredential = { service: "", envKey: "", purpose: "" };
+                secureDropUrl = null;
+                drawConnectors();
+              }}
+            >
+              ${icon(Plus, 16)} Add credential
             </button>
           </div>
         </header>
@@ -552,7 +578,7 @@ function drawConnectors(loading = false): void {
               <h2 id="kc-credentials-title">Stored credentials</h2>
               <span>${keychainCredentials.length}</span>
             </div>
-            <p>API keys, tokens, and files added through a one-time secure form.</p>
+            <p>API keys, tokens, and files you added through the one-time page.</p>
           </div>
           <div class="kc-resource-list">
             ${
@@ -600,6 +626,7 @@ export async function renderConnectors(): Promise<void> {
       grants?: KeychainGrant[];
       asks?: KeychainAsk[];
       usage?: KeychainUsage[];
+      scopeNames?: Record<string, string>;
     }>("/api/keychain/overview"),
   ]);
   if (seq !== appState.viewRenderSeq || !keychainOperations.isCurrentLoad(load) || appState.currentView !== "keychain")
@@ -619,12 +646,14 @@ export async function renderConnectors(): Promise<void> {
     keychainGrants = keys.value.grants ?? [];
     keychainAsks = keys.value.asks ?? [];
     keychainUsage = keys.value.usage ?? [];
+    keychainScopeNames = keys.value.scopeNames ?? {};
   } else {
     keychainCredentials = [];
     keychainConnectorCredentials = [];
     keychainGrants = [];
     keychainAsks = [];
     keychainUsage = [];
+    keychainScopeNames = {};
     notices.push(errMessage(keys.reason, "Failed to load stored keys."));
   }
   if (notices.length) connectorNotice = notices.join(" ");
@@ -727,12 +756,12 @@ async function createDrop(): Promise<void> {
       body: JSON.stringify(submittedDraft),
     });
     if (!keychainOperations.isCurrentEpoch(stateEpoch)) return;
-    if (!result.url) throw new Error("No secure form URL was returned.");
+    if (!result.url) throw new Error("No one-time page URL was returned.");
     secureDropUrl = result.url;
-    connectorNotice = "Secure credential form ready.";
+    connectorNotice = "Your one-time page is ready.";
   } catch (e) {
     if (!keychainOperations.isCurrentEpoch(stateEpoch)) return;
-    connectorNotice = errMessage(e, "Could not create the secure form.");
+    connectorNotice = errMessage(e, "Could not create the one-time page.");
   } finally {
     if (keychainOperations.isCurrentEpoch(stateEpoch)) {
       keychainOperations.finishDrop(stateEpoch);

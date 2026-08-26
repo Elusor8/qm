@@ -13,6 +13,7 @@
     "start": "node --env-file-if-exists=.env src/index.ts",
     "dev": "SHUTDOWN_DRAIN_MS=2000 node --env-file-if-exists=.env --watch src/index.ts",
     "dev-instance": "bash scripts/dev-instance.sh up",
+    "dev-instance:no-slack": "bash scripts/dev-instance.sh up --no-slack",
     "dev-instance:status": "bash scripts/dev-instance.sh status",
     "dev-instance:down": "bash scripts/dev-instance.sh down",
     "worker": "node --env-file-if-exists=.env src/runs/worker-main.ts",
@@ -55,7 +56,7 @@
     "@aws-sdk/client-sts": "^3.1075.0",
     "@aws-sdk/credential-provider-node": "^3.972.70",
     "@earendil-works/pi-ai": "0.82.0",
-    "@earendil-works/pi-coding-agent": "https://github.com/yc-software/pi/releases/download/qm-pi-coding-agent-0.82.0-security.2/earendil-works-pi-coding-agent-0.82.0-qm-security.2.tgz",
+    "@earendil-works/pi-coding-agent": "https://github.com/yc-software/pi/releases/download/qm-pi-coding-agent-0.82.0-security.3/earendil-works-pi-coding-agent-0.82.0-qm-security.3.tgz",
     "@fly/sprites": "0.0.1",
     "@openai/codex": "0.144.5",
     "@opencode-ai/plugin": "1.17.18",
@@ -78,15 +79,16 @@
   },
   "overrides": {
     "@hono/node-server": "2.0.10",
+    "hono": "4.12.34",
     "@fastify/ajv-compiler": {
-      "fast-uri": "3.1.4"
+      "fast-uri": "3.1.5"
     },
     "ajv": {
-      "fast-uri": "3.1.4"
+      "fast-uri": "3.1.5"
     },
-    "brace-expansion": "5.0.8",
+    "brace-expansion": "5.0.9",
     "fast-json-stringify": {
-      "fast-uri": "4.1.1"
+      "fast-uri": "4.1.2"
     },
     "protobufjs": "7.6.5"
   },
@@ -96,13 +98,13 @@
     "@types/node": "^24.0.0",
     "@types/pg": "^8.11.10",
     "@types/tar-stream": "^3.1.4",
+    "@yc-software/qm": "file:./cli",
     "eslint": "^10.4.1",
     "globals": "^17.6.0",
     "knip": "^6.26.0",
     "oxlint": "^1.74.0",
     "prettier": "3.9.1",
     "typescript": "^5.8.2",
-    "typescript-eslint": "^8.61.0",
-    "@yc-software/qm": "file:./cli"
+    "typescript-eslint": "^8.61.0"
   }
 }

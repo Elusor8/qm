@@ -9,7 +9,9 @@ function pat(method: string, template: string, field?: Field): Rule {
 }
 
 const USER_SCOPED: Rule[] = [
+  pat("GET", "/v1/sessions/search", { in: "query", name: "principalId" }),
   pat("GET", "/v1/sessions/:id", { in: "query", name: "viewer" }),
+  pat("GET", "/v1/sessions/:id/entries/:seq", { in: "query", name: "viewer" }),
   pat("GET", "/v1/sessions/:id/approvals", { in: "query", name: "viewer" }),
   pat("GET", "/v1/sessions/:id/background", { in: "query", name: "viewer" }),
   pat("GET", "/v1/sessions/:id/background/:pid/output", { in: "query", name: "viewer" }),
@@ -32,10 +34,14 @@ const USER_SCOPED: Rule[] = [
   pat("POST", "/v1/memory/restore", { in: "body", name: "principalId" }),
   pat("GET", "/v1/contexts/policy", { in: "query", name: "principalId" }),
   pat("GET", "/v1/skills", { in: "query", name: "principalId" }),
+  pat("GET", "/v1/skills/:id", { in: "query", name: "principalId" }),
   pat("POST", "/v1/skills", { in: "body", name: "principalId" }),
   pat("PUT", "/v1/skills/:id", { in: "body", name: "principalId" }),
   pat("DELETE", "/v1/skills/:id", { in: "body", name: "principalId" }),
+  pat("POST", "/v1/skills/:id/restore", { in: "body", name: "principalId" }),
   pat("POST", "/v1/soul", { in: "body", name: "actorId" }),
+  pat("POST", "/v1/webhooks", { in: "body", name: "createdBy" }),
+  pat("GET", "/v1/webhooks", { in: "query", name: "viewer" }),
   pat("GET", "/v1/crons", { in: "query", name: "viewer" }),
   pat("POST", "/v1/crons", { in: "body", name: "createdBy" }),
   pat("GET", "/v1/crons/:id", { in: "query", name: "principalId" }),
@@ -51,6 +57,7 @@ const USER_SCOPED: Rule[] = [
   pat("GET", "/v1/connectors/oauth/status", { in: "query", name: "principalId" }),
   pat("POST", "/v1/connectors/token", { in: "body", name: "principalId" }),
   pat("POST", "/v1/connectors/oauth/revoke", { in: "body", name: "principalId" }),
+  pat("POST", "/v1/webhooks/:id/disable", { in: "query", name: "principalId" }),
   pat("POST", "/v1/deployments/:id/display-name"),
   pat("POST", "/v1/deployments/:id/name"),
   pat("POST", "/v1/deployments/:id/archive"),

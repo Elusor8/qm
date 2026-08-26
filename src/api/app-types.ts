@@ -13,7 +13,7 @@ import type { OutgoingAttachment } from "../types.ts";
 import type { Readable } from "node:stream";
 import { type FileArtifact, type FileArtifactStore, type ListOwnedOptions } from "../files/file-artifact-store.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
-import type { SessionStore } from "../sessions/session-store.ts";
+import type { SessionStore, TranscriptEntry } from "../sessions/session-store.ts";
 import { type Sandbox } from "../sandbox/sandbox.ts";
 import type { ProcessRegistry } from "../processes/process-registry.ts";
 import type { MonitorStore } from "../monitors/monitor-store.ts";
@@ -27,6 +27,9 @@ import type { RunSignal, RunSignalStore } from "../runs/run-signal-store.ts";
 import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
 import type { ModelGateway } from "../model/model-gateway.ts";
 import type { ModelCredentialStore } from "../model/model-credential-store.ts";
+import type { CustomProviderStore } from "../model/custom-provider-store.ts";
+import type { McpServerStore } from "../mcp/mcp-server-store.ts";
+import type { McpToolService } from "../mcp/mcp-tool-service.ts";
 import type { AclStore } from "../acl/acl-store.ts";
 import type { SkillStore, Skill, SkillResolution } from "../skills/skill-store.ts";
 import type { SkillPack, NewSkillPack, SkillPackStore } from "../skills/skill-pack-store.ts";
@@ -38,6 +41,8 @@ import type { CapabilityClaims } from "../auth/capability-token.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { type AdminService } from "../admin/admin-service.ts";
 import type { CronStore, CreateCronInput, CronPatch } from "../cron/cron-store.ts";
+import type { CronFirePage } from "../cron/cron-fire-store.ts";
+import type { WebhookStore, CreateWebhookInput } from "../webhooks/webhook-store.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type {
   ChannelMembership,
@@ -57,6 +62,7 @@ import type {
   SurfaceContextQuery,
   SurfaceContextRequest,
   SurfaceContextResult,
+  Webhook,
 } from "../types.ts";
 import type {
   ActiveThread,
@@ -147,6 +153,7 @@ interface ReachNowInput {
   recipient?: string;
   channel?: string;
   participants?: readonly string[];
+  threadTs?: string;
   unfurlLinks?: boolean;
   attachments?: OutgoingAttachment[];
   react?: { messageTs: string; emoji: string };
@@ -173,12 +180,12 @@ export type VisibleCron = Cron & { scopeName?: string };
 
 export type ProjectView = Project & {
   scopeId: ScopeId;
-  members: Array<{ principalId: string; displayName: string }>;
+  members: Array<{ principalId: string; displayName: string; viaChannel?: boolean }>;
 };
 
 type ProjectViewMutation =
   | { status: "ok"; project: ProjectView; changed: boolean }
-  | { status: "not_found" | "forbidden" | "invalid_member" | "invalid_name" };
+  | { status: "not_found" | "forbidden" | "invalid_member" | "invalid_name" | "invalid_channel" | "channel_in_use" };
 
 interface DeploymentGitUrl {
   url: string;
@@ -197,6 +204,7 @@ interface SessionBackgroundView {
     expiresAt: number;
     lastFiredAt?: number;
   }>;
+  crons: Array<{ id: string; title?: string; nextFireAt?: number }>;
 }
 
 interface SessionBackgroundOutput {
@@ -210,6 +218,20 @@ interface TranscriptWindow {
   tailTurns?: number;
   sinceSeq?: number;
   beforeSeq?: number;
+}
+
+export interface SessionSearchHit {
+  sessionId: string;
+  title: string | null;
+  scopeId: string;
+  channelName?: string;
+  surface?: string;
+  seq: number;
+  entryType: string;
+  author?: string;
+  snippet: string;
+  createdAt: number;
+  archived?: boolean;
 }
 
 export interface App {
@@ -237,19 +259,33 @@ export interface App {
     startedAt: number | null;
     finishedAt: number | null;
   } | null>;
-  activeRunForThread(threadRef: string, viewer?: string): Promise<{ runId: string } | null>;
-  signalRun(runId: string, signal: RunSignal, viewer?: string): Promise<{ accepted: boolean; reason?: string }>;
+  activeRunForThread(
+    threadRef: string,
+    viewer?: string,
+  ): Promise<{ runId: string; queued?: Array<{ runId: string; text: string }> } | null>;
+  withdrawRun(runId: string, viewer?: string): Promise<{ withdrawn: boolean; reason?: string }>;
+  signalRun(
+    runId: string,
+    signal: RunSignal,
+    viewer?: string,
+  ): Promise<{ accepted: boolean; reason?: string; replayed?: boolean }>;
   replayOrphanedRunSignals(runId: string): Promise<void>;
   getSession(
     sessionId: string,
     window?: TranscriptWindow,
-  ): Promise<{ session: Session; entries: SessionEntry[]; earlierEntries?: number } | null>;
+  ): Promise<{ session: Session; entries: TranscriptEntry[]; earlierEntries?: number } | null>;
   getSessionForViewer(
     sessionId: string,
     principalId: string,
     window?: TranscriptWindow,
-  ): Promise<{ session: Session; entries: SessionEntry[]; earlierEntries?: number } | null>;
+  ): Promise<{ session: Session; entries: TranscriptEntry[]; earlierEntries?: number } | null>;
+  getSessionEntryForViewer(
+    sessionId: string,
+    principalId: string,
+    seq: number,
+  ): Promise<{ entry: SessionEntry } | null>;
   listSessions(principalId: string): Promise<Session[]>;
+  searchSessions(principalId: string, query: string, limit?: number): Promise<SessionSearchHit[]>;
   sessionBackground(sessionId: string, viewer: string): Promise<SessionBackgroundView | null>;
   readSessionBackgroundOutput(
     sessionId: string,
@@ -262,6 +298,7 @@ export interface App {
   createProject(principalId: string, name: string): Promise<ProjectView | null>;
   addProjectMember(id: string, principalId: string, memberId: string): Promise<ProjectViewMutation>;
   removeProjectMember(id: string, principalId: string, memberId: string): Promise<ProjectViewMutation>;
+  setProjectSlackChannel(id: string, principalId: string, channel: string | null): Promise<ProjectViewMutation>;
   renameProject(id: string, principalId: string, name: string): Promise<ProjectViewMutation>;
   updateSession(
     sessionId: string,
@@ -269,6 +306,8 @@ export interface App {
     patch: { title?: string | null; archived?: boolean; pinned?: boolean; color?: string | null },
   ): Promise<Session | null>;
   regenerateTitle(sessionId: string, principalId: string): Promise<{ title: string | null } | null>;
+  spawnSession(principalId: string, opts: { scopeId: ScopeId; title?: string }): Promise<{ session: Session } | null>;
+  discardSession(sessionId: string, principalId: string): Promise<boolean>;
   forkSession(
     sessionId: string,
     principalId: string,
@@ -282,7 +321,9 @@ export interface App {
   listScopeResources(principalId: string, scope: ScopeId): Promise<ScopeResources | null>;
   managesScope(principalId: string, scope: ScopeId): Promise<boolean>;
   membershipControlsScope(scope: ScopeId): Promise<boolean>;
-  authorizesCapabilityScope(claims: Pick<CapabilityClaims, "actorId" | "scopeId" | "scopeVersion">): Promise<boolean>;
+  authorizesCapabilityScope(
+    claims: Pick<CapabilityClaims, "actorId" | "scopeId" | "scopeVersion" | "botActor" | "liveActor" | "members">,
+  ): Promise<boolean>;
   openFileForViewer(id: string, principalId: string): Promise<OpenedFile | null>;
   grant(g: Grant): Promise<void>;
   revokeGrant(ownerScopeId: ScopeId, ref: string, granteeScopeId: ScopeId, revokedBy: string): Promise<void>;
@@ -308,6 +349,7 @@ export interface App {
   ): Promise<number>;
   createCron(input: CreateCronInput): Promise<Cron>;
   getCron(id: string): Promise<Cron | null>;
+  getCronRuns(id: string, limit?: number): Promise<CronFirePage>;
   listCrons(): Promise<Cron[]>;
   listCronsForViewer(principalId: string): Promise<{ owned: Cron[]; visible: VisibleCron[] }>;
   updateCron(id: string, patch: CronPatch): Promise<Cron | null>;
@@ -315,6 +357,11 @@ export interface App {
   setCronEnabled(id: string, enabled: boolean): Promise<void>;
   setCronDestination(id: string, destination: Destination | undefined): Promise<Cron | null>;
   setCronRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
+  createWebhook(input: CreateWebhookInput): Promise<Webhook>;
+  getWebhook(id: string): Promise<Webhook | null>;
+  listWebhooks(): Promise<Webhook[]>;
+  setWebhookEnabled(id: string, enabled: boolean): Promise<void>;
+  setWebhookRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
   pendingDeliveries(type: string, claimMs?: number): Promise<Delivery[]>;
   enqueueDelivery(input: { destination: Destination; text: string; idempotencyKey: string }): Promise<void>;
   createContextRequest(source: string, query: SurfaceContextQuery): Promise<SurfaceContextRequest>;
@@ -349,9 +396,20 @@ export interface App {
   ackDelivery(id: string, slackApiMs?: number): Promise<void>;
   ackDeliveryByKey(idempotencyKey: string): Promise<void>;
   setRunDeliveryState(runId: string, state: RunDeliveryState): Promise<boolean>;
-  upsertDirectory(members: DirectoryMember[]): Promise<void>;
-  upsertChannels(channels: DirectoryChannel[], channelMembers?: ChannelMembership[]): Promise<void>;
-  upsertGroups(groupMembers: GroupMembership[]): Promise<void>;
+  upsertDirectory(members: DirectoryMember[], syncedAt?: number): Promise<void>;
+  upsertChannels(
+    channels: DirectoryChannel[],
+    channelMembers?: ChannelMembership[],
+    syncedAt?: number,
+    channelRosterIds?: string[],
+    revocations?: ChannelMembership[],
+  ): Promise<void>;
+  upsertGroups(
+    groupMembers: GroupMembership[],
+    syncedAt?: number,
+    groupIds?: string[],
+    groupRosterIds?: string[],
+  ): Promise<void>;
   setDirectoryWorkspaceUrl(url: string): Promise<void>;
   directoryMeta(): Promise<DirectoryMeta>;
   resolveRecipient(query: string): Promise<RecipientResolution>;
@@ -419,6 +477,11 @@ export interface App {
   renameDeployment(id: string, name: string): Promise<Deployment>;
   setDeploymentDisplayName(id: string, displayName: string): Promise<Deployment>;
   reachDeployment(id: string, principalId: string, opts?: ReachOptions): Promise<Reach>;
+  deploymentLogsFor(
+    id: string,
+    principalId: string,
+    opts: { tailLines: number },
+  ): Promise<{ status: "ok"; logs: string | null } | { status: "not_found" | "denied" }>;
   shareDeployment(
     idOrName: string,
     grantee: ScopeId,
@@ -456,7 +519,11 @@ export interface AppDeps {
   tasks?: TaskStore;
   modelGateway: ModelGateway;
   modelCredentials?: ModelCredentialStore;
+  mcpServers?: McpServerStore;
+  mcpToolService?: McpToolService;
   modelCredentialFetch?: typeof fetch;
+  customProviders?: CustomProviderStore;
+  refreshCustomProviders?: () => Promise<void>;
   acl: AclStore;
   admin?: AdminService;
   skills: SkillStore;
@@ -467,6 +534,7 @@ export interface AppDeps {
   auditLog: AuditLog;
   config: ScopedConfigStore;
   crons: CronStore;
+  webhooks: WebhookStore;
   deliveries: DeliveryStore;
   directory: DirectoryStore;
   projects?: ProjectStore;
@@ -547,6 +615,7 @@ interface ScopeSkill {
 
 interface ScopeResources {
   files: FileListItem[];
+  webhooks: Webhook[];
   crons: Cron[];
   deployments: ScopeDeployment[];
   skills: ScopeSkill[];

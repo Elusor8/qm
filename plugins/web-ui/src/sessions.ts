@@ -3,11 +3,13 @@ import { live } from "lit/directives/live.js";
 import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 import {
-  Activity,
   Archive,
+  Binoculars,
   ArchiveRestore,
   ChevronDown,
   ChevronRight,
+  Clock3,
+  Cog,
   EllipsisVertical,
   Folder,
   Hash,
@@ -27,6 +29,8 @@ import {
   api,
   attachPendingApprovals,
   fetchTranscript,
+  currentEarlierCount,
+  inheritedTranscript,
   isContinuable,
   entriesToMessages,
   regenerateTitle,
@@ -39,7 +43,7 @@ import {
   type CoreProject,
   type CoreSession,
 } from "./core-bridge";
-import { sessionLink, UI_BASE } from "./deep-link";
+import { deepLinkPath, isPlainLeftClick, sessionLink, UI_BASE } from "./deep-link";
 import {
   activityOf,
   chatBrowseStatusMatches,
@@ -55,8 +59,9 @@ import {
   type RecentItem,
   type ChatBrowseStatus,
 } from "./session-list";
+import { hideTooltip, showTooltip } from "./tooltip";
 import { errMessage } from "../../chassis/src/errors";
-import { copyText, icon, relTime } from "./ui";
+import { copyText, fieldSelect, icon, relTime } from "./ui";
 import { listPageTpl } from "./list-page";
 import {
   contextsState,
@@ -68,21 +73,16 @@ import {
 } from "./contexts";
 import { groupDmLabel, groupDmText } from "./group-dm-label";
 import { transcriptModel } from "./model-options";
-import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty } from "./shell";
-import {
-  chatState,
-  mountContinuable,
-  mountLoadingPane,
-  mountReadOnly,
-  newChat,
-  requestBackgroundPanel,
-  setTranscriptWindow,
-} from "./chat";
+import { appState, closeSidebarOnNarrowView, renderSidebarTop, showMainEmpty, syncUrlFromState } from "./shell";
+import { allConversations, mainConversation } from "./conversations";
+import type { Conversation } from "./conv-types";
 import {
   addBlankPane,
   beginSessionDrag,
   endSessionDrag,
   notifySessionsChanged,
+  closeSessionSurfaces,
+  drawCanvas,
   sessionInCanvas,
   splitInterceptsOpen,
   splitState,
@@ -258,7 +258,7 @@ function visibleSessions(): CoreSession[] {
 }
 
 export function renderList(): void {
-  if (!appState.listEl || appState.currentView !== "chats") return;
+  if (!appState.listEl) return;
   const visible = visibleSessions();
   const active = visible.filter((s) => !s.archived);
   const archived = visible.filter((s) => s.archived);
@@ -390,7 +390,7 @@ function startProjectChat(event: Event, scopeId: string, name: string | null): v
   closeSidebarOnNarrowView();
   sessionsState.collapsedProjectScopes.delete(scopeId);
   if (addBlankPane(scopeId)) return;
-  addPendingSession(newChat({ scopeId, name }), scopeId, name);
+  addPendingSession(mainConversation().newChat({ scopeId, name }), scopeId, name);
 }
 
 function projectMenuPopover(item: Extract<RecentItem, { kind: "project" }>): TemplateResult {
@@ -455,7 +455,7 @@ export async function renderChatsPage(): Promise<void> {
 
 export function drawChatsPage(): void {
   if (appState.currentView !== "chats" || !appState.mainEl || splitState.active) return;
-  chatState.host = null;
+  mainConversation().state.host = null;
   if (!chatsPageHost || chatsPageHost.parentElement !== appState.mainEl) {
     chatsPageHost = document.createElement("div");
     chatsPageHost.className = "pane chats-page";
@@ -483,7 +483,7 @@ export function drawChatsPage(): void {
         drawChatsPage();
       },
       onRefresh: () => void renderChatsPage(),
-      action: { label: "New chat", onClick: () => newChat() },
+      action: { label: "New chat", onClick: () => mainConversation().newChat() },
       search: {
         value: chatsPageQuery,
         placeholder: "Search chats…",
@@ -519,18 +519,19 @@ export function drawChatsPage(): void {
           )}
         </div>
         <label class="list-select"
-          ><span>Surface</span
-          ><select
-            .value=${chatsPageSurface}
-            @change=${(e: Event) => {
-              chatsPageSurface = (e.currentTarget as HTMLSelectElement).value as typeof chatsPageSurface;
+          ><span>Surface</span>${fieldSelect({
+            compact: true,
+            value: chatsPageSurface,
+            onChange: (value) => {
+              chatsPageSurface = value as typeof chatsPageSurface;
               drawChatsPage();
-            }}
-          >
-            <option value="all">All surfaces</option>
-            <option value="web">Web</option>
-            <option value="slack">Slack</option>
-          </select></label
+            },
+            options: [
+              html`<option value="all">All surfaces</option>`,
+              html`<option value="web">Web</option>`,
+              html`<option value="slack">Slack</option>`,
+            ],
+          })}</label
         >
       </div>`,
       rows,
@@ -554,20 +555,25 @@ export const syncWorkingPulse = (el?: Element): void => {
   else requestAnimationFrame(pin);
 };
 
-function liveThread(): string | null {
-  return liveTurnThreadRef({
-    mountedThreadRef: chatState.threadRef,
-    isStreaming: Boolean(chatState.agent?.state.isStreaming),
-    pendingSend: chatState.pendingSend,
-  });
+function liveThreads(): ReadonlySet<string> {
+  const live = new Set<string>();
+  for (const conv of allConversations()) {
+    const ref = liveTurnThreadRef({
+      mountedThreadRef: conv.state.threadRef,
+      isStreaming: Boolean(conv.state.agent?.state.isStreaming),
+      pendingSend: conv.state.pendingSend,
+    });
+    if (ref) live.add(ref);
+  }
+  return live;
 }
 
 function sessionWorking(s: CoreSession): boolean {
-  return rowIndicators(s, liveThread()).working;
+  return rowIndicators(s, liveThreads()).working;
 }
 
 function statusMarks(s: CoreSession): TemplateResult {
-  const ind = rowIndicators(s, liveThread());
+  const ind = rowIndicators(s, liveThreads());
   return html`${ind.working ? html`<span class="working-dot" ${ref(syncWorkingPulse)} title="Agent is working" aria-label="Agent is working"></span>` : nothing}${
     ind.awaiting
       ? html`<span class="awaiting-dot" title="Waiting for your reply" aria-label="Waiting for your reply"></span>`
@@ -578,11 +584,17 @@ function statusMarks(s: CoreSession): TemplateResult {
           class="bg-chip"
           role="button"
           tabindex="0"
-          title="${ind.background.label} — click to inspect"
           aria-label="${ind.background.label} — click to inspect"
+          @mouseenter=${(e: Event) =>
+            showTooltip(e.currentTarget as Element, `${ind.background!.label} — click to inspect`)}
+          @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+          @focus=${(e: Event) => showTooltip(e.currentTarget as Element, `${ind.background!.label} — click to inspect`)}
+          @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
           @click=${(e: Event) => openBackgroundInspector(e, s)}
           @keydown=${(e: KeyboardEvent) => (e.key === "Enter" || e.key === " ") && openBackgroundInspector(e, s)}
-          >${icon(Activity, 11)}${ind.background.count}</span
+          >${ind.background.jobs > 0 ? icon(Cog, 11) : nothing}${
+            ind.background.watches > 0 ? icon(Binoculars, 11) : nothing
+          }${ind.background.crons > 0 ? icon(Clock3, 11) : nothing}</span
         >`
       : nothing
   }`;
@@ -591,17 +603,15 @@ function statusMarks(s: CoreSession): TemplateResult {
 function openBackgroundInspector(e: Event, s: CoreSession): void {
   e.stopPropagation();
   e.preventDefault();
-  requestBackgroundPanel(s.id || null, s.threadRef);
+  mainConversation().requestBackgroundPanel(s.id || null, s.threadRef);
   void openSession(s);
 }
 
 function isActiveRow(s: CoreSession): boolean {
   if (splitState.active) return Boolean(s.id) && sessionInCanvas(s.id);
   if (sessionsState.openingKey) return Boolean(s.id) && s.id === sessionsState.openingKey;
-  return Boolean(
-    (chatState.sessionId && s.id === chatState.sessionId) ||
-    (chatState.threadRef && s.threadRef === chatState.threadRef),
-  );
+  const main = mainConversation().state;
+  return Boolean((main.sessionId && s.id === main.sessionId) || (main.threadRef && s.threadRef === main.threadRef));
 }
 
 function chatPageRow(s: CoreSession): TemplateResult {
@@ -612,7 +622,15 @@ function chatPageRow(s: CoreSession): TemplateResult {
       class="list-row chat-row ${active ? "active" : ""} ${s.color ? "colored" : ""}"
       style=${s.color ? `--session-color:${s.color}` : nothing}
     >
-      <button class="chat-row-open" type="button" @click=${() => void openSession(s)}>
+      <a
+        class="chat-row-open"
+        href=${deepLinkPath(UI_BASE, "chats", s.id)}
+        @click=${(e: MouseEvent) => {
+          if (!isPlainLeftClick(e)) return;
+          e.preventDefault();
+          void openSession(s);
+        }}
+      >
         <span class="list-row-title">${statusMarks(s)}${groupDmTitle(s)}</span>
         <span class="list-row-meta">
           ${scopeChip(s.scopeId, s.channelName ?? null)}
@@ -620,7 +638,7 @@ function chatPageRow(s: CoreSession): TemplateResult {
           ${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}
           <span class="list-row-date">${listWhen(activityOf(s))}</span>
         </span>
-      </button>
+      </a>
       ${
         s.id
           ? html`<span class="chat-row-actions">
@@ -777,14 +795,24 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
       class="session-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${s.color ? "colored" : ""}"
       style=${s.color ? `--session-color:${s.color}` : nothing}
     >
-      <button
+      <a
         class="session"
+        href=${saved ? deepLinkPath(UI_BASE, "chats", s.id) : nothing}
         aria-busy=${refreshingTitle ? "true" : "false"}
         aria-label=${ariaLabel}
         draggable=${saved ? "true" : "false"}
         @dragstart=${(e: DragEvent) => onSessionDragStart(e, s)}
         @dragend=${() => endSessionDrag()}
-        @click=${() => openSession(s)}
+        @click=${(e: MouseEvent) => {
+          if (saved && !isPlainLeftClick(e)) return;
+          e.preventDefault();
+          void openSession(s);
+        }}
+        @dblclick=${(e: Event) => {
+          if (!saved) return;
+          e.preventDefault();
+          startRename(s);
+        }}
       >
         <div class="title" aria-live="polite">
           ${statusMarks(s)}${surfaceGlyph(s)}${readOnly ? html`<span class="ro-lock" title="Read-only">${icon(Lock, 12)}</span>` : nothing}<span
@@ -792,10 +820,22 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
             >${titleContent}</span
           >${context ? html`<span class="row-context" title=${context}>${context}</span>` : nothing}
         </div>
-      </button>
+      </a>
       ${
         saved
           ? html`<div class="session-menu">
+              <button
+                class="session-menu-btn session-archive-btn"
+                type="button"
+                title=${s.archived ? "Unarchive" : "Archive"}
+                aria-label=${`${s.archived ? "Unarchive" : "Archive"} ${sessionTitle(s)}`}
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                  setArchived(s, !s.archived);
+                }}
+              >
+                ${s.archived ? icon(ArchiveRestore, 15) : icon(Archive, 15)}
+              </button>
               <button
                 class="session-menu-btn"
                 data-menu-id=${s.id}
@@ -934,6 +974,7 @@ function renameInput(menuKey: string, ariaLabel: string, commit: () => Promise<v
         renameDraft = (e.currentTarget as HTMLInputElement).value;
       }}
       @keydown=${(e: KeyboardEvent) => {
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === "Enter") {
           e.preventDefault();
           void commit();
@@ -1031,6 +1072,7 @@ async function commitRename(s: CoreSession): Promise<void> {
 
 function setArchived(s: CoreSession, archived: boolean): void {
   sessionsState.openMenuId = null;
+  if (archived && s.id) closeSessionSurfaces(s.id);
   void persistSessionPatch(s.id, { archived });
 }
 
@@ -1103,6 +1145,13 @@ async function persistSessionPatch(
   }
 }
 
+let listSettled: (() => void) | null = null;
+const listReady = new Promise<void>((resolve) => (listSettled = resolve));
+
+export function sessionsReady(): Promise<void> {
+  return sessionsState.loaded ? Promise.resolve() : listReady;
+}
+
 export async function refreshSessions(
   opts: { showLoading?: boolean; silent?: boolean; refreshContexts?: boolean } = {},
 ): Promise<boolean> {
@@ -1125,6 +1174,8 @@ export async function refreshSessions(
     if (!opts.silent) sessionsNotice = errMessage(e, "Failed to load conversations.");
     return false;
   } finally {
+    listSettled?.();
+    listSettled = null;
     if (seq === sessionRefreshSeq) {
       sessionsLoading = false;
       renderList();
@@ -1133,25 +1184,44 @@ export async function refreshSessions(
 }
 
 export async function openSession(s: CoreSession, entriesPrefetch?: Promise<TranscriptPage | null>): Promise<void> {
+  if (appState.currentView !== "chats") {
+    appState.currentView = "chats";
+    appState.viewRenderSeq++;
+    renderSidebarTop();
+    renderList();
+    if (splitState.active) drawCanvas();
+    syncUrlFromState(s.id || null);
+  }
   if (splitInterceptsOpen(s)) return;
   closeSidebarOnNarrowView();
   if (projectName(s.scopeId) && sessionsState.collapsedProjectScopes.delete(s.scopeId)) renderList();
+  return openSessionInto(mainConversation(), s, entriesPrefetch);
+}
+
+export async function openSessionInto(
+  conv: Conversation,
+  s: CoreSession,
+  entriesPrefetch?: Promise<TranscriptPage | null>,
+): Promise<void> {
+  const tracked = conv === mainConversation();
   if (!s.id) {
-    if (chatState.threadRef !== s.threadRef) {
-      mountContinuable(s.threadRef, null, s.scopeId || null, [], s.channelName ?? null);
+    if (conv.state.threadRef !== s.threadRef) {
+      conv.mountContinuable(s.threadRef, null, s.scopeId || null, [], s.channelName ?? null);
       renderList();
     }
     return;
   }
-  if (s.id === chatState.sessionId) return;
+  if (s.id === conv.state.sessionId) return;
 
   void refreshSessions({ silent: true });
 
-  sessionsState.openingKey = s.id;
   const opening = s.id;
-  renderList();
+  if (tracked) {
+    sessionsState.openingKey = opening;
+    renderList();
+  }
   const skeletonTimer = window.setTimeout(() => {
-    if (sessionsState.openingKey === opening) mountLoadingPane();
+    if (!tracked || sessionsState.openingKey === opening) conv.mountLoadingPane();
   }, 140);
 
   const fetchEntries = (): Promise<TranscriptPage | null> =>
@@ -1165,24 +1235,28 @@ export async function openSession(s: CoreSession, entriesPrefetch?: Promise<Tran
   ]);
   window.clearTimeout(skeletonTimer);
 
-  if (sessionsState.openingKey !== opening) return;
-  sessionsState.openingKey = null;
+  if (tracked) {
+    if (sessionsState.openingKey !== opening) return;
+    sessionsState.openingKey = null;
+  }
 
   if (!entriesRes) {
-    showMainEmpty("Couldn't load this conversation. Check your connection and click it again.");
+    if (tracked) showMainEmpty("Couldn't load this conversation. Check your connection and click it again.");
     renderList();
     return;
   }
 
-  const messages = entriesToMessages(entriesRes.entries ?? [], transcriptModel());
-  const earlier = entriesRes.earlierEntries ?? 0;
+  const split = inheritedTranscript(s, entriesRes.entries ?? []);
+  const messages = entriesToMessages(split.current, transcriptModel());
+  const inheritedMessages = entriesToMessages(split.inherited, transcriptModel());
+  const earlier = currentEarlierCount(s, entriesRes.earlierEntries ?? 0);
   const anchorSeq = entriesRes.entries?.[0]?.seq ?? null;
   if (continuable) {
     attachPendingApprovals(messages, approvalsRes?.approvals ?? [], transcriptModel());
-    mountContinuable(s.threadRef, s.id, s.scopeId, messages, s.channelName ?? null);
-    setTranscriptWindow(anchorSeq, earlier);
+    conv.mountContinuable(s.threadRef, s.id, s.scopeId, messages, s.channelName ?? null, s, inheritedMessages);
+    conv.setTranscriptWindow(anchorSeq, earlier, (entriesRes.earlierEntries ?? 0) > 0);
   } else {
-    mountReadOnly(s, messages, earlier, anchorSeq);
+    conv.mountReadOnly(s, messages, earlier, anchorSeq, inheritedMessages);
   }
   renderList();
 }

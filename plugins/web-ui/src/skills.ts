@@ -3,7 +3,7 @@ import { Box } from "lucide";
 import { api, type CoreContext } from "./core-bridge";
 import type { SkillItem } from "./composer";
 import { errMessage } from "../../chassis/src/errors";
-import { icon } from "./ui";
+import { fieldSelect, icon } from "./ui";
 import { appState } from "./shell";
 import { skillActions } from "./skill-actions";
 import {
@@ -23,6 +23,8 @@ import {
   type SkillStatusFilter,
 } from "./skill-registry";
 import { listBackLink, listPageTpl } from "./list-page";
+import { scopeTitle } from "./contexts";
+import { scopedSession, scopedViewTopbar } from "./session-scope";
 import { focusDialogCancel, restoreDialogFocus, trapDialogFocus } from "./dialog-focus";
 import { SkillsRefreshSequence } from "./skills-refresh";
 import { SkillsMutationSequence } from "./skills-mutation";
@@ -70,6 +72,11 @@ let archiveFocusTarget: HTMLElement | null = null;
 
 function scopeLabel(scope: string): string {
   return scope ? scope.charAt(0).toUpperCase() + scope.slice(1) : "";
+}
+
+function editAudience(scopeId: string | undefined): string {
+  if (scopeId?.startsWith("personal:")) return "only you";
+  return scopeId ? scopeTitle(scopeId) : "this context";
 }
 
 async function startEdit(s: SkillItem): Promise<void> {
@@ -188,7 +195,7 @@ function skillVariant(s: SkillItem, hasScopeVariants: boolean): TemplateResult {
           <dl>
             <div>
               <dt>Scope</dt>
-              <dd>${s.scopeId ?? scopeLabel(s.scope)}</dd>
+              <dd>${s.scopeId ? scopeTitle(s.scopeId) : scopeLabel(s.scope)}</dd>
             </div>
             <div>
               <dt>Capabilities</dt>
@@ -262,7 +269,7 @@ function editorPane() {
       <div class="skill-form-heading">
         <div>
           <h1 class="pane-title">Edit /${e.name}</h1>
-          <p>Available to ${e.scopeId?.startsWith("personal:") ? "only you" : (e.scopeId ?? "this context")}</p>
+          <p>Available to ${editAudience(e.scopeId)}</p>
         </div>
         <span class="badge">Editing</span>
       </div>
@@ -299,7 +306,7 @@ function editorPane() {
       ${
         reviewed
           ? html`<div class="skill-impact" role="alert">
-              <strong>Publish this change to ${e.scopeId}?</strong>
+              <strong>Publish this change to ${scopeTitle(e.scopeId ?? null)}?</strong>
               <div class="card-meta">
                 Everyone in this context can invoke the updated instructions. Description
                 ${e.description === e.originalDescription ? "unchanged" : "changed"}; instructions
@@ -381,18 +388,17 @@ function creatorPane() {
       </label>
       <label class="skill-field">
         <span>Available to</span>
-        <select
-          class="skill-desc-input"
-          .value=${c.scopeId}
-          ?disabled=${creatingSaving}
-          @change=${(ev: Event) => {
-            c.scopeId = (ev.target as HTMLSelectElement).value;
+        ${fieldSelect({
+          className: "skill-scope-select",
+          value: c.scopeId,
+          disabled: creatingSaving,
+          onChange: (value) => {
+            c.scopeId = value;
             c.review = null;
             drawSkills();
-          }}
-        >
-          ${createScopes.map((scope) => html`<option value=${scope.scopeId}>${scope.name}</option>`)}
-        </select>
+          },
+          options: createScopes.map((scope) => html`<option value=${scope.scopeId}>${scope.name}</option>`),
+        })}
         <small class="card-meta">Everyone in a shared context can invoke and edit this skill.</small>
       </label>
       <label class="skill-field">
@@ -429,7 +435,7 @@ function creatorPane() {
       ${
         reviewed
           ? html`<div class="skill-impact" role="alert">
-              <strong>Publish /${c.name.trim()} to ${c.scopeId}?</strong>
+              <strong>Publish /${c.name.trim()} to ${scopeTitle(c.scopeId)}?</strong>
               <div class="card-meta">Everyone in this context can invoke and edit these instructions.</div>
             </div>`
           : nothing
@@ -478,7 +484,16 @@ function drawSkills(loading = false): void {
     return;
   }
   const filters = { query: skillSearch, scope: scopeFilter, source: sourceFilter, status: statusFilter };
-  const groups = filterSkillGroups(groupSkills(skillRows), filters);
+  const scopedScope = scopedSession.active?.scopeId ?? null;
+  skillsPageHost.classList.toggle("scoped-view", Boolean(scopedScope));
+  let groups = filterSkillGroups(groupSkills(skillRows), filters);
+  if (scopedScope)
+    groups = groups
+      .map((group) => ({
+        ...group,
+        skills: group.skills.filter((skill) => skill.scopeId === scopedScope),
+      }))
+      .filter((group) => group.skills.length > 0);
   const filtered = groups.flatMap((group) => group.skills);
   const counts = statusCounts(skillRows);
   const rows: TemplateResult[] = groups.map((group) => skillGroup(group.name, group.skills));
@@ -490,7 +505,7 @@ function drawSkills(loading = false): void {
     drawSkills();
   };
   const emptyState = skillEmptyState(skillRows.length, filtered.length, loading);
-  let empty: string | TemplateResult = "No skills available yet.";
+  let empty: string | TemplateResult = scopedScope ? "No skills in this context." : "No skills available yet.";
   if (emptyState === "filtered") {
     empty = html`<div class="skill-empty">
       <span>No skills match these filters.</span
@@ -500,7 +515,7 @@ function drawSkills(loading = false): void {
     empty = "Loading skills…";
   }
   render(
-    html`${listPageTpl({
+    html`${scopedViewTopbar("skills", () => drawSkills())}${listPageTpl({
       title: "Skills",
       onRefresh: () => void renderSkills(),
       action: { label: "New skill", onClick: startCreate },
@@ -537,38 +552,40 @@ function drawSkills(loading = false): void {
           </div>
           <div class="skill-filter-fields">
             <label class="list-select"
-              ><span>Scope</span
-              ><select
-                aria-label="Filter skills by scope"
-                .value=${scopeFilter}
-                @change=${(e: Event) => {
-                  scopeFilter = (e.currentTarget as HTMLSelectElement).value;
+              ><span>Scope</span>${fieldSelect({
+                compact: true,
+                ariaLabel: "Filter skills by scope",
+                value: scopeFilter,
+                onChange: (value) => {
+                  scopeFilter = value;
                   drawSkills();
-                }}
-              >
-                <option value="all">All scopes</option>
-                <option value="personal">Personal</option>
-                <option value="channel">Channel</option>
-                <option value="group">Project / group</option>
-                <option value="team">Team</option>
-                <option value="org">Organization</option>
-              </select></label
+                },
+                options: [
+                  html`<option value="all">All scopes</option>`,
+                  html`<option value="personal">Personal</option>`,
+                  html`<option value="channel">Channel</option>`,
+                  html`<option value="group">Project / group</option>`,
+                  html`<option value="team">Team</option>`,
+                  html`<option value="org">Organization</option>`,
+                ],
+              })}</label
             >
             <label class="list-select"
-              ><span>Source</span
-              ><select
-                aria-label="Filter skills by source"
-                .value=${sourceFilter}
-                @change=${(e: Event) => {
-                  sourceFilter = (e.currentTarget as HTMLSelectElement).value;
+              ><span>Source</span>${fieldSelect({
+                compact: true,
+                ariaLabel: "Filter skills by source",
+                value: sourceFilter,
+                onChange: (value) => {
+                  sourceFilter = value;
                   drawSkills();
-                }}
-              >
-                <option value="all">All sources</option>
-                <option value="native">Created here</option>
-                <option value="pack">Skill packs</option>
-                <option value="overrides">Overrides</option>
-              </select></label
+                },
+                options: [
+                  html`<option value="all">All sources</option>`,
+                  html`<option value="native">Created here</option>`,
+                  html`<option value="pack">Skill packs</option>`,
+                  html`<option value="overrides">Overrides</option>`,
+                ],
+              })}</label
             >
           </div>
         </div>
@@ -608,7 +625,10 @@ function closeArchiveDialog(): void {
 }
 
 function archiveDialog(skill: SkillItem): TemplateResult {
-  const audience = skill.scope === "personal" ? "you" : `everyone in ${skill.scopeId ?? `this ${skill.scope}`}`;
+  const audience =
+    skill.scope === "personal"
+      ? "you"
+      : `everyone in ${skill.scopeId ? scopeTitle(skill.scopeId) : `this ${skill.scope}`}`;
   return html`<div
     class="project-dialog-backdrop"
     @click=${(event: MouseEvent) => event.target === event.currentTarget && closeArchiveDialog()}

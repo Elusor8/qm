@@ -97,6 +97,24 @@ export function withPendingSession(list: CoreSession[], pending: CoreSession): C
   return [pending, ...list.filter((s) => s.threadRef !== pending.threadRef)];
 }
 
+/** An unsent new chat the user walked away from, with nothing worth keeping. */
+export function isAbandonedNewChat(state: {
+  threadRef: string | null;
+  nextThreadRef: string | null;
+  sessionId: string | null;
+  pendingSend: string | null;
+  hasHumanMessage: boolean;
+  draft: string;
+  attachments: number;
+}): boolean {
+  const ref = state.threadRef;
+  if (!ref || ref === state.nextThreadRef) return false;
+  if (state.sessionId !== null || state.pendingSend === ref) return false;
+  if (state.hasHumanMessage) return false;
+  if (state.draft.trim() || state.attachments > 0) return false;
+  return true;
+}
+
 export function withoutUnsentPending(list: CoreSession[], threadRef: string): CoreSession[] {
   return list.filter((s) => s.id !== "" || s.threadRef !== threadRef);
 }
@@ -149,21 +167,27 @@ export function applySessionState(
 export interface RowIndicators {
   working: boolean;
   awaiting: boolean;
-  background: { count: number; label: string } | null;
+  background: { jobs: number; watches: number; crons: number; label: string } | null;
 }
 
-export function backgroundLabel(jobs: number, watches: number): { count: number; label: string } | null {
+export function backgroundLabel(
+  jobs: number,
+  watches: number,
+  crons: number,
+): { jobs: number; watches: number; crons: number; label: string } | null {
   const parts: string[] = [];
   if (jobs > 0) parts.push(`${jobs} background job${jobs === 1 ? "" : "s"} running`);
   if (watches > 0) parts.push(`${watches} watch${watches === 1 ? "" : "es"} armed`);
-  return parts.length ? { count: jobs + watches, label: parts.join(" · ") } : null;
+  if (crons > 0) parts.push(`${crons} cron${crons === 1 ? "" : "s"} scheduled here`);
+  return parts.length ? { jobs, watches, crons, label: parts.join(" · ") } : null;
 }
 
-export function rowIndicators(s: CoreSession, liveThreadRef: string | null): RowIndicators {
+export function rowIndicators(s: CoreSession, liveThreads: ReadonlySet<string> | string | null): RowIndicators {
+  const live = typeof liveThreads === "string" ? new Set([liveThreads]) : (liveThreads ?? new Set<string>());
   return {
-    working: Boolean(s.working) || (Boolean(s.threadRef) && s.threadRef === liveThreadRef),
+    working: Boolean(s.working) || (Boolean(s.threadRef) && live.has(s.threadRef)),
     awaiting: Boolean(s.awaitingInput),
-    background: backgroundLabel(s.backgroundJobs ?? 0, s.watches ?? 0),
+    background: backgroundLabel(s.backgroundJobs ?? 0, s.watches ?? 0, s.crons ?? 0),
   };
 }
 

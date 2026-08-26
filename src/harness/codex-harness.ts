@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { sanitizeTitle, TITLE_GENERATION_PROMPT } from "./pi-harness.ts";
+import { sanitizeTitle, TITLE_GENERATION_PROMPT, titleUserPrompt } from "./pi-harness.ts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -26,6 +26,7 @@ import {
 } from "./codex-auth.ts";
 import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
+import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { reconstructMessagesFromHistory, seedPriorTurns, type PiReplayMessage } from "./replay.ts";
 
 export interface CodexHarnessOptions {
@@ -37,6 +38,7 @@ export interface CodexHarnessOptions {
   scratchExec?: boolean;
   ownerAuthExec?: boolean;
   reachExec?: boolean;
+  mcpTools?: () => McpToolDescriptor[];
   controlTools?: boolean;
   turnWallClockMs?: number;
   execTimeoutMs?: number;
@@ -313,13 +315,19 @@ function toolOptions(opts: CodexHarnessOptions, turn?: HarnessTurnInput): PiTool
     scratchExec: opts.scratchExec,
     ownerAuthExec: opts.ownerAuthExec,
     reachExec: opts.reachExec,
+    ...(opts.mcpTools ? { mcpTools: opts.mcpTools } : {}),
     controlTools: opts.controlTools,
     execTimeoutMs: opts.execTimeoutMs,
     execTimeoutCeilingMs: opts.execTimeoutCeilingMs,
     backgroundJobTtlMs: opts.backgroundJobTtlMs,
     backgroundJobTtlMaxMs: opts.backgroundJobTtlMaxMs,
     ...(turn
-      ? { readOnly: turn.readOnly, surfaceTools: turn.surfaceTools, surfaceName: turn.surfaceName }
+      ? {
+          readOnly: turn.readOnly,
+          surfaceTools: turn.surfaceTools,
+          surfaceName: turn.surfaceName,
+          credentialExecServices: turn.credentialExecServices,
+        }
       : { surfaceTools: true, surfaceName: "slack" }),
   };
 }
@@ -330,14 +338,6 @@ function asTools(ref: ToolContextRef, options: PiToolsOptions): BridgedTool[] {
 
 function userInput(text: string): Record<string, unknown> {
   return { type: "text", text, text_elements: [] };
-}
-
-export function stripCodexImageBytes(items: readonly Record<string, unknown>[]): Record<string, unknown>[] {
-  return items.map((item) =>
-    item.type === "image" && typeof item.url === "string" && item.url.startsWith("data:")
-      ? { ...item, url: "[image bytes omitted]" }
-      : { ...item },
-  );
 }
 
 export function codexReplayCallId(id: string): string {
@@ -1049,7 +1049,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         ephemeral: true,
         baseInstructions: turn.systemPrompt,
         developerInstructions:
-          "Use the supplied dynamic QM tools for all workspace, execution, memory, history, and surface operations. The built-in working directory is an empty read-only control jail, not the user's workspace.",
+          "Use the supplied dynamic tools for all workspace, execution, memory, history, and surface operations. The built-in working directory is an empty read-only control jail, not the user's workspace.",
         dynamicTools,
         experimentalRawEvents: true,
         environments: [],
@@ -1212,13 +1212,11 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     if (setupTimer) clearTimeout(setupTimer);
     turn.cancel?.removeEventListener("abort", onSetupCancel);
     releaseSetupUser();
-    const requestPayload = {
+    const promptEnvelope = {
       threadStart: {
         ...threadStartRequest,
         cwd: "[ephemeral control jail]",
       },
-      replay,
-      input: stripCodexImageBytes(input),
     };
     const startedAt = Date.now();
     const recordRequest = async (): Promise<void> => {
@@ -1232,7 +1230,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
               turnSeq: userEntry.seq,
               step: 0,
               model: selectedModel,
-              request: requestPayload,
+              promptEnvelope,
               truncated: Boolean(turn.images?.length),
               transport: { modelId: selectedModel },
               ttftMs: state.firstOutputAt ? state.firstOutputAt - startedAt : null,
@@ -1544,7 +1542,8 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
             ...(recordLlmRequest ? { recordLlmRequest } : {}),
           }),
         ),
-      generateTitle: async (transcript) => sanitizeTitle(await single(TITLE_GENERATION_PROMPT, transcript)),
+      generateTitle: async (transcript) =>
+        sanitizeTitle(await single(TITLE_GENERATION_PROMPT, titleUserPrompt(transcript))),
       summarizeApproval: async (command, reason, purpose) =>
         single(
           "Explain this command in one plain-English sentence for an approver.",

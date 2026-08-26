@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   activityOf,
   applySessionState,
+  isAbandonedNewChat,
   bumpActivity,
   chatBrowseStatusMatches,
   clearWorking,
@@ -362,31 +363,60 @@ test("rowIndicators: awaitingInput maps through", () => {
   assert.equal(rowIndicators({ ...saved("1", "web:u:x"), awaitingInput: true }, null).awaiting, true);
 });
 
-test("backgroundLabel: jobs and watches fold into one chip with a spoken label", () => {
-  assert.deepEqual(backgroundLabel(1, 0), { count: 1, label: "1 background job running" });
-  assert.deepEqual(backgroundLabel(2, 1), { count: 3, label: "2 background jobs running · 1 watch armed" });
-  assert.deepEqual(backgroundLabel(0, 2), { count: 2, label: "2 watches armed" });
-  assert.equal(backgroundLabel(0, 0), null, "nothing running, nothing to say");
+test("backgroundLabel: jobs, watches and crons fold into one chip with a spoken label", () => {
+  assert.deepEqual(backgroundLabel(1, 0, 0), { jobs: 1, watches: 0, crons: 0, label: "1 background job running" });
+  assert.deepEqual(backgroundLabel(2, 1, 0), {
+    jobs: 2,
+    watches: 1,
+    crons: 0,
+    label: "2 background jobs running · 1 watch armed",
+  });
+  assert.deepEqual(backgroundLabel(0, 2, 0), { jobs: 0, watches: 2, crons: 0, label: "2 watches armed" });
+  assert.deepEqual(backgroundLabel(0, 0, 1), { jobs: 0, watches: 0, crons: 1, label: "1 cron scheduled here" });
+  assert.deepEqual(backgroundLabel(0, 1, 2), {
+    jobs: 0,
+    watches: 1,
+    crons: 2,
+    label: "1 watch armed · 2 crons scheduled here",
+  });
+  assert.equal(backgroundLabel(0, 0, 0), null, "nothing running, nothing to say");
 });
 
 test("rowIndicators: background counts flow through backgroundLabel — zero counts treated as absent", () => {
   const both = rowIndicators({ ...saved("1", "web:u:x"), backgroundJobs: 2, watches: 1 }, null);
-  assert.deepEqual(both.background, { count: 3, label: "2 background jobs running · 1 watch armed" });
-  assert.equal(rowIndicators({ ...saved("1", "web:u:x"), backgroundJobs: 0, watches: 0 }, null).background, null);
+  assert.deepEqual(both.background, {
+    jobs: 2,
+    watches: 1,
+    crons: 0,
+    label: "2 background jobs running · 1 watch armed",
+  });
+  const cronOnly = rowIndicators({ ...saved("1", "web:u:x"), crons: 3 }, null);
+  assert.deepEqual(cronOnly.background, { jobs: 0, watches: 0, crons: 3, label: "3 crons scheduled here" });
+  assert.equal(
+    rowIndicators({ ...saved("1", "web:u:x"), backgroundJobs: 0, watches: 0, crons: 0 }, null).background,
+    null,
+  );
   assert.equal(rowIndicators(saved("1", "web:u:x"), null).background, null);
 });
 
 test("conversationBackground: resolves the mounted conversation by session id", () => {
   const list = [saved("1", "web:u:a"), { ...saved("2", "web:u:b"), backgroundJobs: 2, watches: 1 }];
   assert.deepEqual(conversationBackground(list, "2", null), {
-    count: 3,
+    jobs: 2,
+    watches: 1,
+    crons: 0,
     label: "2 background jobs running · 1 watch armed",
   });
 });
 
 test("conversationBackground: falls back to threadRef while the conversation is still pending adoption", () => {
   const list = [{ ...saved("1", "web:u:a"), watches: 1 }];
-  assert.deepEqual(conversationBackground(list, null, "web:u:a"), { count: 1, label: "1 watch armed" });
+  assert.deepEqual(conversationBackground(list, null, "web:u:a"), {
+    jobs: 0,
+    watches: 1,
+    crons: 0,
+    label: "1 watch armed",
+  });
 });
 
 test("conversationBackground: null when the conversation has nothing running, or isn't in the list", () => {
@@ -401,4 +431,38 @@ test("conversationBackground: null when the conversation has nothing running, or
     null,
     "nothing mounted",
   );
+});
+
+test("an untouched new chat is abandoned when you navigate away", () => {
+  const base = {
+    threadRef: "web:alice:t1",
+    nextThreadRef: "web:alice:t2",
+    sessionId: null,
+    pendingSend: null,
+    hasHumanMessage: false,
+    draft: "",
+    attachments: 0,
+  };
+  assert.equal(isAbandonedNewChat(base), true);
+  assert.equal(isAbandonedNewChat({ ...base, nextThreadRef: null }), true, "leaving the chats view abandons it too");
+});
+
+test("a new chat with anything worth keeping is not abandoned", () => {
+  const base = {
+    threadRef: "web:alice:t1",
+    nextThreadRef: "web:alice:t2",
+    sessionId: null,
+    pendingSend: null,
+    hasHumanMessage: false,
+    draft: "",
+    attachments: 0,
+  };
+  assert.equal(isAbandonedNewChat({ ...base, draft: "half-typed thought" }), false, "draft");
+  assert.equal(isAbandonedNewChat({ ...base, draft: "   " }), true, "whitespace-only draft doesn't count");
+  assert.equal(isAbandonedNewChat({ ...base, attachments: 1 }), false, "attachment");
+  assert.equal(isAbandonedNewChat({ ...base, hasHumanMessage: true }), false, "already spoke");
+  assert.equal(isAbandonedNewChat({ ...base, pendingSend: "web:alice:t1" }), false, "send in flight");
+  assert.equal(isAbandonedNewChat({ ...base, sessionId: "s1" }), false, "saved session");
+  assert.equal(isAbandonedNewChat({ ...base, nextThreadRef: "web:alice:t1" }), false, "remounting the same chat");
+  assert.equal(isAbandonedNewChat({ ...base, threadRef: null }), false, "no chat mounted");
 });

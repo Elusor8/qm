@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { baseModelProviders, configuredModelForHarness, providerKeysPresent, type Config } from "./config.ts";
+import { baseModelProviders, configuredModelForHarness, harnessCarriedModelAuth, providerKeysPresent, type Config } from "./config.ts";
+import type { ServerDeps } from "./api/deps.ts";
 import { createIdentityService, type DeactivationRecord, type IdentityService } from "./identity/identity-service.ts";
 import {
   createMemoryConfigStore,
@@ -17,6 +18,7 @@ import {
   type PersistedApprovedHarnesses,
   type PersistedWebuiModels,
   type PersistedPeopleDirectoryUrl,
+  type PersistedAckEmoji,
   type PersistedBranding,
   type PersistedBrowseMaxSteps,
   type PersistedBrowseModel,
@@ -32,6 +34,8 @@ import { createSkillBundleStore, type SkillBundle, type SkillBundleStore } from 
 import { createGitFetcher, resolvePackAuth, type SkillPackFetcher } from "./skills/pack-fetcher.ts";
 import { installSeedSkills } from "./skills/seed.ts";
 import { createMemoryMap, createPostgresMapFactory, type DurableMap } from "./persistence/durable-map.ts";
+import type { PersistedUiState, UiStateStore } from "./surfaces/ui-state.ts";
+import { configurePgCaTrust } from "./persistence/pg-pool.ts";
 import { createPostgresLeaderLease, createNoopLeaderLease, type LeaderLease } from "./persistence/leader-lease.ts";
 import {
   createMemoryAdvisoryLock,
@@ -45,6 +49,7 @@ import type {
   PendingApprovalRecord,
   ScopeId,
   SurfaceContextRequest,
+  Webhook,
 } from "./types.ts";
 import { scopeId } from "./types.ts";
 import { createAuditLog, type AuditLog } from "./audit/audit-log.ts";
@@ -54,6 +59,7 @@ import { createPostgresRateLimiter } from "./ratelimit/postgres-rate-limiter.ts"
 import { createBudgetTracker } from "./ratelimit/budget.ts";
 import { createPostgresBudgetTracker } from "./ratelimit/postgres-budget.ts";
 import { createCronStore, type CronStore } from "./cron/cron-store.ts";
+import { createMemoryCronFireStore, createPostgresCronFireStore } from "./cron/cron-fire-store.ts";
 import { createDeliveryStore, type DeliveryStore } from "./delivery/delivery-store.ts";
 import { createPostgresDeliveryStore } from "./delivery/postgres-delivery-store.ts";
 import { wireRunResultDeliveries } from "./delivery/run-result-delivery.ts";
@@ -67,9 +73,12 @@ import {
 import { createIdempotencyStore, type IdempotencyRecord } from "./idempotency/idempotency-store.ts";
 import { createScheduler, type Scheduler } from "./cron/scheduler.ts";
 import { createPgBossCronQueue } from "./cron/job-queue.ts";
+import { createWebhookStore, disableLegacyWebhookRows } from "./webhooks/webhook-store.ts";
+import { createWebhookReceiver, type WebhookReceiver } from "./webhooks/webhook-receiver.ts";
 import { createDeployStore, type Deployment } from "./deploy/deploy-store.ts";
 import { createDockerDeployProvider } from "./deploy/docker-deploy-provider.ts";
 import { createAwsDeployProvider, type StoredDeployBody } from "./deploy/aws-deploy-provider.ts";
+import { createFlyDeployProvider } from "./deploy/fly-deploy-provider.ts";
 import type { DeployProvider } from "./deploy/deploy-provider.ts";
 import { createDeployService } from "./deploy/deploy-service.ts";
 import {
@@ -86,6 +95,8 @@ import type { DeployGitArchive } from "./deploy/deploy-git-store.ts";
 import { createLocalWorkspaceStore, type WorkspaceStore } from "./workspace/workspace-store.ts";
 import { createMemoryService, type MemoryService } from "./memory/memory-service.ts";
 import { createPostgresMemoryService } from "./memory/postgres-memory-service.ts";
+import { createMcpServerStore, type McpServer, type McpServerStore } from "./mcp/mcp-server-store.ts";
+import { createMcpToolService, type McpToolService } from "./mcp/mcp-tool-service.ts";
 import {
   createLocalBlobTransferStore,
   createS3BlobTransferStore,
@@ -101,6 +112,7 @@ import { createPostgresFileArtifactStore } from "./files/postgres-file-artifact-
 import { createAwsSandbox, type StoredMicrovm } from "./sandbox/aws-sandbox.ts";
 import { createLocalSandbox } from "./sandbox/local-sandbox.ts";
 import { createSpritesSandbox } from "./sandbox/sprites-sandbox.ts";
+import { createSmolmachinesSandbox } from "./sandbox/smolmachines-sandbox.ts";
 import {
   createSandboxRouter,
   ROUTE_CACHE_TTL_MS,
@@ -108,7 +120,7 @@ import {
   type SandboxRoute,
 } from "./sandbox/sandbox-routing.ts";
 import { createSandboxMigrationRunner, type SandboxMigrationRunner } from "./sandbox/sandbox-migration-runner.ts";
-import type { Sandbox } from "./sandbox/sandbox.ts";
+import { effectiveEgressEnforcement, type Sandbox } from "./sandbox/sandbox.ts";
 import { withOperatorTokenFallback } from "./credentials/connector-token.ts";
 import {
   createAwsSecretsManagerSource,
@@ -158,6 +170,9 @@ import { createPostgresEgressAuditSink } from "./admin/postgres-egress-audit-sin
 import { createConsentLinkStore, type ConsentLinkStore, type ConsentLinkRecord } from "./connectors/consent-link.ts";
 import { createModelGateway, type ModelGateway } from "./model/model-gateway.ts";
 import { createModelCredentialStore, type ModelCredentialStore } from "./model/model-credential-store.ts";
+import { setProviderBaseUrls } from "./model/provider-endpoints.ts";
+import { setCustomProviders } from "./model/custom-providers.ts";
+import { createCustomProviderStore, type CustomProviderStore } from "./model/custom-provider-store.ts";
 import { createMemorySessionStore } from "./sessions/memory-session-store.ts";
 import { createPostgresSessionStore } from "./sessions/postgres-session-store.ts";
 import type { SessionStore } from "./sessions/session-store.ts";
@@ -318,12 +333,17 @@ export interface BuiltApp {
   secretDrops: SecretDropStore;
   modelGateway: ModelGateway;
   modelCredentials: ModelCredentialStore;
+  customProviders: CustomProviderStore;
+  refreshCustomProviders: () => Promise<void>;
+  mcpServers: McpServerStore;
+  mcpToolService: McpToolService;
   acl: AclStore;
   skills: SkillStore;
   skillBundles: SkillBundleStore;
   skillFetcher: SkillPackFetcher;
   auditLog: AuditLog;
   scheduler: Scheduler;
+  webhookReceiver: WebhookReceiver;
   admin: AdminService;
   rateLimiter: RateLimiter;
   errors: ErrorLog;
@@ -357,6 +377,7 @@ export interface BuiltApp {
   ambientJudgments?: AmbientJudgmentStore;
   ackEmojiPicks?: AckEmojiPickStore;
   channelPolicy: ChannelPolicyStore;
+  uiState: UiStateStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
 }
@@ -372,6 +393,10 @@ export function buildApp(
   if (config.databaseUrl && !config.connectorSecretKey) {
     throw new Error("CONNECTOR_SECRET_KEY is required with durable storage");
   }
+  configurePgCaTrust({
+    ...(config.databaseCaCert ? { cert: config.databaseCaCert } : {}),
+    ...(config.databaseCaCertFile ? { certFile: config.databaseCaCertFile } : {}),
+  });
   const reusedConnectorKey = [
     ["CORE_SIGNING_SECRET", config.signingSecret],
     ["CAPABILITY_SECRET", config.capabilitySecret],
@@ -394,6 +419,7 @@ export function buildApp(
   const pgArtifactMap = config.databaseUrl ? createPostgresMapFactory(config.databaseUrl) : null;
   const artifactMap = <T>(table: string): DurableMap<T> =>
     pgArtifactMap ? pgArtifactMap.map<T>(table) : createMemoryMap<T>();
+  setProviderBaseUrls(config.providerBaseUrls);
   const modelCredentials = createModelCredentialStore({
     backing: artifactMap("model_credentials"),
     keyMaterial: config.connectorSecretKey ?? randomBytes(32),
@@ -421,12 +447,14 @@ export function buildApp(
     egressPolicies: artifactMap<PersistedEgressPolicy>("egress_policies"),
     unfulfilledInsights: artifactMap<PersistedScopedFlag>("unfulfilled_insights_flag"),
     externalSlackParticipants: artifactMap<PersistedScopedFlag>("external_slack_participants_flag"),
+    channelHeaderPin: artifactMap<PersistedScopedFlag>("channel_header_pin_flag"),
     baseModels: artifactMap<PersistedBaseModel>("base_model_configs"),
     approvedHarnesses: artifactMap<PersistedApprovedHarnesses>("approved_harness_configs"),
     orgAmbient: artifactMap<PersistedScopedFlag>("org_ambient_flag"),
     interactiveFastMode: artifactMap<PersistedScopedFlag>("interactive_fast_mode_flag"),
     webuiModels: artifactMap<PersistedWebuiModels>("webui_model_configs"),
     peopleDirectoryUrls: artifactMap<PersistedPeopleDirectoryUrl>("people_directory_urls"),
+    ackEmoji: artifactMap<PersistedAckEmoji>("ack_emoji"),
     branding: artifactMap<PersistedBranding>("branding_configs"),
     browseMaxSteps: artifactMap<PersistedBrowseMaxSteps>("browse_max_steps_configs"),
     browseModels: artifactMap<PersistedBrowseModel>("browse_model_configs"),
@@ -506,13 +534,13 @@ export function buildApp(
       }
     };
     skillsReady = Promise.all([
-      installCatalogs().catch((e) => console.error("[seed] failed to install seed skills:", e)),
-      deploymentLayerReady.catch((e) => console.error("[seed] deployment layer not ready:", e)),
+      installCatalogs().catch((e) => console.error("[seed] failed to install seed skills:", errMessage(e))),
+      deploymentLayerReady.catch((e) => console.error("[seed] deployment layer not ready:", errMessage(e))),
     ]).then(() => undefined);
   } else {
     skillsReady = deploymentLayerReady.then(
       () => undefined,
-      (e) => console.error("[seed] deployment layer not ready:", e),
+      (e) => console.error("[seed] deployment layer not ready:", errMessage(e)),
     );
   }
   const rateLimitOpts = { maxPerWindow: config.rateLimitPerWindow, windowMs: config.rateLimitWindowMs };
@@ -553,6 +581,9 @@ export function buildApp(
   const baseMemory: MemoryService = config.databaseUrl
     ? createPostgresMemoryService(config.databaseUrl)
     : createMemoryService(workspace);
+  const mcpServers = createMcpServerStore(artifactMap<McpServer>("mcp_servers"));
+  const mcpToolService = createMcpToolService({ servers: mcpServers, audit: auditLog });
+  const mcpTools = () => mcpToolService.toolDefs();
   const errors = config.databaseUrl ? createPostgresErrorLog(config.databaseUrl) : createErrorLog();
   const sandboxOnError = (e: { category: string; code: string; message: string; scopeLabel?: string }) =>
     errors.record({
@@ -577,6 +608,17 @@ export function buildApp(
       ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
       onError: sandboxOnError,
     });
+  const buildSmolmachines = (): Sandbox =>
+    createSmolmachinesSandbox(workspace, {
+      ...config.smolmachinesSandbox,
+      blobTransfer,
+      extraTools: deploymentLayer.advertisedTools,
+      credentialPaths: deploymentLayer.credentialPaths,
+      ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+      ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
+      ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
+      onError: sandboxOnError,
+    });
   const buildAws = (): Sandbox => {
     if (!config.awsSandbox.s3Bucket) throw new Error("SANDBOX_BACKEND=aws requires AWS_SANDBOX_S3_BUCKET");
     return createAwsSandbox(workspace, {
@@ -592,6 +634,7 @@ export function buildApp(
   const buildBackend: Record<Config["sandboxBackend"], () => Sandbox> = {
     local: buildLocal,
     sprites: buildSprites,
+    smolmachines: buildSmolmachines,
     aws: buildAws,
   };
   const sandboxBackends: Partial<Record<SandboxBackendName, Sandbox>> = {
@@ -681,16 +724,44 @@ export function buildApp(
       ? createPostgresRunSignalStore(requireDbUrl("RUN_STORE"))
       : createMemoryRunSignalStore();
   const tasks = config.databaseUrl ? createPostgresTaskStore(config.databaseUrl) : createMemoryTaskStore();
+  const customProviders = createCustomProviderStore({
+    backing: artifactMap("custom_model_providers"),
+    keyMaterial: config.connectorSecretKey ?? randomBytes(32),
+  });
+  const refreshCustomProviders = async () => {
+    setCustomProviders(await customProviders.enabled());
+  };
+  void refreshCustomProviders().catch((e) =>
+    console.error("[wiring] custom provider hydration failed:", errMessage(e)),
+  );
   const resolveModelProviderKeys = async () => {
-    const [anthropic, openai, openrouter] = await Promise.all([
+    const [anthropic, openai, openrouter, enabledCustom] = await Promise.all([
       modelCredentials.resolve("anthropic"),
       modelCredentials.resolve("openai"),
       modelCredentials.resolve("openrouter"),
+      customProviders.enabled(),
     ]);
+    const customKeys = Object.fromEntries(
+      (
+        await Promise.all(
+          enabledCustom.map(async (p) => {
+            try {
+              return [p.id, await customProviders.resolveKey(p.id)] as const;
+            } catch (e) {
+              // A corrupt/undecryptable custom key must degrade that one
+              // provider, never the whole turn (built-ins included).
+              console.error(`[model] custom provider ${p.id}: key unreadable: ${errMessage(e)}`);
+              return [p.id, null] as const;
+            }
+          }),
+        )
+      ).filter(([, key]) => key),
+    );
     return {
       ...(anthropic ? { anthropic } : {}),
       ...(openai ? { openai } : {}),
       ...(openrouter ? { openrouter } : {}),
+      ...customKeys,
     };
   };
   const runtimeOrgScope = scopeId("org", config.orgId);
@@ -704,21 +775,49 @@ export function buildApp(
         resolveBaseModelId: orgBaseModelId,
         resolveProviderKeys: resolveModelProviderKeys,
         signals: runSignals,
+        mcpTools,
       }),
     ],
-    ["opencode", createOpenCodeHarness({ ...openCodeHarnessConfigOptions(config), signals: runSignals, tasks })],
-    ["codex", createCodexHarness({ ...codexHarnessConfigOptions(config), signals: runSignals, tasks })],
-    ["claude", createClaudeHarness({ ...claudeHarnessConfigOptions(config), signals: runSignals, tasks })],
+    [
+      "opencode",
+      createOpenCodeHarness({
+        ...openCodeHarnessConfigOptions(config),
+        signals: runSignals,
+        tasks,
+        mcpTools,
+        resolveCustomProviders: async () => {
+          const enabled = await customProviders.enabled();
+          return Promise.all(
+            enabled.map(async (spec) => {
+              try {
+                const apiKey = await customProviders.resolveKey(spec.id);
+                return { spec, ...(apiKey ? { apiKey } : {}) };
+              } catch (e) {
+                // An unreadable key must not prevent the opencode server from
+                // starting; the provider is configured keyless and its models
+                // fail individually instead.
+                console.error(`[model] custom provider ${spec.id}: key unreadable: ${errMessage(e)}`);
+                return { spec };
+              }
+            }),
+          );
+        },
+      }),
+    ],
+    ["codex", createCodexHarness({ ...codexHarnessConfigOptions(config), signals: runSignals, tasks, mcpTools })],
+    ["claude", createClaudeHarness({ ...claudeHarnessConfigOptions(config), signals: runSignals, tasks, mcpTools })],
     ["mock", createMockHarness()],
   ]);
   const fallbackHarness = config.harness as HarnessId;
   const fallback = {
     harnessId: fallbackHarness,
-    modelId: defaultModelForHarness(
-      fallbackHarness,
-      configuredModelForHarness(config, fallbackHarness),
-      baseModelProviders(config),
-    ),
+    get modelId() {
+      return defaultModelForHarness(
+        fallbackHarness,
+        configuredModelForHarness(config, fallbackHarness),
+        baseModelProviders(config),
+      );
+    },
   };
   const judgeModelId = (): string => config.judgeModelId ?? auxiliaryModelFor(orgBaseModelId() ?? fallback.modelId);
   const harness = createHarnessRouter(adapters, adapters.get(fallbackHarness)!, (input) =>
@@ -772,17 +871,19 @@ export function buildApp(
         : {}),
     },
   });
-  const deployProvider: DeployProvider =
-    config.deployProvider === "aws"
-      ? createAwsDeployProvider({
-          ...config.awsDeploy,
-          ...(!config.awsDeploy.dataBucket && config.awsSandbox.s3Bucket
-            ? { dataBucket: config.awsSandbox.s3Bucket }
-            : {}),
-          advisoryLock,
-          store: artifactMap<StoredDeployBody>("aws_deploy_bodies"),
-        })
-      : createDockerDeployProvider();
+  const deployProvider: DeployProvider = ((): DeployProvider => {
+    if (config.deployProvider === "aws")
+      return createAwsDeployProvider({
+        ...config.awsDeploy,
+        ...(!config.awsDeploy.dataBucket && config.awsSandbox.s3Bucket
+          ? { dataBucket: config.awsSandbox.s3Bucket }
+          : {}),
+        advisoryLock,
+        store: artifactMap<StoredDeployBody>("aws_deploy_bodies"),
+      });
+    if (config.deployProvider === "fly") return createFlyDeployProvider(config.flyDeploy);
+    return createDockerDeployProvider();
+  })();
   if (config.deployProvider === "aws" && !config.awsDeploy.dataBucket && !config.awsSandbox.s3Bucket) {
     console.warn(
       "[wiring] aws deploy: no data bucket resolved (AWS_DEPLOY_DATA_BUCKET unset, sandbox is not aws) — deployed apps have NO durable /data",
@@ -836,7 +937,10 @@ export function buildApp(
     : createMemoryEnvironmentStore();
   const monitors = createMonitorStore(artifactMap<Monitor>("monitors"));
   const cronChanged: { notify?: (id: string) => void } = {};
-  const cronsBase = createCronStore(artifactMap<Cron>("crons"));
+  const cronsBase = createCronStore(
+    artifactMap<Cron>("crons"),
+    pgArtifactMap ? createPostgresCronFireStore(pgArtifactMap.pool) : createMemoryCronFireStore(),
+  );
   const crons: CronStore = {
     ...cronsBase,
     async create(input) {
@@ -854,6 +958,9 @@ export function buildApp(
       cronChanged.notify?.(id);
     },
   };
+  const webhooks = createWebhookStore(artifactMap<Webhook>("webhooks"));
+  if (pgArtifactMap)
+    void disableLegacyWebhookRows(pgArtifactMap.pool).catch(swallowAs("wiring: legacy webhook sweep", undefined));
   const deliveries = config.databaseUrl ? createPostgresDeliveryStore(config.databaseUrl) : createDeliveryStore();
   const layerEnv = config.layerEnv ?? {};
   const layerBrokerCache = new Map<string, AwsRoleBroker>();
@@ -886,6 +993,7 @@ export function buildApp(
     identity,
     resolution,
     config: configStore,
+    ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     sessionTapeMode: config.sessionTapeMode,
     sessions,
     workspace,
@@ -901,6 +1009,7 @@ export function buildApp(
     deploy: deployService,
     acl,
     admin,
+    mcp: mcpToolService,
     ...(config.maxContextEntries !== undefined ? { maxContextEntries: config.maxContextEntries } : {}),
     ...(config.maxContextTokens !== undefined ? { maxContextTokens: config.maxContextTokens } : {}),
     execTimeoutMs: config.execTimeoutDefaultMs,
@@ -914,6 +1023,7 @@ export function buildApp(
     ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
     ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
     ...(config.publicWebUrl ? { publicWebUrl: config.publicWebUrl } : {}),
+    ...(config.publicUrl ? { webhookPublicUrl: config.publicUrl } : {}),
     memoryPolicy: { recall: config.memoryRecall, capture: config.memoryCapture },
     memoryStrategy,
     skills,
@@ -941,6 +1051,7 @@ export function buildApp(
     ...(processes ? { processes } : {}),
     monitors,
     crons,
+    webhooks,
     resolveBaseModelId: () => orgBaseModelId() ?? fallback.modelId,
     ...(config.scratchExecEnabled ? { scratchExec: true } : {}),
     ...(config.sharedOwnerAuthIsolation ? { ownerAuthExec: true, sharedOwnerAuthIsolation: true } : {}),
@@ -1049,6 +1160,10 @@ export function buildApp(
     tasks,
     modelGateway,
     modelCredentials,
+    customProviders,
+    refreshCustomProviders,
+    mcpServers,
+    mcpToolService,
     ...(overrides.modelCredentialFetch ? { modelCredentialFetch: overrides.modelCredentialFetch } : {}),
     acl,
     admin,
@@ -1060,6 +1175,7 @@ export function buildApp(
     auditLog,
     config: configStore,
     crons,
+    webhooks,
     deliveries,
     directory,
     projects,
@@ -1100,6 +1216,7 @@ export function buildApp(
     tasks,
     ackPicks: ackEmojiPicks,
     ackModelId: () => auxiliaryModelForProvider("anthropic"),
+    ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
   runs.onTerminal((run) => {
@@ -1205,6 +1322,7 @@ export function buildApp(
     leaderLease,
     directory,
     currentScopeMembers,
+    sessions,
     ...(config.databaseUrl
       ? { jobQueue: createPgBossCronQueue(config.databaseUrl, undefined, config.cronFireConcurrency) }
       : {}),
@@ -1213,7 +1331,7 @@ export function buildApp(
       : {}),
   });
   cronChanged.notify = (id) => scheduler.notifyChanged(id);
-  orchestratorDeps.control = createControlService(app, scheduler);
+  orchestratorDeps.control = createControlService(app, scheduler, admin);
   const monitorPoller: MonitorPoller | null =
     processes && supportsProcessSessions(sandbox)
       ? createMonitorPoller({
@@ -1226,6 +1344,7 @@ export function buildApp(
           run: (req) => app.turn(req),
           directory,
           currentScopeMembers,
+          sessions,
           leaderLease,
           heartbeatMs: config.monitorHeartbeatMs,
         })
@@ -1235,6 +1354,15 @@ export function buildApp(
     fetcher: skillFetcher,
     reconcile: (id) => app.syncSkillPack(id),
     leaderLease,
+  });
+  const webhookReceiver = createWebhookReceiver({
+    webhooks,
+    deliveries,
+    idempotency,
+    identity,
+    run: (req) => app.turn(req),
+    directory,
+    currentScopeMembers,
   });
   const reachDeniedNotifier: Sweeper | undefined = config.reachDeniedNotifyChannel
     ? createReachDeniedNotifier({
@@ -1382,12 +1510,17 @@ export function buildApp(
     secretDrops,
     modelGateway,
     modelCredentials,
+    customProviders,
+    refreshCustomProviders,
+    mcpServers,
+    mcpToolService,
     acl,
     skills,
     skillBundles,
     skillFetcher,
     auditLog,
     scheduler,
+    webhookReceiver,
     admin,
     rateLimiter,
     errors,
@@ -1421,7 +1554,98 @@ export function buildApp(
     ...(ambientJudgments ? { ambientJudgments } : {}),
     ...(ackEmojiPicks ? { ackEmojiPicks } : {}),
     channelPolicy,
+    uiState: artifactMap<PersistedUiState>("web_ui_state"),
     skillSyncEngine,
     slackCore,
+  };
+}
+
+export function serverDeps(
+  config: Config,
+  built: BuiltApp,
+  slackEnvironmentState: "absent" | "configured" | "partial" = "absent",
+  slackEnvBotToken?: string,
+): Omit<ServerDeps, "control"> {
+  const configuredModel = configuredModelForHarness(config, config.harness);
+  const carriedModelAuth = harnessCarriedModelAuth(config);
+  return {
+    production: config.production,
+    allowUnauthenticatedCore: config.allowUnauthenticatedCore,
+    ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+    ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
+    ...(config.portalIdentitySecret ? { portalIdentitySecret: config.portalIdentitySecret } : {}),
+    ...(config.requireSignedPortalIdentity ? { requireSignedPortalIdentity: true } : {}),
+    ...(built.replayDedupe ? { replayDedupe: built.replayDedupe } : {}),
+    config: built.config,
+    baseModelDefault: defaultModelForHarness(config.harness, configuredModel, baseModelProviders(config)),
+    ...(carriedModelAuth ? { harnessCarriedModelAuth: carriedModelAuth } : {}),
+    modelProviders: modelProviderAvailabilityFor(config.harness, providerKeysPresent(config)),
+    providerKeys: providerKeysPresent(config),
+    modelCredentials: built.modelCredentials,
+    customProviders: built.customProviders,
+    refreshCustomProviders: built.refreshCustomProviders,
+    mcpServers: built.mcpServers,
+    mcpToolService: built.mcpToolService,
+    ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
+    harnessId: config.harness,
+    connectorTokens: built.connectorTokens,
+    slackInstallation: built.slackInstallation,
+    slackEnvironmentState,
+    ...(slackEnvBotToken ? { slackEnvBotToken } : {}),
+    resolveClient: built.resolveClient,
+    consentLinks: built.consentLinks,
+    secretDrops: built.secretDrops,
+    ...(built.fireDropResolution ? { fireDropResolution: built.fireDropResolution } : {}),
+    ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
+    ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
+    ...(config.publicWebUrl ? { portalUrl: config.publicWebUrl } : {}),
+    admin: built.admin,
+    rateLimiter: built.rateLimiter,
+    acl: built.acl,
+    credentialUsage: built.credentialUsage,
+    deviceFlowCutover: built.deviceFlowCutover,
+    egressAudit: built.egressAudit,
+    sessions: built.sessions,
+    auditLog: built.auditLog,
+    errors: built.errors,
+    metrics: built.metrics,
+    crons: built.crons,
+    brokeredServices: () => built.brokeredTools.map((tool) => tool.service),
+    deploymentLayer: built.deploymentLayerStore,
+    deployDialTimeoutMs: config.deployDialTimeoutMs,
+    ...(config.awsDeploy.appsDomain ? { deployAppsDomain: config.awsDeploy.appsDomain } : {}),
+    ...(config.awsDeploy.gateSecret ? { deployGateSecret: config.awsDeploy.gateSecret } : {}),
+    ...(config.deployAppsSessionSecret ? { deployAppsSessionSecret: config.deployAppsSessionSecret } : {}),
+    ...(config.deployAppsLoginUrl ? { deployAppsLoginUrl: config.deployAppsLoginUrl } : {}),
+    scheduler: built.scheduler,
+    webhookReceiver: built.webhookReceiver,
+    identity: built.identity,
+    ...(built.keychain ? { keychain: built.keychain } : {}),
+    serviceCreds: built.serviceCreds,
+    deliveries: built.deliveries,
+    ...(built.fireAskResolution ? { fireAskResolution: built.fireAskResolution } : {}),
+    runs: built.runs,
+    workspace: built.workspace,
+    files: built.files,
+    memory: built.memory,
+    blobTransfer: built.blobTransfer,
+    sandboxBackend: built.sandbox.profile.backend,
+    egressDeclaredEnforcement: built.sandbox.profile.egressEnforcement ?? "none",
+    egressEnforcement: effectiveEgressEnforcement(built.sandbox.profile, {
+      signingSecret: config.signingSecret,
+      apiBaseUrl: config.apiBaseUrl,
+    }),
+    egressControlPlaneConfigured: Boolean(config.signingSecret && config.apiBaseUrl),
+    sandbox: built.sandbox,
+    advisoryLock: built.advisoryLock,
+    ...(built.processes ? { processes: built.processes } : {}),
+    ...(built.browserSessionStore ? { browserSessionStore: built.browserSessionStore } : {}),
+    directory: built.directory,
+    ...(built.ambientJudgments ? { ambientJudgments: built.ambientJudgments } : {}),
+    ...(built.ackEmojiPicks ? { ackEmojiPicks: built.ackEmojiPicks } : {}),
+    channelPolicy: built.channelPolicy,
+    uiState: built.uiState,
+    environments: built.environments,
+    sandboxMigration: built.sandboxMigration,
   };
 }

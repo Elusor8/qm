@@ -68,6 +68,7 @@ export interface BootPhaseEvent {
 
 export interface BootResult {
   ok: boolean;
+  slackEnabled?: boolean;
   reason?: string;
   slot: string;
   handle?: string;
@@ -94,6 +95,7 @@ export interface StatusReport {
   sandbox: { backend: string; detail: string };
   durability: { sessionStore: string; runStore: string; databaseUrl: boolean };
   harness: string;
+  slackEnabled: boolean;
   watch: boolean;
   turnsLive: boolean;
   publicApiUrl: string | null;
@@ -106,9 +108,10 @@ export interface BootSpec {
   branch: string;
   callerEnv: Record<string, string>;
   watch: boolean;
-  sandbox: "local" | "sprites" | "auto";
+  sandbox: "local" | "sprites" | "smolmachines" | "auto";
   canaryChannel?: string;
   strict: boolean;
+  slack?: boolean;
 }
 
 export interface LeaseInfo {

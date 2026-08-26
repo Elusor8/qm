@@ -44,6 +44,7 @@ function start(harnessId = "pi"): { base: string; built: BuiltApp; close: () => 
     config: built.config,
     admin: built.admin,
     auditLog: built.auditLog,
+    sessions: built.sessions,
     acl: built.acl,
     serviceCreds: built.serviceCreds,
     deviceFlowCutover: built.deviceFlowCutover,
@@ -55,6 +56,59 @@ function start(harnessId = "pi"): { base: string; built: BuiltApp; close: () => 
   const base = `http://localhost:${(server.address() as AddressInfo).port}`;
   return { base, built, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
+
+test("security flags are visible and legacy session taint can be released by an org admin", async () => {
+  const srv = start();
+  try {
+    srv.built.auditLog.record({
+      at: 123,
+      principalId: "U1",
+      action: "security_posture.flagged",
+      resource: "slack",
+      scopeLabel: "channel:C1",
+      status: "pending_approval",
+      detail: JSON.stringify({ cause: "strict-verdict", source: ["overheard"] }),
+    });
+    const flags = await fetch(`${srv.base}/v1/admin/security/flags?limit=1`, { headers: ADMIN });
+    assert.equal(flags.status, 200);
+    assert.deepEqual((await flags.json()) as unknown, {
+      flags: [
+        {
+          at: 123,
+          principal: "U1",
+          scope: "channel:C1",
+          surface: "slack",
+          detail: '{"cause":"strict-verdict","source":["overheard"]}',
+        },
+      ],
+    });
+
+    const session = await srv.built.sessions.getOrCreateByThread("legacy-taint", "dm", "personal:U1");
+    const lease = (await srv.built.sessions.acquireLease(session.id)).lease!;
+    await srv.built.sessions.append(lease, {
+      type: "user",
+      payload: { text: "legacy", securityTainted: true },
+      scopeLabel: "personal:U1",
+    });
+    await srv.built.sessions.releaseLease(lease);
+    const denied = await fetch(`${srv.base}/v1/admin/security/release`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-admin-actor": "nobody@default-org" },
+      body: JSON.stringify({ sessionId: session.id }),
+    });
+    assert.equal(denied.status, 403);
+    const released = await fetch(`${srv.base}/v1/admin/security/release`, {
+      method: "POST",
+      headers: ADMIN,
+      body: JSON.stringify({ sessionId: session.id }),
+    });
+    assert.equal(released.status, 200);
+    const payload = (await srv.built.sessions.getEntries(session.id))[0]!.payload as Record<string, unknown>;
+    assert.equal(payload.securityTainted, undefined);
+  } finally {
+    await srv.close();
+  }
+});
 
 test("GET /v1/admin/resources returns a manifest entry for every registered resource", async () => {
   const srv = start();
@@ -174,19 +228,24 @@ test("branding governance validates, round-trips through surface-config, clears,
       400,
     );
     assert.equal(
+      (await fetch(url, { method: "PUT", headers: ADMIN, body: JSON.stringify({ accent: "#aabbccddee" }) })).status,
+      400,
+    );
+    assert.equal(
       (
         await fetch(url, {
           method: "PUT",
           headers: ADMIN,
-          body: JSON.stringify({ accent: "#6366f1", mark: "Q", selfLabel: "qm" }),
+          body: JSON.stringify({ accent: "#6366f1", mark: "Q", selfLabel: "{{qm}}", orgName: "Acme Corp" }),
         })
       ).status,
       200,
     );
     const readBack = (await (
       await fetch(`${srv.base}/v1/admin/scopes/org:default-org`, { headers: ADMIN })
-    ).json()) as { branding?: { accent?: string } };
+    ).json()) as { branding?: { accent?: string; orgName?: string } };
     assert.equal(readBack.branding?.accent, "#6366f1");
+    assert.equal(readBack.branding?.orgName, "Acme Corp");
     assert.deepEqual(await surfaceBranding(), { accent: "#6366f1", mark: "Q", selfLabel: "qm" });
     assert.equal(
       (await fetch(url, { method: "PUT", headers: ADMIN, body: JSON.stringify({ mark: "<b>xy" }) })).status,
@@ -259,10 +318,25 @@ test("runtime-config lets a person set, keep, and inherit an approved personal r
     const set = await fetch(`${srv.base}/v1/runtime-config`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ principalId: "alice", scopeId: "personal:alice", harnessId: "codex", modelId: "gpt-5.5" }),
+      body: JSON.stringify({
+        principalId: "alice",
+        scopeId: "personal:alice",
+        harnessId: "codex",
+        modelId: "gpt-5.5",
+        effortLevel: "low",
+        fastMode: true,
+      }),
     });
     assert.equal(set.status, 200);
-    assert.equal(((await set.json()) as { effective: { harnessId: string } }).effective.harnessId, "codex");
+    const selected = (await set.json()) as {
+      effective: { harnessId: string; effortLevel: string; fastMode: boolean };
+    };
+    assert.deepEqual(selected.effective, {
+      harnessId: "codex",
+      modelId: "gpt-5.5",
+      effortLevel: "low",
+      fastMode: false,
+    });
 
     srv.built.config.setRuntimeSelection("org:default-org", { harnessId: "claude", modelId: "claude-opus-4-8" });
     await srv.built.config.flushScope("org:default-org");

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { buildApp, type BuiltApp } from "../src/wiring.ts";
@@ -502,6 +503,36 @@ test("file bundles: one item per service, materialize to a /tmp script with env 
     (e: KeychainError) => e.status === 400,
     "paths must be home-relative",
   );
+  const unusual = await k.save({
+    ownerId: "U1",
+    service: "unusual",
+    files: [{ path: "$(echo injected)", contentBase64: b64("x") }],
+  });
+  assert.deepEqual(unusual.targets, ["$(echo injected)"]);
+  const unusualScript = renderUseScript({
+    kind: "file",
+    credentialId: "legacy-unusual",
+    ownerId: "U1",
+    service: "unusual",
+    files: [{ path: "$(echo injected)", contentBase64: b64("x") }],
+  });
+  const renderedPath = execFileSync("sh", ["-c", `${unusualScript}\nfind "$HOME" -maxdepth 1 -type f -print`], {
+    encoding: "utf8",
+  });
+  assert.match(renderedPath, /\/\$\(echo injected\)$/m);
+  const pointerScript = renderUseScript({
+    kind: "file",
+    credentialId: "legacy-pointer",
+    ownerId: "U1",
+    service: "unusual-pointer",
+    files: [{ path: "$(echo injected)/.aws/config", contentBase64: b64("x") }],
+  });
+  const pointerPath = execFileSync(
+    "sh",
+    ["-c", `${pointerScript}\nprintf '%s\\n' "$AWS_CONFIG_FILE"\nfind "$__kc_dir" -type f -print`],
+    { encoding: "utf8" },
+  );
+  assert.match(pointerPath, /\/\$\(echo injected\)\/\.aws\/config$/m);
 
   const grant = await k.createGrant({
     credentialId: cred.id,
@@ -952,12 +983,39 @@ describe("/v1/keychain routes (capability-authed)", () => {
 
   before(async () => {
     built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "kc-routes-")), signingSecret: SECRET }));
+    await built.directory.replaceChannels(
+      [
+        { channelId: "C_SECONDS", name: "seconds", isPrivate: false },
+        { channelId: "C_BAD_EXP", name: "bad-exp", isPrivate: false },
+        { channelId: "C7", name: "grants", isPrivate: false },
+        { channelId: "C_OVERVIEW", name: "overview", isPrivate: false },
+        { channelId: "C_NAMED", name: "pilot-portal", isPrivate: false },
+        { channelId: "C_MYSTERY", name: "", isPrivate: false },
+        { channelId: "C8", name: "file-grants", isPrivate: false },
+      ],
+      [
+        { channelId: "C_SECONDS", principalId: "U_SECONDS" },
+        { channelId: "C_BAD_EXP", principalId: "U_BAD_EXP" },
+        { channelId: "C7", principalId: "OWNER" },
+        { channelId: "C7", principalId: "U3" },
+        { channelId: "C_OVERVIEW", principalId: "OVERVIEW_OWNER" },
+        { channelId: "C_NAMED", principalId: "SCOPENAME_OWNER" },
+        { channelId: "C_MYSTERY", principalId: "SCOPENAME_OWNER" },
+        { channelId: "C8", principalId: "OWNER" },
+        { channelId: "C8", principalId: "U3" },
+      ],
+    );
+    await built.directory.replaceGroups([
+      { groupId: "G_CONN", principalId: "alex@conn" },
+      { groupId: "G_CONN", principalId: "carol@conn" },
+    ]);
     server = createServer(built.app, {
       signingSecret: SECRET,
       keychain: built.keychain,
       workspace: built.workspace,
       auditLog: built.auditLog,
       credentialUsage: built.credentialUsage,
+      sessions: built.sessions,
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     base = `http://localhost:${(server.address() as AddressInfo).port}`;
@@ -1156,6 +1214,31 @@ describe("/v1/keychain routes (capability-authed)", () => {
     assert.equal(body.grants[0].purpose, "deploy the reporting app");
     assert.equal(body.usage[0].credentialId, credential.id);
     assert.ok(!JSON.stringify(body).includes("never-return-this"));
+  });
+
+  it("overview resolves grant scope ids to human-readable names when known", async () => {
+    const owner = "SCOPENAME_OWNER";
+    const { credential } = (await (
+      await post(
+        "/v1/keychain/credentials",
+        { service: "scopenames", secret: "shh", envKey: "SCOPENAME_TOKEN" },
+        await capFor(owner),
+      )
+    ).json()) as any;
+    await built.sessions.getOrCreateByThread("slack:C_NAMED:1", "channel", "channel:C_NAMED", "pilot-portal");
+    await post(
+      "/v1/keychain/grants",
+      { credential: credential.id, mode: "standing", purpose: "named channel work" },
+      await capFor(owner, "channel:C_NAMED"),
+    );
+    await post(
+      "/v1/keychain/grants",
+      { credential: credential.id, mode: "standing", purpose: "unnamed channel work" },
+      await capFor(owner, "channel:C_MYSTERY"),
+    );
+    const body = (await (await get("/v1/keychain/overview", await capFor(owner))).json()) as any;
+    assert.equal(body.scopeNames["channel:C_NAMED"], "#pilot-portal");
+    assert.equal(body.scopeNames["channel:C_MYSTERY"], undefined);
   });
 
   it("overview includes safe connector metadata so its grants remain visible and revocable", async () => {

@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { sanitizeTitle, TITLE_GENERATION_PROMPT } from "./pi-harness.ts";
+import { sanitizeTitle, TITLE_GENERATION_PROMPT, titleUserPrompt } from "./pi-harness.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -8,6 +8,8 @@ import { pathToFileURL } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { CONFIG_DEFAULTS, type Config } from "../config.ts";
+import { isCustomModelId } from "../model/custom-providers.ts";
+import type { CustomProviderSpec } from "../model/custom-providers.ts";
 import { DEFAULT_AGENT_MODEL_ID, resolveModel } from "../model/pi-models.ts";
 import { startSignalPoll, type RunSignalStore } from "../runs/run-signal-store.ts";
 import type { LlmCallUsage } from "../sessions/session-store.ts";
@@ -16,8 +18,15 @@ import type { TaskStore } from "../tasks/task-store.ts";
 import { errMessage, swallow } from "../util/errors.ts";
 import { sleep } from "../util/async.ts";
 import { NonRetryableTurnError } from "../core/turn-error.ts";
-import { defineHarness, type Harness, type HarnessTurnInput, type HarnessTurnResult } from "./harness.ts";
+import {
+  defineHarness,
+  envelopeWithoutMessages,
+  type Harness,
+  type HarnessTurnInput,
+  type HarnessTurnResult,
+} from "./harness.ts";
 import { coreToolOptions, createPiTools, type PiToolsOptions, type ToolContextRef } from "./pi-tools.ts";
+import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { reconstructMessagesFromHistory } from "./replay.ts";
 import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
 import { countTokens } from "../util/tokens.ts";
@@ -34,6 +43,7 @@ export interface OpenCodeHarnessOptions {
   scratchExec?: boolean;
   ownerAuthExec?: boolean;
   reachExec?: boolean;
+  mcpTools?: () => McpToolDescriptor[];
   controlTools?: boolean;
   turnWallClockMs?: number;
   execTimeoutMs?: number;
@@ -44,6 +54,12 @@ export interface OpenCodeHarnessOptions {
   binaryPath?: string;
   startupTimeoutMs?: number;
   tasks?: TaskStore;
+  /**
+   * Admin-registered custom providers, resolved (with keys) when the
+   * opencode server starts. Registrations made while a server is already
+   * running apply to the next server start.
+   */
+  resolveCustomProviders?: () => Promise<Array<{ spec: CustomProviderSpec; apiKey?: string }>>;
 }
 
 export function openCodeHarnessConfigOptions(config: Config): OpenCodeHarnessOptions {
@@ -95,13 +111,19 @@ function toolOptions(opts: OpenCodeHarnessOptions, turn?: HarnessTurnInput): PiT
     scratchExec: opts.scratchExec,
     ownerAuthExec: opts.ownerAuthExec,
     reachExec: opts.reachExec,
+    ...(opts.mcpTools ? { mcpTools: opts.mcpTools } : {}),
     controlTools: opts.controlTools,
     execTimeoutMs: opts.execTimeoutMs,
     execTimeoutCeilingMs: opts.execTimeoutCeilingMs,
     backgroundJobTtlMs: opts.backgroundJobTtlMs,
     backgroundJobTtlMaxMs: opts.backgroundJobTtlMaxMs,
     ...(turn
-      ? { readOnly: turn.readOnly, surfaceTools: turn.surfaceTools, surfaceName: turn.surfaceName }
+      ? {
+          readOnly: turn.readOnly,
+          surfaceTools: turn.surfaceTools,
+          surfaceName: turn.surfaceName,
+          credentialExecServices: turn.credentialExecServices,
+        }
       : { surfaceTools: true, surfaceName: "slack" }),
   };
 }
@@ -156,7 +178,14 @@ function sessionToken(secret: string, sessionId: string): string {
   return createHmac("sha256", secret).update(sessionId).digest("base64url");
 }
 
-function modelRef(id: string): { providerID: string; modelID: string } {
+export function modelRef(id: string): { providerID: string; modelID: string } {
+  // A registered custom model wins before slash-splitting: gateway model ids
+  // routinely contain slashes (e.g. "bedrock/claude-x" behind LiteLLM), and
+  // those must route to the registered provider, not a phantom "bedrock".
+  if (isCustomModelId(id)) {
+    const resolved = resolveModel(id);
+    if (resolved?.provider) return { providerID: String(resolved.provider), modelID: id };
+  }
   const slash = id.indexOf("/");
   if (slash > 0) return { providerID: id.slice(0, slash), modelID: id.slice(slash + 1) };
   const resolved = resolveModel(id);
@@ -628,6 +657,33 @@ export function createOpenCodeHarness(opts: OpenCodeHarnessOptions = {}): Harnes
         const bridgeUrl = `http://127.0.0.1:${address.port}`;
         const pluginUrl = pathToFileURL(join(import.meta.dirname, "opencode-plugin.ts")).href;
         const enabledTools = Object.fromEntries(definitions.map((item) => [item.name, true]));
+        const custom = (await opts.resolveCustomProviders?.()) ?? [];
+        const customProviderConfig = Object.fromEntries(
+          custom.map(({ spec, apiKey }) => [
+            spec.id,
+            {
+              npm: spec.protocol === "anthropic" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible",
+              name: spec.name,
+              options: { baseURL: spec.baseUrl, ...(apiKey ? { apiKey } : {}) },
+              models: Object.fromEntries(
+                spec.models.map((m) => [
+                  m.id,
+                  {
+                    name: m.name ?? m.id,
+                    ...(m.contextWindow || m.maxTokens
+                      ? {
+                          limit: {
+                            context: m.contextWindow ?? 128_000,
+                            output: m.maxTokens ?? 8_192,
+                          },
+                        }
+                      : {}),
+                  },
+                ]),
+              ),
+            },
+          ]),
+        );
         const config = {
           plugin: [pluginUrl],
           autoupdate: false,
@@ -636,10 +692,11 @@ export function createOpenCodeHarness(opts: OpenCodeHarnessOptions = {}): Harnes
           lsp: false,
           formatter: false,
           instructions: [],
-          enabled_providers: ["anthropic", "openai"],
+          enabled_providers: ["anthropic", "openai", ...custom.map(({ spec }) => spec.id)],
           provider: {
             anthropic: { options: { apiKey: opts.apiKey ?? "" } },
             openai: { options: { apiKey: opts.openaiApiKey ?? "" } },
+            ...customProviderConfig,
           },
           tools: {
             ...enabledTools,
@@ -914,7 +971,7 @@ export function createOpenCodeHarness(opts: OpenCodeHarnessOptions = {}): Harnes
             turnSeq: state.userSeq,
             step: capture.step,
             model: capture.model,
-            request: capture.request,
+            promptEnvelope: envelopeWithoutMessages(capture.request),
             truncated: false,
             transport: info?.providerID && info.modelID ? { modelId: `${info.providerID}/${info.modelID}` } : null,
             ttftMs: null,
@@ -1108,7 +1165,8 @@ export function createOpenCodeHarness(opts: OpenCodeHarnessOptions = {}): Harnes
             signal,
           ),
         ),
-      generateTitle: async (transcript) => sanitizeTitle(await single(TITLE_GENERATION_PROMPT, transcript)),
+      generateTitle: async (transcript) =>
+        sanitizeTitle(await single(TITLE_GENERATION_PROMPT, titleUserPrompt(transcript))),
       summarizeApproval: async (command, reason, purpose) =>
         single(
           "Explain this command in one plain-English sentence for an approver.",

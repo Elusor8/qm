@@ -1,9 +1,9 @@
-import { swallow, swallowAs } from "../util/errors.ts";
+import { errMessage, swallow, swallowAs } from "../util/errors.ts";
 import bolt from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import { createDeduper, createThreadTracker } from "./lib.ts";
 import { installDevIntrospection } from "./dev-introspection.ts";
-import { setDefaultBotIdentity, createSurfaceHeaderEnsurer } from "./delivery.ts";
+import { setDefaultBotIdentity, createSurfaceHeaderEnsurer, type SurfaceHeaderClient } from "./delivery.ts";
 import { NO_RETRY, type SlackPluginConfig, normalizeSlackApiUrl, slackPluginConfigFromEnv } from "./config.ts";
 import { createCoreBridge } from "./core-bridge.ts";
 import { createAckEmojiPicker } from "./ack-emoji.ts";
@@ -70,6 +70,24 @@ export async function startSlackPlugin(
     identityMode: cfg.identityEmail === "0" ? "slack-id" : "email",
   };
 
+  const ACK_OVERRIDE_CACHE_MS = 60_000;
+  let ackOverrideCache: { names: string[] | null; fetchedAt: number } | undefined;
+  function ackEmojiOverride(): readonly string[] | null {
+    if (!ackOverrideCache || Date.now() - ackOverrideCache.fetchedAt >= ACK_OVERRIDE_CACHE_MS) {
+      const prev = ackOverrideCache;
+      ackOverrideCache = { names: prev?.names ?? null, fetchedAt: Date.now() };
+      core
+        .ackEmojiOverride()
+        .then((names) => {
+          ackOverrideCache = { names: names?.length ? names : null, fetchedAt: Date.now() };
+        })
+        .catch((err) => {
+          swallow("slack: ack-emoji override read", err);
+        });
+    }
+    return ackOverrideCache.names;
+  }
+
   const EXTERNAL_PARTICIPANTS_CACHE_MS = 30_000;
   let externalParticipantsCache: { on: boolean; fetchedAt: number } | undefined;
   async function externalParticipantsEnabled(): Promise<boolean> {
@@ -112,7 +130,7 @@ export async function startSlackPlugin(
   const threads = createThreadTracker();
 
   const bridge = createCoreBridge(core);
-  const ackEmoji = createAckEmojiPicker(core);
+  const ackEmoji = createAckEmojiPicker(core, { candidatesOverride: ackEmojiOverride });
   const directory = createDirectory({
     core,
     ids,
@@ -128,11 +146,46 @@ export async function startSlackPlugin(
     externalParticipantsEnabled,
     ...(cfg.recentMessages ? { recentMessages: cfg.recentMessages } : {}),
   });
-  const approvals = createApprovals({ core, bridge, directory, threads });
+  const approvals = createApprovals({ core, bridge, directory, threads, ids });
   const ensureHeader = createSurfaceHeaderEnsurer({
-    effectiveModelName: (scope) => core.effectiveModelName(scope as Parameters<typeof core.effectiveModelName>[0]),
+    headerFacts: (scope) => core.surfaceHeaderFacts(scope as Parameters<typeof core.surfaceHeaderFacts>[0]),
+    channelPinEnabled: (scope) =>
+      core.channelHeaderPinEnabled(scope as Parameters<typeof core.channelHeaderPinEnabled>[0]),
     webUiPublicUrl: cfg.webUiPublicUrl,
     ids,
+  });
+  core.onScopeModelChanged((scope) => {
+    const channel = scope.startsWith("channel:") ? scope.slice("channel:".length) : "";
+    if (channel) ensureHeader(app.client as unknown as SurfaceHeaderClient, channel, scope, "channel");
+  });
+  core.onChannelHeaderPinChanged((scope) => {
+    const channel = scope.startsWith("channel:") ? scope.slice("channel:".length) : "";
+    if (channel) {
+      ensureHeader(app.client as unknown as SurfaceHeaderClient, channel, scope, "channel", { pinNew: true });
+      return;
+    }
+    if (!scope.startsWith("org:")) return;
+    // The org-wide default changed: re-ensure every channel the bot is in. The
+    // ensurer re-reads each scope's effective setting, so explicit per-channel
+    // overrides come out unchanged.
+    void (async () => {
+      try {
+        for await (const res of (app.client as any).paginate("conversations.list", {
+          types: "public_channel,private_channel",
+          exclude_archived: true,
+          limit: 1000,
+        }) as AsyncIterable<{ channels?: Array<{ id?: string; is_member?: boolean }> }>) {
+          for (const c of res.channels ?? []) {
+            if (!c?.id || !c.is_member) continue;
+            ensureHeader(app.client as unknown as SurfaceHeaderClient, c.id, `channel:${c.id}`, "channel", {
+              pinNew: true,
+            });
+          }
+        }
+      } catch (err) {
+        console.error("[slack] channel header default sweep failed:", errMessage(err));
+      }
+    })();
   });
   const handler = createTurnHandler({
     bridge,
@@ -141,6 +194,7 @@ export async function startSlackPlugin(
     serializer,
     approvals,
     ackEmoji,
+    ackEmojiCandidates: ackEmojiOverride,
     ids,
     threads,
     deduper,
@@ -191,6 +245,7 @@ export async function startSlackPlugin(
         );
       }
     }
+    await directory.getUserSnapshot(app.client);
     await app.start();
   } catch (err) {
     stopped = true;
@@ -202,8 +257,8 @@ export async function startSlackPlugin(
   console.log(
     `[slack-plugin] connected as @${auth.user} (bot ${ids.botUserId}) in team ${auth.team} (${ids.ownTeamId}); in-process core`,
   );
-  void directory.getUserSnapshot(app.client).catch(swallowAs("slack: initial user snapshot", undefined));
   ackEmoji.refreshAckEmoji(app.client);
+  ackEmojiOverride();
 
   let deliveriesPollInFlight = false;
   let deliveriesPollAgain = false;

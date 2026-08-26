@@ -94,10 +94,10 @@ test("pool token parsing accepts quoted dotenv values", () => {
     handle: "bot1",
     canaryChannel: "C0TEST",
     extra: {
-      SLACK_BOT_TOKEN: '"xoxb-quoted"',
-      SLACK_APP_TOKEN: "'xapp-quoted'",
-      HANDLE: '"bot1"',
-      CANARY_CHANNEL: "'C0TEST'",
+      SLACK_BOT_TOKEN: "xoxb-quoted",
+      SLACK_APP_TOKEN: "xapp-quoted",
+      HANDLE: "bot1",
+      CANARY_CHANNEL: "C0TEST",
     },
   });
   assert.equal(slotValid("pool1", store), true);
@@ -440,6 +440,30 @@ test("supervised children share the selected dev org", () => {
   for (const spec of specs) assert.equal(spec.env.CORE_ORG_ID, "beta");
   inputs.baseEnv = {};
   assert.equal(buildChildSpecs(inputs).find((spec) => spec.name === "core")!.env.ORG_ID, "acme");
+});
+
+test("child specs omit Slack env when no Slack tokens are supplied", () => {
+  const inputs: SpecInputs = {
+    worktree: "/tmp/worktree",
+    ports: slotPorts("pool1"),
+    baseEnv: {},
+    watch: false,
+    webUiBasePath: "/",
+    sessionStore: "memory",
+    runStore: "memory",
+    databaseUrl: "",
+    adminGrantsSeed: "",
+    coreSigningSecret: "",
+    portalSessionSecret: "secret",
+    portalDevPrincipal: "U1",
+    sandboxEnv: {},
+  };
+  const core = buildChildSpecs(inputs).find((spec) => spec.name === "core")!;
+  assert.equal(core.env.SLACK_BOT_TOKEN, undefined);
+  assert.equal(core.env.SLACK_APP_TOKEN, undefined);
+  assert.equal(core.env.DEV_INTROSPECTION, undefined);
+  assert.equal(core.env.DEV_HEALTH_PORT, undefined);
+  assert.equal(core.env.CORE_ORG_ID, "acme");
 });
 
 test("formatAge renders the bash-compatible shapes", () => {

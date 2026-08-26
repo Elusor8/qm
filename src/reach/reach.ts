@@ -287,6 +287,13 @@ export function withDelete(destination: Destination, del: { messageTs: string } 
   return del ? { ...destination, delete: del } : destination;
 }
 
+export function withThread(destination: Destination, threadTs: string | undefined): Destination {
+  if (!threadTs) return destination;
+  return destination.type === "principal"
+    ? { ...destination, threadTs }
+    : { ...destination, target: `${destination.target}:${threadTs}` };
+}
+
 export function withEdit(destination: Destination, editRef: string | undefined): Destination {
   return editRef ? { ...destination, editRef } : destination;
 }

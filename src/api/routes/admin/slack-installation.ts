@@ -4,6 +4,7 @@ import type { ApiCtx } from "../route.ts";
 import { errMessage } from "../../../util/errors.ts";
 import { validateSlackInstallation } from "../../../surfaces/slack-installation.ts";
 import { slackBotManifestCreationUrl } from "../../../surfaces/slack-manifest.ts";
+import { resolveBranding } from "../../../resolution/branding.ts";
 
 export async function getSlackInstallation(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(ctx.deps);
@@ -16,7 +17,8 @@ export async function getSlackInstallation(ctx: ApiCtx): Promise<void> {
     resource: "slack-installation",
     scopeLabel: scope,
   });
-  const createUrl = slackBotManifestCreationUrl();
+  const branding = await resolveBranding(ctx.deps.config, scope, ctx.deps.brandingDefault);
+  const createUrl = slackBotManifestCreationUrl(branding.selfLabel);
   const stored = await ctx.deps.slackInstallation.status();
   if (stored.managed) return sendJson(ctx.res, 200, { ...stored, source: "admin", createUrl });
   if (ctx.deps.slackEnvironmentState === "configured") {
@@ -71,4 +73,30 @@ export async function deleteSlackInstallation(ctx: ApiCtx): Promise<void> {
     scopeLabel: scope,
   });
   return sendJson(ctx.res, 200, { configured: false, managed: true, source: "admin" });
+}
+
+export async function getSlackEmojiList(ctx: ApiCtx): Promise<void> {
+  const scope = orgScope(ctx.deps);
+  const actor = await authorizeAdmin(ctx, scope);
+  if (!actor) return;
+  const managed = await ctx.deps.slackInstallation?.get();
+  const botToken = managed?.botToken ?? ctx.deps.slackEnvBotToken ?? "";
+  if (!botToken) return sendJson(ctx.res, 404, { error: "not_configured" });
+  const doFetch = ctx.deps.slackInstallationFetch ?? fetch;
+  try {
+    const res = await doFetch("https://slack.com/api/emoji.list", {
+      method: "POST",
+      headers: { authorization: `Bearer ${botToken}`, "content-type": "application/x-www-form-urlencoded" },
+    });
+    const data = (await res.json()) as { ok?: boolean; error?: string; emoji?: Record<string, string> };
+    if (!data.ok) return sendJson(ctx.res, 502, { error: "slack_error", message: data.error ?? "unknown" });
+    const emoji: Record<string, string> = {};
+    for (const [name, url] of Object.entries(data.emoji ?? {})) {
+      if (typeof url === "string" && url.startsWith("alias:")) continue;
+      emoji[name] = url;
+    }
+    return sendJson(ctx.res, 200, { emoji });
+  } catch (error) {
+    return sendJson(ctx.res, 502, { error: "slack_unreachable", message: errMessage(error) });
+  }
 }

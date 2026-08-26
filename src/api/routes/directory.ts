@@ -4,6 +4,8 @@ import { sendJson } from "../http.ts";
 import { audit, isObj, orgScope } from "./shared.ts";
 import { type ApiCtx, type Route } from "./route.ts";
 
+const numOrUndef = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
 async function deactivatePrincipal(ctx: ApiCtx): Promise<void> {
   const { res, deps } = ctx;
   if (!deps.identity) return sendJson(res, 404, { error: "not_found" });
@@ -30,8 +32,15 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
     members?: unknown;
     channels?: unknown;
     channelMembers?: unknown;
+    channelRosterIds?: unknown;
+    channelRevocations?: unknown;
     groupMembers?: unknown;
+    groupIds?: unknown;
+    groupRosterIds?: unknown;
     workspaceUrl?: unknown;
+    membersSyncedAt?: unknown;
+    channelsSyncedAt?: unknown;
+    groupsSyncedAt?: unknown;
   };
   if (!Array.isArray(b.members) && !Array.isArray(b.channels) && !Array.isArray(b.groupMembers)) {
     return sendJson(res, 400, {
@@ -58,13 +67,13 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
         type: m.type,
         ...(typeof m.slackId === "string" && m.slackId ? { slackId: m.slackId } : {}),
       }));
-    await app.upsertDirectory(members);
+    await app.upsertDirectory(members, numOrUndef(b.membersSyncedAt));
     memberCount = members.length;
   }
   let channelCount: number | undefined;
   if (Array.isArray(b.channels)) {
     const channels = b.channels.filter(
-      (c): c is { channelId: string; name: string; isPrivate?: boolean } =>
+      (c): c is { channelId: string; name: string; isPrivate?: boolean; isExternal?: boolean } =>
         isObj(c) && typeof c.channelId === "string" && typeof c.name === "string",
     );
     const channelMembers = Array.isArray(b.channelMembers)
@@ -73,7 +82,22 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
             isObj(m) && typeof m.channelId === "string" && typeof m.principalId === "string",
         )
       : undefined;
-    await app.upsertChannels(channels, channelMembers);
+    const channelRosterIds = Array.isArray(b.channelRosterIds)
+      ? b.channelRosterIds.filter((channelId): channelId is string => typeof channelId === "string")
+      : undefined;
+    const channelRevocations = Array.isArray(b.channelRevocations)
+      ? b.channelRevocations.filter(
+          (m): m is { channelId: string; principalId: string } =>
+            isObj(m) && typeof m.channelId === "string" && typeof m.principalId === "string",
+        )
+      : undefined;
+    await app.upsertChannels(
+      channels,
+      channelMembers,
+      numOrUndef(b.channelsSyncedAt),
+      channelRosterIds,
+      channelRevocations,
+    );
     channelCount = channels.length;
   }
   let groupMemberCount: number | undefined;
@@ -82,7 +106,13 @@ async function pushDirectory(ctx: ApiCtx): Promise<void> {
       (m): m is { groupId: string; principalId: string } =>
         isObj(m) && typeof m.groupId === "string" && typeof m.principalId === "string",
     );
-    await app.upsertGroups(groupMembers);
+    const groupIds = Array.isArray(b.groupIds)
+      ? b.groupIds.filter((groupId): groupId is string => typeof groupId === "string")
+      : undefined;
+    const groupRosterIds = Array.isArray(b.groupRosterIds)
+      ? b.groupRosterIds.filter((groupId): groupId is string => typeof groupId === "string")
+      : undefined;
+    await app.upsertGroups(groupMembers, numOrUndef(b.groupsSyncedAt), groupIds, groupRosterIds);
     groupMemberCount = groupMembers.length;
   }
   return sendJson(res, 200, {

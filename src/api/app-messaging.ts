@@ -6,7 +6,14 @@ import type { Destination, SurfaceContextRequest, SurfaceContextResult } from ".
 import { errMessage } from "../util/errors.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
 import { randomUUID } from "node:crypto";
-import { reachEnqueue, withSlackUnfurlOption, withReact, withDelete, type ReachResolution } from "../reach/reach.ts";
+import {
+  reachEnqueue,
+  withSlackUnfurlOption,
+  withReact,
+  withDelete,
+  withThread,
+  type ReachResolution,
+} from "../reach/reach.ts";
 import { isVisible } from "../directory/visibility.ts";
 import { answerWebContextRequest } from "./web-context.ts";
 import { validateUserSchedule } from "../cron/schedule.ts";
@@ -24,6 +31,7 @@ export function createMessagingMethods(
   App,
   | "createCron"
   | "getCron"
+  | "getCronRuns"
   | "listCrons"
   | "listCronsForViewer"
   | "updateCron"
@@ -31,6 +39,11 @@ export function createMessagingMethods(
   | "setCronEnabled"
   | "setCronDestination"
   | "setCronRecipientConsent"
+  | "createWebhook"
+  | "getWebhook"
+  | "listWebhooks"
+  | "setWebhookEnabled"
+  | "setWebhookRecipientConsent"
   | "pendingDeliveries"
   | "enqueueDelivery"
   | "ingestSurfaceEvents"
@@ -101,6 +114,9 @@ export function createMessagingMethods(
     getCron(id) {
       return deps.crons.get(id);
     },
+    getCronRuns(id, limit) {
+      return deps.crons.getRuns(id, limit);
+    },
     listCrons() {
       return deps.crons.list();
     },
@@ -145,7 +161,10 @@ export function createMessagingMethods(
         const members = patch.members ?? before.members;
         if (!members?.length) throw new Error("scopeShared requires a member snapshot");
       }
-      const updated = await deps.crons.update(id, patch);
+      const grantsReaffirmed = patch.unattendedGrants !== undefined;
+      const guardedPatch =
+        (before.unattendedGrants?.length ?? 0) > 0 && !grantsReaffirmed ? { ...patch, unattendedGrants: [] } : patch;
+      const updated = await deps.crons.update(id, guardedPatch);
       deps.auditLog.record({
         at: Date.now(),
         principalId: before.owner,
@@ -185,6 +204,29 @@ export function createMessagingMethods(
     },
     setCronRecipientConsent(id, recipientConsent) {
       return deps.crons.setRecipientConsent(id, recipientConsent);
+    },
+    async createWebhook(input) {
+      const webhook = await deps.webhooks.create(input);
+      deps.auditLog.record({
+        at: Date.now(),
+        principalId: webhook.createdBy,
+        action: "webhook_create",
+        resource: webhook.id,
+        scopeLabel: webhook.ownerScopeId,
+      });
+      return webhook;
+    },
+    getWebhook(id) {
+      return deps.webhooks.get(id);
+    },
+    listWebhooks() {
+      return deps.webhooks.list();
+    },
+    setWebhookEnabled(id, enabled) {
+      return deps.webhooks.setEnabled(id, enabled);
+    },
+    setWebhookRecipientConsent(id, recipientConsent) {
+      return deps.webhooks.setRecipientConsent(id, recipientConsent);
     },
     pendingDeliveries(type, claimMs) {
       return claimMs && claimMs > 0 ? deps.deliveries.claimPending(type, claimMs) : deps.deliveries.pending(type);
@@ -302,9 +344,9 @@ export function createMessagingMethods(
       return found;
     },
 
-    async upsertDirectory(members) {
+    async upsertDirectory(members, syncedAt) {
       const previous = await deps.directory.list();
-      await deps.directory.replace(members);
+      if (!(await deps.directory.replace(members, syncedAt))) return;
       const present = members.filter((m) => m.type === "internal").map((m) => m.principalId);
       const presentSet = new Set(present);
       const removed = previous.map((m) => m.principalId).filter((id) => !presentSet.has(id));
@@ -329,11 +371,12 @@ export function createMessagingMethods(
         });
       }
     },
-    async upsertChannels(channels, channelMembers) {
-      await deps.directory.replaceChannels(channels, channelMembers);
+    async upsertChannels(channels, channelMembers, syncedAt, channelRosterIds, revocations) {
+      await deps.directory.replaceChannels(channels, channelMembers, syncedAt, channelRosterIds, revocations);
+      await h.syncLinkedProjectRosters();
     },
-    async upsertGroups(groupMembers) {
-      await deps.directory.replaceGroups(groupMembers);
+    async upsertGroups(groupMembers, syncedAt, groupIds, groupRosterIds) {
+      await deps.directory.replaceGroups(groupMembers, syncedAt, groupIds, groupRosterIds);
     },
     async setDirectoryWorkspaceUrl(url) {
       await deps.directory.setWorkspaceUrl(url);
@@ -426,6 +469,21 @@ export function createMessagingMethods(
         if (r.recipient) extra.recipient = r.recipient;
         if (r.channel) extra.channel = r.channel;
         if (r.group) extra.group = r.group;
+      }
+      if (input.threadTs) {
+        if (
+          baseDestination.type !== "slack" &&
+          baseDestination.type !== "group" &&
+          baseDestination.type !== "principal"
+        ) {
+          return {
+            ok: false,
+            status: 400,
+            error: "bad_request",
+            message: "threadTs requires a Slack channel, group DM, or person DM",
+          };
+        }
+        baseDestination = withThread(baseDestination, input.threadTs);
       }
       const sender = await deps.directory.get(input.senderId).catch(() => null);
       const delivery = await reachEnqueue({

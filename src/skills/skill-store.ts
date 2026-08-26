@@ -62,6 +62,11 @@ export interface Skill {
   pack?: { packId: string; commit: string; upstreamName: string };
 }
 
+export interface GrantedSkillRef {
+  id: string;
+  ownerScopeId: ScopeId;
+}
+
 export interface SkillResolution {
   skill: Skill | null;
   shadowed: Skill[];
@@ -85,13 +90,30 @@ export interface SkillStore {
   delete(id: string): Promise<void>;
   recordUse(id: string, at?: number): Promise<void>;
   resolve(name: string, orderedScopes: ScopeId[]): Promise<SkillResolution>;
-  visibleFor(orderedScopes: ScopeId[]): Promise<SkillResolution[]>;
+  visibleFor(orderedScopes: ScopeId[], granted?: readonly GrantedSkillRef[]): Promise<SkillResolution[]>;
   promote(id: string, targetScopeId: ScopeId): Promise<Skill>;
   move(id: string, toScopeId: ScopeId): Promise<Skill>;
 }
 
 function scopeKind(scopeId: ScopeId): string {
   return parseScopeId(scopeId).kind ?? scopeId;
+}
+
+function publishedByScopeAndName(all: Skill[]): Map<string, Skill> {
+  const index = new Map<string, Skill>();
+  for (const s of all) {
+    if (s.status !== "published") continue;
+    const key = `${s.scopeId}\u0000${s.manifest.name}`;
+    if (!index.has(key)) index.set(key, s);
+  }
+  return index;
+}
+
+function resolveFromIndex(index: Map<string, Skill>, name: string, orderedScopes: ScopeId[]): SkillResolution {
+  if (!isSafeSkillName(name)) return { skill: null, shadowed: [] };
+  const published = orderedScopes.map((sc) => index.get(`${sc}\u0000${name}`)).filter((s): s is Skill => Boolean(s));
+  const [skill, ...shadowed] = published;
+  return { skill: skill ?? null, shadowed };
 }
 
 export function createSkillStore(opts: SkillStoreOptions = {}): SkillStore {
@@ -202,26 +224,43 @@ export function createSkillStore(opts: SkillStoreOptions = {}): SkillStore {
     },
 
     async resolve(name, orderedScopes) {
-      if (!isSafeSkillName(name)) return { skill: null, shadowed: [] };
-      const all = await skills.all();
-      const published = orderedScopes
-        .map((sc) => all.find((s) => s.status === "published" && s.manifest.name === name && s.scopeId === sc))
-        .filter((s): s is Skill => Boolean(s));
-      const [skill, ...shadowed] = published;
-      return { skill: skill ?? null, shadowed };
+      return resolveFromIndex(publishedByScopeAndName(await skills.all()), name, orderedScopes);
     },
 
-    async visibleFor(orderedScopes) {
+    async visibleFor(orderedScopes, granted) {
+      const all = await skills.all();
+      const index = publishedByScopeAndName(all);
       const inScope = new Set(orderedScopes);
       const names = [
         ...new Set(
-          (await skills.all())
+          all
             .filter((s) => s.status === "published" && inScope.has(s.scopeId) && isSafeSkillName(s.manifest.name))
             .map((s) => s.manifest.name),
         ),
       ];
-      const resolved = await Promise.all(names.map((n) => this.resolve(n, orderedScopes)));
-      return resolved.filter((r): r is SkillResolution & { skill: Skill } => r.skill !== null);
+      const visible = names
+        .map((n) => resolveFromIndex(index, n, orderedScopes))
+        .filter((r): r is SkillResolution & { skill: Skill } => r.skill !== null);
+      if (granted?.length) {
+        const byName = new Map(visible.map((r) => [r.skill.manifest.name, r]));
+        const seen = new Set<string>();
+        for (const ref of granted) {
+          if (seen.has(ref.id)) continue;
+          seen.add(ref.id);
+          const s = await skills.get(ref.id);
+          if (!s || s.status !== "published" || s.scopeId !== ref.ownerScopeId || !isSafeSkillName(s.manifest.name))
+            continue;
+          const existing = byName.get(s.manifest.name);
+          if (existing) {
+            if (existing.skill.id !== s.id && !existing.shadowed.some((x) => x.id === s.id)) existing.shadowed.push(s);
+            continue;
+          }
+          const r = { skill: s, shadowed: [] as Skill[] };
+          byName.set(s.manifest.name, r);
+          visible.push(r);
+        }
+      }
+      return visible;
     },
 
     async promote(id, targetScopeId) {

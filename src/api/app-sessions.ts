@@ -1,8 +1,9 @@
 import type { PendingApprovalRecord } from "../types.ts";
 import { orgId as orgIdOf } from "../config.ts";
 import { parseScopeId, scopeId } from "../types.ts";
-import { fileArtifactId } from "../files/file-artifact-store.ts";
+import { fileArtifactId, artifactPath } from "../files/file-artifact-store.ts";
 import { transcriptEntries, windowedTranscript } from "../sessions/session-store.ts";
+import { SEARCH_HIT_LIMIT, searchSnippet, searchTerms } from "../sessions/entry-search.ts";
 import { supportsProcessSessions } from "../sandbox/sandbox.ts";
 import { processIsGone } from "../sandbox/process-poll.ts";
 import { cronRef, deployRef, encodeRef, fileRef, skillRef } from "../acl/resource-ref.ts";
@@ -14,7 +15,7 @@ import { MAX_ATTACHMENT_BYTES, mimeFromName, safeAttachmentName } from "../core/
 import { projectIdFromGroupRef, projectScopeId } from "../projects/project-store.ts";
 
 import type { App, AppDeps } from "./app-types.ts";
-import { toFileItem, type ScopeDeployment } from "./app-types.ts";
+import { toFileItem, type ScopeDeployment, type SessionSearchHit } from "./app-types.ts";
 import type { AppHelpers } from "./app-helpers.ts";
 
 export function createSessionMethods(
@@ -24,10 +25,12 @@ export function createSessionMethods(
   App,
   | "getSession"
   | "getSessionForViewer"
+  | "getSessionEntryForViewer"
   | "listFilesForViewer"
   | "uploadFileForViewer"
   | "openFileForViewer"
   | "listSessions"
+  | "searchSessions"
   | "sessionBackground"
   | "readSessionBackgroundOutput"
   | "listContexts"
@@ -36,12 +39,15 @@ export function createSessionMethods(
   | "addProjectMember"
   | "removeProjectMember"
   | "renameProject"
+  | "setProjectSlackChannel"
   | "listScopeResources"
   | "managesScope"
   | "membershipControlsScope"
   | "authorizesCapabilityScope"
   | "updateSession"
   | "regenerateTitle"
+  | "spawnSession"
+  | "discardSession"
   | "forkSession"
   | "grant"
   | "revokeGrant"
@@ -62,6 +68,7 @@ export function createSessionMethods(
     projectsForViewer,
     projectView,
     reconcileProjectMember,
+    syncProjectChannelRoster,
     managedProjectMembership,
     approvalRecordIsCurrent,
     principalCanAccessCurrentScope,
@@ -90,6 +97,15 @@ export function createSessionMethods(
       return { session, entries: w.entries, ...(w.earlier > 0 ? { earlierEntries: w.earlier } : {}) };
     },
 
+    async getSessionEntryForViewer(sessionId, principalId, seq) {
+      const session = (await sessionsForViewer(principalId)).find((s) => s.id === sessionId);
+      if (!session) return null;
+      const entry = transcriptEntries(await deps.sessions.visibleEntries(sessionId, principalId)).find(
+        (e) => e.seq === seq,
+      );
+      return entry ? { entry } : null;
+    },
+
     listFilesForViewer(principalId, opts, inScope) {
       return filesForViewer(principalId, opts, inScope);
     },
@@ -101,7 +117,7 @@ export function createSessionMethods(
       const name = safeAttachmentName(input.name);
       const mimetype = (input.mimetype ?? mimeFromName(name)).split(";")[0]!.trim().toLowerCase() || mimeFromName(name);
       const id = fileArtifactId(`upload:${principalId}:${createdInScope}:${Date.now()}:${randomUUID()}`, "in", 0);
-      const path = `artifacts/${id}/${name}`;
+      const path = artifactPath(id, name);
       const { artifact } = await deps.files.put({
         id,
         ownerScopeId,
@@ -173,7 +189,18 @@ export function createSessionMethods(
         if (m.expiresAt <= now) continue;
         watchCounts.set(m.threadRef, (watchCounts.get(m.threadRef) ?? 0) + 1);
       }
-      if (workingThreadRefs.size === 0 && waiting.size === 0 && jobCounts.size === 0 && watchCounts.size === 0)
+      const cronCounts = new Map<string, number>();
+      for (const c of await deps.crons.list()) {
+        if (!c.enabled || c.archived || !c.destination) continue;
+        cronCounts.set(c.destination.target, (cronCounts.get(c.destination.target) ?? 0) + 1);
+      }
+      if (
+        workingThreadRefs.size === 0 &&
+        waiting.size === 0 &&
+        jobCounts.size === 0 &&
+        watchCounts.size === 0 &&
+        cronCounts.size === 0
+      )
         return sessions;
       return sessions.map((s) => ({
         ...s,
@@ -181,7 +208,35 @@ export function createSessionMethods(
         ...(waiting.has(s.id) ? { awaitingInput: true } : {}),
         ...(jobCounts.has(s.threadRef) ? { backgroundJobs: jobCounts.get(s.threadRef)! } : {}),
         ...(watchCounts.has(s.threadRef) ? { watches: watchCounts.get(s.threadRef)! } : {}),
+        ...(cronCounts.has(s.threadRef) ? { crons: cronCounts.get(s.threadRef)! } : {}),
       }));
+    },
+
+    async searchSessions(principalId, query, limit = SEARCH_HIT_LIMIT): Promise<SessionSearchHit[]> {
+      const capped = Math.max(1, Math.min(limit, 100));
+      const hits = await deps.sessions.searchEntries(principalId, query, capped);
+      if (!hits.length) return [];
+      const visible = new Map((await sessionsForViewer(principalId)).map((s) => [s.id, s]));
+      const terms = searchTerms(query);
+      return hits.flatMap((hit) => {
+        const session = visible.get(hit.sessionId);
+        if (!session) return [];
+        return [
+          {
+            sessionId: hit.sessionId,
+            title: session.title ?? null,
+            scopeId: session.scopeId,
+            ...(session.channelName ? { channelName: session.channelName } : {}),
+            ...(session.surface ? { surface: session.surface } : {}),
+            seq: hit.seq,
+            entryType: hit.type,
+            ...(hit.author ? { author: hit.author } : {}),
+            snippet: searchSnippet(hit.text, terms),
+            createdAt: hit.createdAt,
+            ...(session.archived ? { archived: true } : {}),
+          },
+        ];
+      });
     },
 
     async sessionBackground(sessionId, viewer) {
@@ -205,7 +260,15 @@ export function createSessionMethods(
           expiresAt: m.expiresAt,
           ...(m.lastFiredAt !== undefined ? { lastFiredAt: m.lastFiredAt } : {}),
         }));
-      return { jobs, watches };
+      const crons = (await deps.crons.list())
+        .filter((c) => c.enabled && !c.archived && c.destination?.target === session.threadRef)
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((c) => ({
+          id: c.id,
+          ...(c.title !== undefined ? { title: c.title } : {}),
+          ...(c.nextFireAt !== undefined ? { nextFireAt: c.nextFireAt } : {}),
+        }));
+      return { jobs, watches, crons };
     },
 
     async readSessionBackgroundOutput(sessionId, processId, viewer, sinceCursor) {
@@ -301,6 +364,66 @@ export function createSessionMethods(
       return result;
     },
 
+    async setProjectSlackChannel(id, principalId, channel) {
+      if (!deps.projects) return { status: "not_found" };
+      if (!deps.identity.isInternal(deps.identity.classify(principalId))) return { status: "forbidden" };
+      const existing = await deps.projects.get(id);
+      if (!existing || existing.orgId !== orgIdOf()) return { status: "not_found" };
+      let link: { channelId: string; channelName: string } | null = null;
+      if (channel !== null) {
+        const wanted = channel.trim().replace(/^#/, "");
+        if (!wanted) return { status: "invalid_channel" };
+        const findChannel = async () => {
+          const reachable = await deps.directory.listChannelsFor(principalId).catch(() => []);
+          return (
+            reachable.find((c) => c.channelId === wanted) ??
+            reachable.find((c) => c.name.toLowerCase() === wanted.toLowerCase())
+          );
+        };
+        let match = await findChannel();
+        if (!match) {
+          // The synced directory may not have caught up with a just-created channel;
+          // ask the surface for a fresh sync and look once more before giving up.
+          await h.refreshSurfaceDirectory().catch(() => undefined);
+          match = await findChannel();
+        }
+        if (!match) return { status: "invalid_channel" };
+        const channelScope = scopeId("channel", match.channelId);
+        const inUse = (await deps.sessions.listAll()).some((session) => session.scopeId === channelScope);
+        if (inUse) return { status: "channel_in_use" };
+        link = { channelId: match.channelId, channelName: match.name };
+      }
+      const prevDerived = existing.channelMemberIds ?? [];
+      const manual = new Set([existing.ownerId, ...existing.memberIds]);
+      const result = await deps.projects.setSlackChannel(id, principalId, link, async ({ project, changed }) => {
+        if (changed)
+          deps.auditLog.record({
+            at: Date.now(),
+            principalId,
+            action: link ? "project.slack_channel.link" : "project.slack_channel.unlink",
+            resource: link?.channelId ?? existing.slackChannel?.channelId ?? "",
+            scopeLabel: projectScopeId(project.id),
+          });
+        if (!link) {
+          for (const m of prevDerived) {
+            if (manual.has(m)) continue;
+            deps.auditLog.record({
+              at: Date.now(),
+              principalId,
+              action: "project.member.remove",
+              resource: m,
+              scopeLabel: projectScopeId(project.id),
+            });
+            await reconcileProjectMember(project, m, false);
+          }
+        }
+      });
+      if (result.status !== "ok") return result;
+      if (link) await syncProjectChannelRoster(result.project, principalId);
+      const fresh = (await deps.projects.get(id)) ?? result.project;
+      return { ...result, project: await projectView(fresh) };
+    },
+
     async renameProject(id, principalId, name) {
       if (!deps.projects) return { status: "not_found" };
       if (!deps.identity.isInternal(deps.identity.classify(principalId))) return { status: "forbidden" };
@@ -324,9 +447,10 @@ export function createSessionMethods(
 
     async listScopeResources(principalId, scope) {
       if (!(await principalCanAccessCurrentScope(principalId, scope))) return null;
-      const [page, allCrons, allDeployments, allSkills] = await Promise.all([
+      const [page, allCrons, allWebhooks, allDeployments, allSkills] = await Promise.all([
         filesForViewer(principalId, undefined, scope),
         deps.crons.list(),
+        deps.webhooks.list(),
         deps.deploy.listDeployments(),
         deps.skills.list(),
       ]);
@@ -354,6 +478,7 @@ export function createSessionMethods(
         .map((s) => ({ id: s.id, name: s.manifest.name, description: s.manifest.description, status: s.status }));
       return {
         files,
+        webhooks: allWebhooks.filter((w) => w.ownerScopeId === scope),
         crons: allCrons.filter((c) => c.ownerScopeId === scope),
         deployments,
         skills,
@@ -423,16 +548,24 @@ export function createSessionMethods(
         );
         const { lease } = await deps.sessions.acquireLease(forked.id, "fork");
         if (!lease) throw new Error(`fork: could not lease fresh session ${forked.id}`);
+        let forkBoundarySeq: number | null = null;
         try {
           for (const entry of copied) {
-            await deps.sessions.append(lease, {
+            const appended = await deps.sessions.append(lease, {
               type: entry.type,
               payload: entry.payload,
               scopeLabel: entry.scopeLabel,
             });
+            forkBoundarySeq = appended.seq;
           }
         } finally {
           await deps.sessions.releaseLease(lease);
+        }
+        if (forkBoundarySeq !== null) {
+          await deps.sessions.updateForkProvenance(forked.id, {
+            forkedFrom: { sessionId, title: source.title ?? null },
+            forkBoundarySeq,
+          });
         }
         const sourceTitle = source.title?.trim();
         if (sourceTitle && projectMembers === undefined)
@@ -457,6 +590,62 @@ export function createSessionMethods(
         if (!members?.includes(principalId)) return null;
         return fork(members);
       });
+    },
+
+    async spawnSession(principalId, opts) {
+      const scope = opts.scopeId;
+      const parsed = parseScopeId(scope);
+      const create = async (projectMembers?: readonly string[], channelName?: string) => {
+        const threadRef = `web:${principalId}:${randomUUID()}`;
+        let kind: "group" | "channel" | "dm" = "dm";
+        if (parsed.kind === "group") kind = "group";
+        else if (parsed.kind === "channel") kind = "channel";
+        const session = await deps.sessions.getOrCreateByThread(threadRef, kind, scope, channelName, "web");
+        await Promise.all(
+          (projectMembers ?? [principalId]).map((memberId) => deps.sessions.addParticipant(session.id, memberId)),
+        );
+        if (opts.title?.trim()) await deps.sessions.updateTitle(session.id, opts.title.trim());
+        deps.auditLog.record({
+          at: Date.now(),
+          principalId,
+          action: "session.spawn",
+          resource: session.id,
+          scopeLabel: scope,
+        });
+        return { session: (await deps.sessions.get(session.id)) ?? session };
+      };
+      if (parsed.kind === "personal") {
+        return parsed.ref === principalId ? create() : null;
+      }
+      const projectId = parsed.kind === "group" ? projectIdFromGroupRef(parsed.ref) : null;
+      if (projectId) {
+        const projects = deps.projects;
+        if (!projects) return null;
+        return projects.withRosterLock(projectId, async (project) => {
+          if (project.orgId !== orgIdOf()) return null;
+          const members = await projects.members(parsed.ref);
+          if (!members?.includes(principalId)) return null;
+          return create(members, project.name);
+        });
+      }
+      if (!(await principalCanAccessCurrentScope(principalId, scope))) return null;
+      return create();
+    },
+
+    async discardSession(sessionId, principalId) {
+      const session = await deps.sessions.get(sessionId);
+      if (!session) return false;
+      const mine = await deps.sessions.listByParticipant(principalId);
+      if (!mine.some((s) => s.id === sessionId)) return false;
+      if (!(await deps.sessions.deleteSessionIfEmpty(sessionId))) return false;
+      deps.auditLog.record({
+        at: Date.now(),
+        principalId,
+        action: "session.discard",
+        resource: sessionId,
+        scopeLabel: session.scopeId,
+      });
+      return true;
     },
 
     async grant(g) {
