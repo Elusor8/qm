@@ -1,5 +1,5 @@
 import { parseScopeId, type ScopeId, type ScopeKind } from "../types.ts";
-import type { MemoryCaptureContext, MemoryRecallContext, MemoryRevision, MemoryService } from "./memory-service.ts";
+import type { MemoryRevision, MemoryService } from "./memory-service.ts";
 
 export type MemoryCapturePolicy = "off" | "explicit" | "automatic";
 
