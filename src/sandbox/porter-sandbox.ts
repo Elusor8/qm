@@ -9,7 +9,10 @@ import {
   createPorterClient,
   createPorterExec,
   ensurePorterVolume,
+  listPorterSandboxes,
   porterPhaseSettled,
+  porterSlug,
+  retirePorterBody,
   waitPorterRunning,
   type PorterClientLike,
   type PorterSandboxLike,
@@ -33,7 +36,6 @@ import {
 import { BLOB_TRANSFER_AUD, mintCapabilityToken } from "../auth/capability-token.ts";
 import type { BlobTransferStore } from "../persistence/blob-transfer.ts";
 import { CAPABILITY_HEADER } from "../api/contract.ts";
-import { shortHash } from "../util/crypto.ts";
 import { killableScript, killScript } from "./exec-kill.ts";
 import { visibleNotInstalled, visibleTools } from "./sandbox.ts";
 import type {
@@ -83,13 +85,7 @@ export interface PorterSandboxOptions {
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
 
-export const porterScopeSlug = (prefix: string, id: string): string => {
-  const cleaned = id
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `${prefix}-${cleaned.slice(0, 28).replace(/-+$/, "") || "scope"}-${shortHash(id)}`;
-};
+export const porterScopeSlug = porterSlug;
 
 const bodyName = (slug: string): string => `${slug}-${randomUUID().slice(0, 5)}`;
 
@@ -113,7 +109,7 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
 
   const bodies = new Map<string, BodyEntry>();
   const scopeByBody = new Map<string, string>();
-  const scratchKeyByName = new Map<string, string>();
+  const scratchSlugByName = new Map<string, string>();
   const activeScratch = new Map<string, number>();
 
   async function liveBody(slug: string): Promise<BodyEntry | null> {
@@ -126,7 +122,7 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
       if (bodies.has(slug) && cached.sb.phase === "running") return cached;
       bodies.delete(slug);
     }
-    const found = await client.sandboxes.list({ tags: { [SCOPE_TAG]: slug } });
+    const found = await listPorterSandboxes(client, { [SCOPE_TAG]: slug });
     const live =
       found.find((b) => b.phase === "running") ?? found.find((b) => b.phase === "creating" || b.phase === "queued");
     if (!live) return null;
@@ -173,10 +169,9 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
     return provisionQueue(scope, () =>
       advisoryLock.withLock(`porter-provision:${scope}`, async () => {
         const volumeName = `${slug}-home`;
-        let volumeId: string;
-        let freshVolume = false;
+        let volume: { id: string; created: boolean };
         try {
-          volumeId = await ensurePorterVolume(client, volumeName);
+          volume = await ensurePorterVolume(client, volumeName);
         } catch (e) {
           throw new Error(`porter volume ${volumeName}: ${errMessage(e)}`, { cause: e });
         }
@@ -188,44 +183,37 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
             scopeByBody.set(existing.name, scope);
             return { name: existing.name, coldStart: false };
           }
-          await existing.sb.terminate().catch(swallowAs("porter-sandbox: egress rotate terminate", undefined));
           bodies.delete(slug);
-        } else {
-          freshVolume = await volumeIsEmpty(slug, volumeName);
+          await retirePorterBody(existing.sb, true);
         }
         try {
           onStatus?.("Starting your computer…");
         } catch (error) {
           void error;
         }
-        const ref = await createBody(slug, egressMode, { mountPath: homeDir, id: volumeId });
+        const ref = await createBody(slug, egressMode, { mountPath: homeDir, id: volume.id });
         scopeByBody.set(ref.name, scope);
-        return { name: ref.name, coldStart: freshVolume };
+        return { name: ref.name, coldStart: volume.created };
       }),
     );
   }
 
-  const knownVolumes = new Set<string>();
-  async function volumeIsEmpty(slug: string, volumeName: string): Promise<boolean> {
-    if (knownVolumes.has(volumeName)) return false;
-    knownVolumes.add(volumeName);
-    const found = await client.sandboxes.list({ tags: { [SCOPE_TAG]: slug } });
-    return found.length === 0;
-  }
-
-  async function ensureScratch(key: string): Promise<{ name: string; coldStart: boolean }> {
-    const slug = porterScopeSlug(`${prefix}-scratch`, key);
-    return provisionQueue(`scratch:${key}`, async () => {
+  async function ensureScratch(
+    key: string,
+    egressMode: "proxy" | "open",
+  ): Promise<{ name: string; coldStart: boolean }> {
+    const slug = porterScopeSlug(`${prefix}-scratch-${egressMode}`, key);
+    return provisionQueue(`scratch:${slug}`, async () => {
       const active = activeScratch.get(slug) ?? 0;
       if (active === 0) {
         const stale = await liveBody(slug);
-        if (stale) await stale.sb.terminate().catch(swallowAs("porter-sandbox: stale scratch terminate", undefined));
         bodies.delete(slug);
-        await createBody(slug, egressProxyHost ? "proxy" : "open", undefined, "scratch");
+        if (stale) await retirePorterBody(stale.sb, false);
+        await createBody(slug, egressMode, undefined, "scratch");
       }
       const ref = bodies.get(slug);
       if (!ref) throw new Error(`porter scratch ${slug} vanished during provision`);
-      scratchKeyByName.set(ref.name, key);
+      scratchSlugByName.set(ref.name, slug);
       activeScratch.set(slug, active + 1);
       return { name: ref.name, coldStart: active === 0 };
     });
@@ -348,7 +336,7 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
       let name: string;
       let coldStart: boolean;
       if (scratch) {
-        ({ name, coldStart } = await ensureScratch(scratch.key));
+        ({ name, coldStart } = await ensureScratch(scratch.key, forceEgress ? "proxy" : "open"));
       } else {
         ({ name, coldStart } = await ensureScopeBody(scope, forceEgress ? "proxy" : "open", provOpts?.onStatus));
       }
@@ -434,9 +422,8 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
       let machine = "no computer";
       let name: string | undefined;
       try {
-        const found = await client.sandboxes.list({ tags: { [SCOPE_TAG]: slug } });
-        const live =
-          found.find((b) => b.phase === "running") ?? found.find((b) => !porterPhaseSettled(b.phase)) ?? found[0];
+        const found = await listPorterSandboxes(client, { [SCOPE_TAG]: slug });
+        const live = found.find((b) => b.phase === "running") ?? found.find((b) => !porterPhaseSettled(b.phase));
         if (live) {
           machine = live.phase ?? "unknown";
           if (machine === "running") name = (await live.refresh()).name;
@@ -459,17 +446,13 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
       const slug = porterScopeSlug(prefix, scopeId);
       return provisionQueue(scopeId, () =>
         advisoryLock.withLock(`porter-provision:${scopeId}`, async () => {
-          const found = await client.sandboxes.list({ tags: { [SCOPE_TAG]: slug } });
+          const found = await listPorterSandboxes(client, { [SCOPE_TAG]: slug });
           const live = found.filter((b) => !porterPhaseSettled(b.phase));
           const egressMode = live.some((b) => b.tags?.[EGRESS_TAG] === "proxy") ? "proxy" : "open";
-          for (const b of live) {
-            await b.terminate().catch((e) => {
-              if (!(e instanceof NotFoundError)) throw e;
-            });
-          }
           bodies.delete(slug);
-          const volumeId = await ensurePorterVolume(client, `${slug}-home`);
-          const ref = await createBody(slug, egressMode, { mountPath: homeDir, id: volumeId });
+          for (const b of live) await retirePorterBody(b, true);
+          const volume = await ensurePorterVolume(client, `${slug}-home`);
+          const ref = await createBody(slug, egressMode, { mountPath: homeDir, id: volume.id });
           scopeByBody.set(ref.name, scopeId);
         }),
       );
@@ -477,9 +460,8 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
 
     async teardown(handle, tdOpts?: TeardownOptions): Promise<void> {
       if (handle.scratch) {
-        const key = scratchKeyByName.get(handle.id);
-        const slug = key ? porterScopeSlug(`${prefix}-scratch`, key) : handle.id;
-        return provisionQueue(key ? `scratch:${key}` : handle.id, async () => {
+        const slug = scratchSlugByName.get(handle.id) ?? handle.id;
+        return provisionQueue(`scratch:${slug}`, async () => {
           const remaining = (activeScratch.get(slug) ?? 1) - 1;
           if (remaining > 0) {
             activeScratch.set(slug, remaining);
@@ -494,8 +476,9 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
               if (e instanceof NotFoundError) return null;
               throw e;
             }));
-          if (tdOpts?.destroy) await target?.terminate();
-          else await target?.terminate().catch(swallowAs("porter-sandbox: scratch terminate", undefined));
+          if (!target) return;
+          if (tdOpts?.destroy) await retirePorterBody(target, false);
+          else await retirePorterBody(target, false).catch(swallowAs("porter-sandbox: scratch terminate", undefined));
         });
       }
       if (!tdOpts?.destroy) return;
@@ -512,7 +495,7 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
               throw e;
             }));
           const slug = target?.tags?.[SCOPE_TAG] ?? cachedSlug;
-          await target?.terminate();
+          if (target) await retirePorterBody(target, true);
           if (slug) await client.volumes.delete(`${slug}-home`);
         } catch (e) {
           opts.onError?.({

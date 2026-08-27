@@ -325,6 +325,9 @@ function porterApiBaseUrl(env: NodeJS.ProcessEnv): string | undefined {
   return env.PORTER_SANDBOX_BASE_URL ?? derived;
 }
 
+const porterLocatorPresent = (env: NodeJS.ProcessEnv): boolean =>
+  Boolean(porterApiBaseUrl(env) || env.PORTER_CLUSTER_ID || env.KUBERNETES_SERVICE_HOST);
+
 function porterDeployVisibilityStrict(value: string | undefined): PorterDeployEnv["visibility"] {
   if (value === undefined || value.trim() === "") return undefined;
   const visibility = value.trim();
@@ -335,7 +338,7 @@ function porterDeployVisibilityStrict(value: string | undefined): PorterDeployEn
 }
 
 function porterDeployEnv(env: NodeJS.ProcessEnv): PorterDeployEnv {
-  const token = env.PORTER_DEPLOY_API_TOKEN ?? env.PORTER_SANDBOX_TOKEN;
+  const token = env.PORTER_DEPLOY_API_TOKEN;
   const baseUrl = porterApiBaseUrl(env);
   const visibility = porterDeployVisibilityStrict(env.PORTER_DEPLOY_VISIBILITY);
   const ttlSec = numEnvStrict("PORTER_DEPLOY_TTL_SEC", env.PORTER_DEPLOY_TTL_SEC);
@@ -352,17 +355,16 @@ function porterDeployEnv(env: NodeJS.ProcessEnv): PorterDeployEnv {
 }
 
 function porterSandboxEnv(env: NodeJS.ProcessEnv): PorterSandboxEnv {
-  const token = env.PORTER_SANDBOX_TOKEN ?? env.PORTER_DEPLOY_API_TOKEN;
+  const token = env.PORTER_SANDBOX_TOKEN;
   const baseUrl = porterApiBaseUrl(env);
+  const ttlSec = numEnvStrict("PORTER_SANDBOX_TTL_SEC", env.PORTER_SANDBOX_TTL_SEC);
   return {
     ...(env.PORTER_SANDBOX_IMAGE ? { image: env.PORTER_SANDBOX_IMAGE } : {}),
     ...(token ? { token } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(env.PORTER_SANDBOX_NAME_PREFIX ? { namePrefix: env.PORTER_SANDBOX_NAME_PREFIX } : {}),
     ...(env.PORTER_SANDBOX_HOME ? { homeDir: env.PORTER_SANDBOX_HOME } : {}),
-    ...(numEnvStrict("PORTER_SANDBOX_TTL_SEC", env.PORTER_SANDBOX_TTL_SEC) !== undefined
-      ? { ttlSec: numEnvStrict("PORTER_SANDBOX_TTL_SEC", env.PORTER_SANDBOX_TTL_SEC) }
-      : {}),
+    ...(ttlSec !== undefined ? { ttlSec } : {}),
     ...(env.PORTER_SANDBOX_EGRESS_PROXY_URL ? { egressProxyUrl: env.PORTER_SANDBOX_EGRESS_PROXY_URL } : {}),
     ...(numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) !== undefined
       ? { defaultTimeoutSec: numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) }
@@ -721,26 +723,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
   const dataDir = resolve(env.DATA_DIR ?? "./data");
-  if (env.SANDBOX_BACKEND === "porter" && !env.PORTER_SANDBOX_EGRESS_PROXY_URL) {
+  const porterSandboxSelected = env.SANDBOX_BACKEND === "porter" || env.SANDBOX_SECONDARY_BACKEND === "porter";
+  if (porterSandboxSelected && !env.PORTER_SANDBOX_EGRESS_PROXY_URL) {
     console.warn(
       "[config] SANDBOX_BACKEND=porter without PORTER_SANDBOX_EGRESS_PROXY_URL — sandboxes run with NO egress enforcement (fail-open); set PORTER_SANDBOX_EGRESS_PROXY_URL to the egress proxy to force sandbox traffic through it.",
     );
   }
-  if (
-    (env.SANDBOX_BACKEND === "porter" || env.SANDBOX_SECONDARY_BACKEND === "porter") &&
-    !env.PORTER_SANDBOX_BASE_URL &&
-    !(env.PORTER_DEPLOY_PROJECT_ID && env.PORTER_DEPLOY_CLUSTER_ID) &&
-    !env.PORTER_CLUSTER_ID &&
-    !env.KUBERNETES_SERVICE_HOST
-  ) {
-    throw new Error(
-      "SANDBOX_BACKEND=porter requires PORTER_DEPLOY_PROJECT_ID and PORTER_DEPLOY_CLUSTER_ID (or PORTER_SANDBOX_BASE_URL, or PORTER_CLUSTER_ID) to locate the Porter sandbox API.",
-    );
-  }
-  if (env.DEPLOY_PROVIDER === "porter") {
-    if (!porterApiBaseUrl(env)) {
+  for (const [selected, label] of [
+    [porterSandboxSelected, "SANDBOX_BACKEND=porter"],
+    [env.DEPLOY_PROVIDER === "porter", "DEPLOY_PROVIDER=porter"],
+  ] as const) {
+    if (selected && !porterLocatorPresent(env)) {
       throw new Error(
-        "DEPLOY_PROVIDER=porter requires PORTER_DEPLOY_PROJECT_ID and PORTER_DEPLOY_CLUSTER_ID (or PORTER_SANDBOX_BASE_URL) to locate the Porter sandbox API.",
+        `${label} requires PORTER_DEPLOY_PROJECT_ID and PORTER_DEPLOY_CLUSTER_ID (or PORTER_SANDBOX_BASE_URL, or PORTER_CLUSTER_ID) to locate the Porter sandbox API.`,
       );
     }
   }

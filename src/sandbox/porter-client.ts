@@ -3,6 +3,7 @@ import { Porter, NotFoundError, SandboxError } from "porter-sandbox";
 import { sleep } from "../util/async.ts";
 import { swallowAs } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
+import { shortHash } from "../util/crypto.ts";
 import type { ExecResult } from "./sandbox.ts";
 
 const MISSING_RC = 44;
@@ -11,6 +12,8 @@ const WRITE_CHUNK_B64 = 64 * 1024;
 const EXIT_GRACE_MS = 60_000;
 const CREATE_DEADLINE_MS = 180_000;
 const CREATE_POLL_MS = 500;
+const RETIRE_DEADLINE_MS = 120_000;
+const RETIRE_POLL_MS = 500;
 
 export interface PorterSandboxLike {
   readonly id: string;
@@ -36,7 +39,7 @@ export interface PorterClientLike {
   sandboxes: {
     create(spec: PorterSandboxSpec): Promise<PorterSandboxLike>;
     get(name: string): Promise<PorterSandboxLike>;
-    list(options?: { tags?: Record<string, string> }): Promise<PorterSandboxLike[]>;
+    list(options?: { tags?: Record<string, string>; page?: number }): Promise<PorterSandboxLike[]>;
     raw: {
       get(id: string): Promise<{ phase: string; host?: string }>;
       exec(
@@ -97,18 +100,76 @@ export function createPorterClient(opts: { token?: string; baseUrl?: string }): 
   );
 }
 
-export async function ensurePorterVolume(client: PorterClientLike, name: string): Promise<string> {
+export const porterSlug = (prefix: string, id: string): string => {
+  const cleaned = id
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${prefix}-${cleaned.slice(0, 28).replace(/-+$/, "") || "scope"}-${shortHash(id)}`;
+};
+
+export const porterDnsLabel = (name: string): string => {
+  const cleaned = name
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (cleaned === name && cleaned.length <= 63) return cleaned;
+  return `${cleaned.slice(0, 56).replace(/-+$/, "") || "app"}-${shortHash(name)}`;
+};
+
+export async function ensurePorterVolume(
+  client: PorterClientLike,
+  name: string,
+): Promise<{ id: string; created: boolean }> {
   try {
-    return (await client.volumes.get(name)).id;
+    return { id: (await client.volumes.get(name)).id, created: false };
   } catch (e) {
     if (!(e instanceof NotFoundError)) throw e;
-    return (await client.volumes.create({ name })).id;
+    return { id: (await client.volumes.create({ name })).id, created: true };
+  }
+}
+
+export async function listPorterSandboxes(
+  client: PorterClientLike,
+  tags: Record<string, string>,
+): Promise<PorterSandboxLike[]> {
+  const all: PorterSandboxLike[] = [];
+  const seen = new Set<string>();
+  for (let page = 1; ; page++) {
+    const fresh = (await client.sandboxes.list({ tags, page })).filter((b) => !seen.has(b.id));
+    if (fresh.length === 0) return all;
+    for (const b of fresh) seen.add(b.id);
+    all.push(...fresh);
   }
 }
 
 const SETTLED_PHASES = new Set(["succeeded", "failed", "terminated"]);
 
 export const porterPhaseSettled = (phase: string | null): boolean => SETTLED_PHASES.has(phase ?? "");
+
+export async function retirePorterBody(sb: PorterSandboxLike, drain: boolean): Promise<void> {
+  const gone = (e: unknown): boolean => e instanceof NotFoundError;
+  if (porterPhaseSettled(sb.phase)) return;
+  try {
+    await sb.terminate();
+  } catch (e) {
+    if (gone(e)) return;
+    throw e;
+  }
+  if (!drain) return;
+  const deadline = Date.now() + RETIRE_DEADLINE_MS;
+  while (!porterPhaseSettled(sb.phase)) {
+    if (Date.now() > deadline)
+      throw new Error(`porter sandbox ${sb.id} did not terminate within ${RETIRE_DEADLINE_MS}ms`);
+    await sleep(RETIRE_POLL_MS);
+    try {
+      await sb.refresh();
+    } catch (e) {
+      if (gone(e)) return;
+      throw e;
+    }
+  }
+}
 
 export async function waitPorterRunning(name: string, sb: PorterSandboxLike): Promise<void> {
   const deadline = Date.now() + CREATE_DEADLINE_MS;

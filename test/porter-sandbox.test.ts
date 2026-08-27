@@ -187,3 +187,80 @@ test("porter API errors surface the response body detail, not just the status", 
     },
   );
 });
+
+test("destroy waits for a slowly terminating body before deleting its volume", async () => {
+  fake = installFakePorter({ terminateLag: 1 });
+  sandbox = make();
+  const h = await sandbox.provision(layers);
+  const errors: string[] = [];
+  const observed = make({ onError: (e: { message: string }) => errors.push(e.message) });
+  await observed.teardown(h, { destroy: true });
+  assert.deepEqual(errors, []);
+  assert.equal(fake.volumeNames().length, 0);
+  assert.equal(fake.bodies().filter((b) => b.phase !== "terminated").length, 0);
+});
+
+test("restart and egress rotation drain the old body before mounting the volume again", async () => {
+  fake = installFakePorter({ terminateLag: 1 });
+  const proxied = make({ egressProxyUrl: "https://egress.qm.internal:48080" });
+  const h1 = await proxied.provision(layers);
+  await proxied.writeFile(h1, "keep.txt", "kept");
+  await proxied.restartComputer!(scope);
+  const h2 = await proxied.provision(layers, { egressToken: "tok" });
+  assert.notEqual(h2.id, h1.id);
+  assert.equal(h2.coldStart, false);
+  assert.equal(await proxied.readFile(h2, "keep.txt"), "kept");
+  const running = fake.bodies().filter((b) => b.phase === "running");
+  assert.equal(running.length, 1);
+  assert.equal(running[0]!.tags["qm-egress"], "proxy");
+});
+
+test("scratch bodies without an egress token stay open even when a proxy is configured", async () => {
+  const proxied = make({ egressProxyUrl: "https://egress.qm.internal:48080" });
+  const h = await proxied.provision(layers, { scratch: { key: "k-open" } });
+  assert.equal(h.env, undefined);
+  const body = fake.bodies().find((b) => b.name === h.id)!;
+  assert.equal(body.tags["qm-egress"], "open");
+  assert.equal(body.egress, undefined);
+  await proxied.teardown(h);
+  const hp = await proxied.provision(layers, { scratch: { key: "k-proxy" }, egressToken: "tok" });
+  assert.match(hp.env?.HTTPS_PROXY ?? "", /tok@/);
+  assert.deepEqual(fake.bodies().find((b) => b.name === hp.id)!.egress, ["egress.qm.internal"]);
+});
+
+test("a running body past the first list page is still found", async () => {
+  fake = installFakePorter({ pageSize: 1 });
+  sandbox = make();
+  const h1 = await sandbox.provision(layers);
+  await sandbox.restartComputer!(scope);
+  await sandbox.restartComputer!(scope);
+  assert.equal(fake.bodies().length, 3);
+  const fresh = make();
+  const h2 = await fresh.provision(layers);
+  assert.notEqual(h2.id, h1.id);
+  assert.equal(fake.bodies().filter((b) => b.phase === "running").length, 1);
+  assert.deepEqual(await fresh.computerStatus!(scope), { machine: "running", guestResponsive: true });
+});
+
+test("computerStatus reports no computer once every body is retired", async () => {
+  const h = await sandbox.provision(layers);
+  await sandbox.teardown(h, { destroy: true });
+  assert.deepEqual(await sandbox.computerStatus!(scope), { machine: "no computer", guestResponsive: false });
+});
+
+test("coldStart tracks whether the home volume was just created", async () => {
+  await fake.client.volumes.create({ name: `${slug}-home` });
+  const h = await sandbox.provision(layers);
+  assert.equal(h.coldStart, false);
+});
+
+test("scratch bodies never share across egress modes", async () => {
+  const proxied = make({ egressProxyUrl: "https://egress.qm.internal:48080" });
+  const open = await proxied.provision(layers, { scratch: { key: "shared" } });
+  const locked = await proxied.provision(layers, { scratch: { key: "shared" }, egressToken: "tok" });
+  assert.notEqual(open.id, locked.id);
+  assert.deepEqual(fake.bodies().find((b) => b.name === locked.id)!.egress, ["egress.qm.internal"]);
+  await proxied.teardown(open);
+  await proxied.teardown(locked);
+  assert.equal(fake.bodies().filter((b) => b.phase === "running").length, 0);
+});

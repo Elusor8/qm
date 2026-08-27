@@ -9,14 +9,17 @@ import {
   createPorterClient,
   createPorterExec,
   ensurePorterVolume,
+  listPorterSandboxes,
+  porterDnsLabel,
   porterPhaseSettled,
+  retirePorterBody,
   waitPorterRunning,
   type PorterClientLike,
   type PorterSandboxLike,
 } from "../sandbox/porter-client.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
-import { createKeyedQueue, sleep } from "../util/async.ts";
+import { createKeyedQueue } from "../util/async.ts";
 import { shq } from "../util/shell.ts";
 import { swallow } from "../util/errors.ts";
 
@@ -29,8 +32,6 @@ const APP_PORT_DEFAULT = 8080;
 const ENDPOINT_PORT = 443;
 const APP_READY_WINDOW_SEC_DEFAULT = 60;
 const APP_START_EXEC_TIMEOUT_SEC = 60;
-const RETIRE_DEADLINE_MS = 120_000;
-const RETIRE_POLL_MS = 1_000;
 const RESOLVE_CACHE_MS_DEFAULT = 15_000;
 const RESOLVE_CACHE_MAX = 500;
 const KIND_TAG = "qm-kind";
@@ -87,7 +88,8 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
 
   const baseName = (d: Deployment): string => `${prefix}-app-${d.id.slice(0, 12).toLowerCase()}`;
   const volumeName = (d: Deployment): string => `${baseName(d)}-data`;
-  const domainOf = (d: Deployment): string | undefined => (appsDomain ? `${d.name ?? d.id}.${appsDomain}` : undefined);
+  const domainOf = (d: Deployment): string | undefined =>
+    appsDomain ? `${porterDnsLabel(d.name ?? d.id)}.${appsDomain}` : undefined;
   const endpointOf = (host: string): DeployEndpoint => ({
     host,
     port: ENDPOINT_PORT,
@@ -99,22 +101,12 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
     queue(d.id, () => advisoryLock.withLock(`porter-deploy:${d.id}`, fn));
 
   async function liveBodies(d: Deployment): Promise<PorterSandboxLike[]> {
-    const found = await client.sandboxes.list({ tags: { [DEPLOY_TAG]: d.id } });
+    const found = await listPorterSandboxes(client, { [DEPLOY_TAG]: d.id });
     return found.filter((b) => !porterPhaseSettled(b.phase));
   }
 
   async function retireBodies(d: Deployment, drain: boolean): Promise<void> {
-    for (const b of await liveBodies(d)) {
-      await b.terminate().catch((e) => {
-        if (!(e instanceof NotFoundError)) throw e;
-      });
-    }
-    if (!drain) return;
-    const deadline = Date.now() + RETIRE_DEADLINE_MS;
-    while ((await liveBodies(d)).length > 0) {
-      if (Date.now() > deadline) throw new Error(`porter deploy ${d.id}: previous body did not terminate in time`);
-      await sleep(RETIRE_POLL_MS);
-    }
+    for (const b of await liveBodies(d)) await retirePorterBody(b, drain);
   }
 
   function appEnv(version: DeploymentVersion): Record<string, string> {
@@ -164,7 +156,7 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
     apply: (d, version) =>
       serialized(d, async () => {
         resolveCache.delete(d.id);
-        const volumeId = await ensurePorterVolume(client, volumeName(d));
+        const { id: volumeId } = await ensurePorterVolume(client, volumeName(d));
         await retireBodies(d, true);
         await store.delete(d.id).catch((e) => swallow("porter-deploy: clear stale pointer", e));
         const name = `${baseName(d)}-${randomUUID().slice(0, 5)}`;

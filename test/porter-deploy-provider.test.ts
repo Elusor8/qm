@@ -256,3 +256,12 @@ test("without an apps domain the cluster-assigned hostname becomes the URL", asy
   assert.deepEqual(await bare.resolveEndpoint!({ ...d, endpoint }, version({}, "")), endpoint);
   assert.match(await fetchText("/"), /^hello from/);
 });
+
+test("deployment names become DNS labels and ids become sandbox-safe names", async () => {
+  const d = deployment("dep-9", "My_App.v2");
+  const endpoint = await provider.apply(d, version({ "server.js": SERVER }, "node server.js"));
+  assert.match(endpoint.host, /^my-app-v2-[0-9a-f]{6}\.apps\.test$/);
+  const body = fake.bodies().find((b) => b.phase === "running")!;
+  assert.match(body.name, /^qmt-app-dep-9-/);
+  assert.deepEqual(fake.volumeNames(), ["qmt-app-dep-9-data"]);
+});

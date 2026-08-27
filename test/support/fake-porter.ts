@@ -17,6 +17,7 @@ export interface FakePorterBody {
 
 export interface FakePorterOptions {
   terminateLag?: number;
+  pageSize?: number;
 }
 
 export interface FakePorter {
@@ -143,6 +144,10 @@ export function installFakePorter(opts: FakePorterOptions = {}): FakePorter {
         for (const [guest, volId] of Object.entries(spec.volume_mounts ?? {})) {
           const vol = volumeById(volId);
           if (!vol) throw new Error(`fake porter: unknown volume ${volId}`);
+          const holder = [...bodies.values()].find(
+            (b) => b.phase !== "terminated" && Object.values(b.mounts).includes(vol.dir),
+          );
+          if (holder) throw new Error(`fake porter: volume ${volId} is still attached to a ${holder.phase} sandbox`);
           mounts[guest] = vol.dir;
         }
         const homeVolumeId = spec.volume_mounts?.[GUEST_HOME];
@@ -175,9 +180,12 @@ export function installFakePorter(opts: FakePorterOptions = {}): FakePorter {
       async list(options) {
         const tags = options?.tags ?? {};
         for (const b of bodies.values()) observe(b);
-        return [...bodies.keys()]
-          .filter((name) => Object.entries(tags).every(([k, v]) => bodies.get(name)!.tags[k] === v))
-          .map((name) => sandboxOf(name));
+        const matching = [...bodies.keys()].filter((name) =>
+          Object.entries(tags).every(([k, v]) => bodies.get(name)!.tags[k] === v),
+        );
+        const pageSize = opts.pageSize ?? matching.length;
+        const page = options?.page ?? 1;
+        return matching.slice((page - 1) * pageSize, page * pageSize).map((name) => sandboxOf(name));
       },
       raw: {
         async get(id) {

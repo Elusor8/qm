@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${1:?usage: scripts/deploy-helm.sh <image-repo-prefix> [tag]   e.g. scripts/deploy-helm.sh ghcr.io/gkestenberg/qm}"
+REPO="${1:?usage: scripts/deploy-helm.sh <image-repo-prefix> [tag]   e.g. scripts/deploy-helm.sh ghcr.io/<org>/qm}"
 TAG="${2:-$(git rev-parse --short HEAD)}"
 RELEASE="${QM_RELEASE:-qm}"
 NAMESPACE="${QM_NAMESPACE:-qm}"
@@ -44,4 +44,4 @@ else
   echo ">> QM_DEPLOY=0, skipping in-cluster deploy (images + chart published)"
 fi
 
-echo ">> done: chart oci://$REPO @ chart $(helm show chart "$CHART" | awk '/^version:/{print $2}'), images @ $TAG"
+echo ">> done: chart oci://$CHART_NS @ chart $(helm show chart "$CHART" | awk '/^version:/{print $2}'), images @ $TAG"

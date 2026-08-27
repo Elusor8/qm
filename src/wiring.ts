@@ -903,9 +903,7 @@ export function buildApp(
   const buildAwsDeploy = (): DeployProvider =>
     createAwsDeployProvider({
       ...config.awsDeploy,
-      ...(!config.awsDeploy.dataBucket && config.awsSandbox.s3Bucket
-        ? { dataBucket: config.awsSandbox.s3Bucket }
-        : {}),
+      ...(!config.awsDeploy.dataBucket && config.awsSandbox.s3Bucket ? { dataBucket: config.awsSandbox.s3Bucket } : {}),
       advisoryLock,
       store: artifactMap<StoredDeployBody>("aws_deploy_bodies"),
     });

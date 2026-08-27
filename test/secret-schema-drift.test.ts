@@ -104,13 +104,13 @@ test("porter sandbox backend requires PORTER_SANDBOX_TOKEN", () => {
   assert.ok(!ok.includes("PORTER_SANDBOX_TOKEN"));
 });
 
-test("porter deploy provider requires PORTER_DEPLOY_API_TOKEN unless the sandbox token is present", () => {
-  assert.ok(
-    validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter" } as NodeJS.ProcessEnv).includes("PORTER_DEPLOY_API_TOKEN"),
+test("each porter role demands its own token, matching the CLI's unconditional env-equals rules", () => {
+  assert.deepEqual(
+    validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter", PORTER_SANDBOX_TOKEN: "t" } as NodeJS.ProcessEnv),
+    ["PORTER_DEPLOY_API_TOKEN"],
   );
-  assert.ok(
-    !validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter", PORTER_SANDBOX_TOKEN: "t" } as NodeJS.ProcessEnv).includes(
-      "PORTER_DEPLOY_API_TOKEN",
-    ),
+  assert.deepEqual(
+    validateCoreSecretEnv({ SANDBOX_BACKEND: "porter", PORTER_DEPLOY_API_TOKEN: "t" } as NodeJS.ProcessEnv),
+    ["PORTER_SANDBOX_TOKEN"],
   );
 });
