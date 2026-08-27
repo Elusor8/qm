@@ -12,17 +12,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { createRemoteJWKSet, jwtVerify } from "jose";
 import { swallow } from "../util/errors.ts";
-import {
-  asObject,
-  CODEX_OAUTH_ISSUER,
-  codexOAuthJwtAccountId,
-  codexOAuthJwtAccountIdFromToken,
-  isCodexOAuthJwt,
-  readJsonFile,
-  type JsonObject,
-} from "./codex-auth-file.ts";
+import type { JsonObject } from "./codex-auth-file.ts";
 
 export {
   codexAuthFileForEnv,
@@ -31,30 +22,8 @@ export {
   readCodexOAuthAuthFile,
   sanitizedCodexOAuthAuth,
 } from "./codex-auth-file.ts";
-import {
-  codexOAuthAccessToken,
-  codexOAuthRefreshToken,
-  readCodexOAuthAuthFile,
-  sanitizedCodexOAuthAuth,
-} from "./codex-auth-file.ts";
 
 const heldOAuthLockPaths = new Set<string>();
-const CODEX_OAUTH_JWKS = createRemoteJWKSet(new URL(`${CODEX_OAUTH_ISSUER}/.well-known/jwks.json`));
-
-async function verifiedCodexOAuthJwtAccountId(token: string): Promise<string | undefined> {
-  try {
-    const { payload } = await jwtVerify(token, CODEX_OAUTH_JWKS, {
-      issuer: CODEX_OAUTH_ISSUER,
-      algorithms: ["RS256"],
-    });
-    const claims = asObject(payload["https://api.openai.com/auth"]);
-    return typeof claims?.chatgpt_account_id === "string" && claims.chatgpt_account_id
-      ? claims.chatgpt_account_id
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function writeJsonAtomically(path: string, value: JsonObject): void {
   const directory = dirname(path);
@@ -67,6 +36,11 @@ function writeJsonAtomically(path: string, value: JsonObject): void {
   } finally {
     rmSync(temporary, { force: true });
   }
+}
+
+/** Atomically replace a Codex auth.json with 0600 permissions. */
+export function writeCodexOAuthAuthFile(path: string, auth: JsonObject): void {
+  writeJsonAtomically(path, auth);
 }
 
 function lockPath(sourcePath: string): string {
@@ -206,98 +180,3 @@ export async function acquireCodexOAuthAuthLock(
   throw new Error("timed out acquiring the Codex OAuth auth lock");
 }
 
-export async function syncCodexOAuthAuthFile(
-  sourcePath: string | undefined,
-  childPath: string,
-  heldLockPath?: string,
-  expectedRefreshToken?: string,
-  expectedAccessToken?: string,
-  expectedSourceAuth?: JsonObject,
-): Promise<boolean> {
-  if (!sourcePath) return true;
-  const child = readCodexOAuthAuthFile(childPath);
-  if (!child) return false;
-  const lock = heldLockPath ? undefined : await acquireCodexOAuthAuthLock(sourcePath, undefined, 250, 10);
-  let result: boolean;
-  let cleanupError: unknown;
-  try {
-    result = await (async () => {
-      const source = readJsonFile(sourcePath);
-      if (!source) return false;
-      if (source.auth_mode !== child.auth_mode) return false;
-      const sourceTokens = asObject(source.tokens);
-      const childTokens = asObject(child.tokens);
-      const sourceAccountId = codexOAuthJwtAccountId(source);
-      const childAccountId = codexOAuthJwtAccountId(child);
-      const sourceDeclaredAccountId =
-        typeof sourceTokens?.account_id === "string" ? sourceTokens.account_id : undefined;
-      const childDeclaredAccountId = typeof childTokens?.account_id === "string" ? childTokens.account_id : undefined;
-      const sourceAccessToken = typeof sourceTokens?.access_token === "string" ? sourceTokens.access_token : undefined;
-      const childAccessToken = typeof childTokens?.access_token === "string" ? childTokens.access_token : undefined;
-      const sourceAccessAccountId = codexOAuthJwtAccountIdFromToken(sourceAccessToken);
-      const childAccessAccountId = codexOAuthJwtAccountIdFromToken(childAccessToken);
-      if (
-        !sourceTokens ||
-        !childTokens ||
-        typeof sourceTokens.id_token !== "string" ||
-        typeof childTokens.id_token !== "string" ||
-        !sourceAccountId ||
-        sourceAccountId !== childAccountId ||
-        (sourceDeclaredAccountId && sourceDeclaredAccountId !== sourceAccountId) ||
-        (childDeclaredAccountId && childDeclaredAccountId !== sourceAccountId) ||
-        (isCodexOAuthJwt(sourceAccessToken) && sourceAccessAccountId !== sourceAccountId)
-      )
-        return false;
-      if (expectedSourceAuth && JSON.stringify(source) !== JSON.stringify(expectedSourceAuth)) return false;
-      if (expectedRefreshToken && codexOAuthRefreshToken(source) !== expectedRefreshToken) return false;
-      if (expectedAccessToken && codexOAuthAccessToken(source) !== expectedAccessToken) return false;
-      const sourceRefreshToken = codexOAuthRefreshToken(source);
-      const childRefreshToken = codexOAuthRefreshToken(child);
-      const refreshTokenChanged = childRefreshToken !== sourceRefreshToken;
-      const childIdTokenChanged = childTokens.id_token !== sourceTokens.id_token;
-      const verifiedChildIdAccount = childIdTokenChanged
-        ? await verifiedCodexOAuthJwtAccountId(childTokens.id_token)
-        : sourceAccountId;
-      if (childIdTokenChanged && verifiedChildIdAccount !== sourceAccountId) return false;
-      const childAccessTokenChanged = childAccessToken !== sourceAccessToken;
-      const verifiedChildAccessAccount =
-        childAccessTokenChanged && childAccessToken && isCodexOAuthJwt(childAccessToken)
-          ? await verifiedCodexOAuthJwtAccountId(childAccessToken)
-          : childAccessAccountId;
-      const childAccessTokenBound =
-        childAccessToken === sourceAccessToken ||
-        (isCodexOAuthJwt(childAccessToken) && verifiedChildAccessAccount === sourceAccountId);
-      const sanitized = sanitizedCodexOAuthAuth(child);
-      const persistChildTokens = !refreshTokenChanged;
-      const next = {
-        ...source,
-        ...sanitized,
-        ...(childTokens
-          ? {
-              tokens: {
-                ...sourceTokens,
-                ...childTokens,
-                access_token: persistChildTokens && childAccessTokenBound ? childAccessToken : sourceAccessToken,
-                refresh_token: sourceRefreshToken,
-                id_token: persistChildTokens ? childTokens.id_token : sourceTokens.id_token,
-                ...(typeof sourceTokens.account_id === "string" ? { account_id: sourceTokens.account_id } : {}),
-              },
-            }
-          : {}),
-      };
-      if (JSON.stringify(next) === JSON.stringify(source)) return true;
-      writeJsonAtomically(sourcePath, next);
-      return true;
-    })();
-  } finally {
-    if (lock) {
-      try {
-        await lock.release();
-      } catch (error) {
-        cleanupError = error;
-      }
-    }
-  }
-  if (cleanupError) throw cleanupError;
-  return result;
-}

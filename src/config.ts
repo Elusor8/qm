@@ -46,6 +46,10 @@ export interface Config {
   codexModel?: string;
   codexBinPath?: string;
   codexAuthFile?: string;
+  /** Keychain credential id holding the Codex ChatGPT OAuth auth.json (production path). */
+  codexAuthCredential?: string;
+  /** Keychain credential id holding a Claude Code subscription token (production path). */
+  claudeAuthCredential?: string;
   codexProcessEnv: NodeJS.ProcessEnv;
   claudeModel?: string;
   claudeBinPath?: string;
@@ -165,7 +169,9 @@ export function providerKeysPresent(config: Config): ModelProviderAvailability {
     anthropic: Boolean(config.anthropicApiKey),
     openai: Boolean(config.openaiApiKey),
     openrouter: Boolean(config.openrouterApiKey),
-    ...(config.harness === "codex" && config.codexAuthFile ? { codexOAuth: true } : {}),
+    ...(config.harness === "codex" && (config.codexAuthFile || config.codexAuthCredential)
+      ? { codexOAuth: true }
+      : {}),
   };
 }
 
@@ -176,10 +182,13 @@ export function baseModelProviders(config: Config): ModelProviderAvailability | 
 export function harnessCarriedModelAuth(config: Config): ModelProvider | undefined {
   if (
     config.harness === "claude" &&
-    (config.claudeProcessEnv.CLAUDE_CODE_OAUTH_TOKEN || config.claudeProcessEnv.ANTHROPIC_AUTH_TOKEN)
+    (config.claudeAuthCredential ||
+      config.claudeProcessEnv.CLAUDE_CODE_OAUTH_TOKEN ||
+      config.claudeProcessEnv.ANTHROPIC_AUTH_TOKEN)
   )
     return "anthropic";
-  if (config.harness === "codex" && config.codexProcessEnv.CODEX_ACCESS_TOKEN) return "openai";
+  if (config.harness === "codex" && (config.codexAuthCredential || config.codexProcessEnv.CODEX_ACCESS_TOKEN))
+    return "openai";
   return undefined;
 }
 
@@ -622,7 +631,10 @@ function modelProviderEnvStrict(env: NodeJS.ProcessEnv): ModelProvider | undefin
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const harness = harnessEnvStrict(env.HARNESS);
-  const codexAuthCandidate = harness === "codex" ? codexAuthFileForEnv(env, true) : undefined;
+  const codexAuthCredential = env.CODEX_AUTH_CREDENTIAL?.trim() || undefined;
+  const claudeAuthCredential = env.CLAUDE_AUTH_CREDENTIAL?.trim() || undefined;
+  const codexAuthCandidate =
+    harness === "codex" && !codexAuthCredential ? codexAuthFileForEnv(env, true) : undefined;
   const codexOAuthConfigured = Boolean(codexAuthCandidate && readCodexOAuthAuthFile(codexAuthCandidate));
   const secretEnv =
     codexOAuthConfigured && codexAuthCandidate
@@ -632,13 +644,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (missingSecrets.length) {
     throw new Error(`missing or insecure required core secrets: ${missingSecrets.join(", ")}`);
   }
-  if (harness === "codex" && !env.OPENAI_API_KEY?.trim() && !codexOAuthConfigured) {
+  if (harness === "codex" && !env.OPENAI_API_KEY?.trim() && !codexOAuthConfigured && !codexAuthCredential) {
     throw new Error(
-      "HARNESS=codex needs OPENAI_API_KEY or a readable ChatGPT OAuth auth.json via CODEX_AUTH_FILE (or ~/.codex/auth.json)",
+      "HARNESS=codex needs OPENAI_API_KEY, a keychain credential via CODEX_AUTH_CREDENTIAL, or a readable ChatGPT OAuth auth.json via CODEX_AUTH_FILE (or ~/.codex/auth.json)",
     );
   }
   if (env.NODE_ENV === "production" && codexOAuthConfigured) {
-    throw new Error("CODEX_AUTH_FILE is supported for local Codex harnesses only");
+    throw new Error(
+      "CODEX_AUTH_FILE is supported for local Codex harnesses only; production must use CODEX_AUTH_CREDENTIAL (keychain custody)",
+    );
   }
   const modelProvider = modelProviderEnvStrict(env);
   for (const key of ["SESSION_STORE", "RUN_STORE", "ARTIFACT_STORE"] as const) {
@@ -815,6 +829,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.CODEX_MODEL ? { codexModel: env.CODEX_MODEL } : {}),
     ...(env.CODEX_BIN ? { codexBinPath: env.CODEX_BIN } : {}),
     ...(codexOAuthConfigured && codexAuthCandidate ? { codexAuthFile: codexAuthCandidate } : {}),
+    ...(codexAuthCredential ? { codexAuthCredential } : {}),
+    ...(claudeAuthCredential ? { claudeAuthCredential } : {}),
     codexProcessEnv,
     ...(env.CLAUDE_MODEL ? { claudeModel: env.CLAUDE_MODEL } : {}),
     ...(env.CLAUDE_BIN ? { claudeBinPath: env.CLAUDE_BIN } : {}),

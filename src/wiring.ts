@@ -185,6 +185,8 @@ import type { SessionStore } from "./sessions/session-store.ts";
 import { createMockHarness } from "./harness/mock-harness.ts";
 import { createOpenCodeHarness, openCodeHarnessConfigOptions } from "./harness/opencode-harness.ts";
 import { createCodexHarness, codexHarnessConfigOptions } from "./harness/codex-harness.ts";
+import { keychainCodexAuthStore } from "./harness/codex-auth-store.ts";
+import { keychainHarnessAuthEnv } from "./credentials/harness-auth-env.ts";
 import { createClaudeHarness, claudeHarnessConfigOptions } from "./harness/claude-harness.ts";
 import { createPiHarness, piHarnessConfigOptions } from "./harness/pi-harness.ts";
 import { createHarnessRouter, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
@@ -810,8 +812,39 @@ export function buildApp(
         },
       }),
     ],
-    ["codex", createCodexHarness({ ...codexHarnessConfigOptions(config), signals: runSignals, tasks, mcpTools })],
-    ["claude", createClaudeHarness({ ...claudeHarnessConfigOptions(config), signals: runSignals, tasks, mcpTools })],
+    [
+      "codex",
+      createCodexHarness({
+        ...codexHarnessConfigOptions(config),
+        // Keychain custody: the subscription login lives encrypted in its
+        // owner's keychain; core refreshes it centrally and hands the harness
+        // ephemeral derived material. The credential can be (re)registered at
+        // runtime — resolution happens on every load.
+        ...(config.codexAuthCredential && keychain
+          ? { authStore: keychainCodexAuthStore({ keychain, credentialId: config.codexAuthCredential }) }
+          : {}),
+        signals: runSignals,
+        tasks,
+        mcpTools,
+      }),
+    ],
+    [
+      "claude",
+      createClaudeHarness({
+        ...claudeHarnessConfigOptions(config),
+        ...(config.claudeAuthCredential && keychain
+          ? {
+              authEnv: keychainHarnessAuthEnv(keychain, config.claudeAuthCredential, [
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKEN",
+              ]),
+            }
+          : {}),
+        signals: runSignals,
+        tasks,
+        mcpTools,
+      }),
+    ],
     ["mock", createMockHarness()],
   ]);
   const fallbackHarness = config.harness as HarnessId;

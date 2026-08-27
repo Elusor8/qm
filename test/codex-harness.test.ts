@@ -7,7 +7,6 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -35,7 +34,7 @@ import type { ScopeId, Session, SessionEntry } from "../src/types.ts";
 import { createMemoryTaskStore } from "../src/tasks/memory-task-store.ts";
 import { CodexAppServer, redactCodexDiagnostics } from "../src/harness/codex-app-server.ts";
 import { DEFAULT_CODEX_MODEL_ID } from "../src/model/pi-models.ts";
-import { readCodexOAuthAuthFile, syncCodexOAuthAuthFile } from "../src/harness/codex-auth.ts";
+import { readCodexOAuthAuthFile } from "../src/harness/codex-auth.ts";
 import { acquireCodexOAuthAuthLock } from "../src/harness/codex-auth.ts";
 
 const replaySmokeItems = [
@@ -556,7 +555,7 @@ test("Codex materializes API-key auth into its isolated home, and never an ambie
   );
 });
 
-test("Codex materializes ChatGPT OAuth auth without an API-key override and preserves unverified replacements", async (t) => {
+test("Codex materializes ChatGPT OAuth auth as ephemeral child material without the refresh token", async (t) => {
   const source = mkdtempSync(join(tmpdir(), "qm-codex-oauth-source-"));
   const jail = mkdtempSync(join(tmpdir(), "qm-codex-oauth-jail-"));
   t.after(() => {
@@ -597,86 +596,28 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pres
     oauthAccessToken("account-before", "before"),
   );
   assert.equal((childAuth.tokens as Record<string, unknown>).account_id, "account-before");
+  // The child never receives the long-lived credential: only the store refreshes.
+  assert.equal((childAuth.tokens as Record<string, unknown>).refresh_token, undefined);
+  // Nothing a child writes ever flows back to the source of truth.
   writeFileSync(
     childAuthFile,
     JSON.stringify({
       ...childAuth,
       tokens: {
         access_token: oauthAccessToken("account-before", "after"),
-        refresh_token: "refresh-after",
+        refresh_token: "refresh-forged",
         account_id: "account-before",
         id_token: oauthIdToken("account-before"),
       },
     }),
   );
-  const lock = await acquireCodexOAuthAuthLock(authFile);
-  try {
-    await syncCodexOAuthAuthFile(authFile, childAuthFile, lock.path);
-    const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-    assert.equal(persisted.OPENAI_API_KEY, "ambient-api-key");
-    assert.equal(
-      (persisted.tokens as Record<string, unknown>).access_token,
-      oauthAccessToken("account-before", "before"),
-    );
-    assert.equal((persisted.tokens as Record<string, unknown>).refresh_token, "refresh-before");
-    assert.equal((persisted.tokens as Record<string, unknown>).id_token, oauthIdToken("account-before"));
-  } finally {
-    await lock.release();
-  }
-  writeFileSync(
-    authFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "access-latest",
-        refresh_token: "refresh-latest",
-        account_id: "account-before",
-        id_token: oauthIdToken("account-before"),
-      },
-    }),
+  const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
+  assert.equal((persisted.tokens as Record<string, unknown>).refresh_token, "refresh-before");
+  assert.equal(
+    (persisted.tokens as Record<string, unknown>).access_token,
+    oauthAccessToken("account-before", "before"),
   );
-  writeFileSync(
-    childAuthFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "stale-access",
-        refresh_token: "refresh-after",
-        account_id: "account-before",
-        id_token: oauthIdToken("account-before"),
-      },
-    }),
-  );
-  await syncCodexOAuthAuthFile(authFile, childAuthFile, undefined, "refresh-before");
-  const latest = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-  assert.equal((latest.tokens as Record<string, unknown>).access_token, "access-latest");
-  writeFileSync(
-    authFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "access-newest",
-        refresh_token: "refresh-stable",
-        account_id: "account-before",
-        id_token: oauthIdToken("account-before"),
-      },
-    }),
-  );
-  writeFileSync(
-    childAuthFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "stale-access",
-        refresh_token: "refresh-stable",
-        account_id: "account-before",
-        id_token: oauthIdToken("account-before"),
-      },
-    }),
-  );
-  await syncCodexOAuthAuthFile(authFile, childAuthFile, undefined, "refresh-stable", "access-before");
-  const stable = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-  assert.equal((stable.tokens as Record<string, unknown>).access_token, "access-newest");
+  // A stale lock left behind by a dead process is recovered, not honored forever.
   const liveLock = `${authFile}.lock`;
   writeFileSync(liveLock, String(process.pid));
   utimesSync(liveLock, new Date(0), new Date(0));
@@ -684,8 +625,6 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pres
   assert.equal(recoveredLock.isHeld(), true);
   await recoveredLock.release();
   assert.equal(existsSync(liveLock), false);
-  const liveLockSafe = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-  assert.equal((liveLockSafe.tokens as Record<string, unknown>).access_token, "access-newest");
 
   const defaultSource = mkdtempSync(join(tmpdir(), "qm-codex-oauth-default-source-"));
   const defaultJail = mkdtempSync(join(tmpdir(), "qm-codex-oauth-default-jail-"));
@@ -711,6 +650,7 @@ test("Codex materializes ChatGPT OAuth auth without an API-key override and pres
   assert.equal(codexChildEnv(defaultEnv, defaultJail).OPENAI_API_KEY, undefined);
   assert.equal(existsSync(join(prepareCodexHome(defaultEnv, defaultJail), "auth.json")), true);
 });
+
 
 test("Codex diagnostics redact credential-shaped stderr", () => {
   assert.equal(
@@ -809,140 +749,13 @@ test("Codex rejects OAuth auth files without a trusted account claim", (t) => {
   assert.equal(readCodexOAuthAuthFile(authFile), null);
 });
 
-test("Codex does not persist OAuth refreshes without a trusted account claim", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-refresh-test-"));
-  const source = join(dir, "source.json");
-  const child = join(dir, "child.json");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(
-    source,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: { access_token: "source-access", refresh_token: "source-refresh", account_id: "same" },
-    }),
-    { mode: 0o600 },
-  );
-  writeFileSync(
-    child,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: { access_token: "child-access", refresh_token: "child-refresh", account_id: "same" },
-    }),
-    { mode: 0o600 },
-  );
-  await syncCodexOAuthAuthFile(source, child);
-  assert.equal(
-    (JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>).access_token,
-    "source-access",
-  );
-});
 
-test("Codex does not persist OAuth tokens for a different declared account", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-token-test-"));
-  const source = join(dir, "source.json");
-  const child = join(dir, "child.json");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(
-    source,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "source-access",
-        refresh_token: "source-refresh",
-        account_id: "same",
-        id_token: oauthIdToken("same"),
-      },
-    }),
-    { mode: 0o600 },
-  );
-  writeFileSync(
-    child,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "source-access",
-        refresh_token: "child-refresh",
-        account_id: "different",
-        id_token: oauthIdToken("same"),
-      },
-    }),
-    { mode: 0o600 },
-  );
-  assert.equal(await syncCodexOAuthAuthFile(source, child), false);
-  assert.equal(
-    (JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>).refresh_token,
-    "source-refresh",
-  );
-});
 
-test("Codex does not persist an access token for a different access-token account", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-access-test-"));
-  const source = join(dir, "source.json");
-  const child = join(dir, "child.json");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(
-    source,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: oauthAccessToken("same"),
-        refresh_token: "source-refresh",
-        id_token: oauthIdToken("same"),
-      },
-    }),
-    { mode: 0o600 },
-  );
-  writeFileSync(
-    child,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: oauthAccessToken("different"),
-        refresh_token: "child-refresh",
-        id_token: oauthIdToken("same"),
-      },
-    }),
-    { mode: 0o600 },
-  );
-  assert.equal(await syncCodexOAuthAuthFile(source, child), true);
-  const persisted = JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>;
-  assert.equal(persisted.access_token, oauthAccessToken("same"));
-  assert.equal(persisted.refresh_token, "source-refresh");
-});
 
-test("Codex does not persist an opaque refresh-token replacement", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-unbound-refresh-token-test-"));
-  const source = join(dir, "source.json");
-  const child = join(dir, "child.json");
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(
-    source,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: oauthAccessToken("same"),
-        refresh_token: "source-refresh",
-        id_token: oauthIdToken("same"),
-      },
-    }),
-    { mode: 0o600 },
-  );
-  writeFileSync(
-    child,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: oauthAccessToken("same"),
-        refresh_token: "child-refresh",
-        id_token: oauthIdToken("same"),
-      },
-    }),
-    { mode: 0o600 },
-  );
-  assert.equal(await syncCodexOAuthAuthFile(source, child), true);
-  const persisted = JSON.parse(readFileSync(source, "utf8")).tokens as Record<string, unknown>;
-  assert.equal(persisted.refresh_token, "source-refresh");
-});
+
+
+
+
 
 test("Codex diagnostics redact malformed app-server output at the protocol boundary", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "qm-codex-malformed-test-"));
@@ -1224,54 +1037,7 @@ test("Codex preserves OAuth auth before discarding a failed startup", async (t) 
   assert.equal((persisted.tokens as Record<string, unknown>).access_token, "startup-access-before");
 });
 
-test("cancelling an OAuth startup lock wait prevents the provider from starting", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-cancel-startup-oauth-test-"));
-  const authFile = join(dir, "auth.json");
-  const lockFile = `${authFile}.lock`;
-  writeFileSync(
-    authFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "cancel-access",
-        refresh_token: "cancel-refresh",
-        account_id: "cancel-account",
-        id_token: oauthIdToken("cancel-account"),
-      },
-    }),
-  );
-  chmodSync(authFile, 0o600);
-  writeFileSync(lockFile, String(process.pid));
-  const harness = createCodexHarness({
-    binaryPath: nonresponsiveCodexBinary(dir),
-    env: { CODEX_AUTH_FILE: authFile, PATH: process.env.PATH },
-    turnWallClockMs: 3_000,
-  });
-  t.after(async () => {
-    unlinkSync(lockFile);
-    await harness.turns.close?.();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const cancel = new AbortController();
-  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
-  const turn = harness.turns.runTurn({
-    session: { id: "cancel-startup-oauth" } as Session,
-    input: "hi",
-    systemPrompt: "be concise",
-    history: [],
-    tools: {} as HarnessTurnInput["tools"],
-    scopeLabel: scope,
-    orgScopeId: scope,
-    cancel: cancel.signal,
-    emit: async (entry) =>
-      ({ ...entry, sessionId: "cancel-startup-oauth", seq: 1, createdAt: Date.now() }) as SessionEntry,
-    recordModelCall: () => {},
-  });
-  setTimeout(() => cancel.abort(), 50);
-  assert.deepEqual(await turn, { reply: "", stopped: true });
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(existsSync(join(dir, "starts")), false);
-});
+
 
 test("cancelling an OAuth startup after spawn closes the provider", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "qm-codex-cancel-startup-child-test-"));
@@ -1360,61 +1126,7 @@ test("cancelling a pending Codex turn/start stops and closes the runtime", async
   assert.equal(readFileSync(join(dir, "closed"), "utf8"), "closed");
 });
 
-test("OAuth turns serialize shared auth ownership and cancel a waiting contender", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-turn-lock-test-"));
-  const authFile = join(dir, "auth.json");
-  writeFileSync(
-    authFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      tokens: {
-        access_token: "shared-access",
-        refresh_token: "shared-refresh",
-        account_id: "shared-account",
-        id_token: oauthIdToken("shared-account"),
-      },
-    }),
-  );
-  chmodSync(authFile, 0o600);
-  const first = createCodexHarness({
-    binaryPath: oauthTurnBinary(dir, "first", 250),
-    env: { CODEX_AUTH_FILE: authFile },
-    turnWallClockMs: 3_000,
-  });
-  const second = createCodexHarness({
-    binaryPath: oauthTurnBinary(dir, "second", 30),
-    env: { CODEX_AUTH_FILE: authFile },
-    turnWallClockMs: 3_000,
-  });
-  t.after(async () => {
-    await first.turns.close?.();
-    await second.turns.close?.();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const scope = { kind: "org", id: "test" } as unknown as ScopeId;
-  const turnInput = (id: string, cancel?: AbortSignal): HarnessTurnInput => ({
-    session: { id } as Session,
-    input: id,
-    systemPrompt: "be concise",
-    history: [],
-    tools: {} as HarnessTurnInput["tools"],
-    scopeLabel: scope,
-    orgScopeId: scope,
-    ...(cancel ? { cancel } : {}),
-    emit: async (entry) => ({ ...entry, sessionId: id, seq: 1, createdAt: Date.now() }) as SessionEntry,
-    recordModelCall: () => {},
-  });
-  const firstTurn = first.turns.runTurn(turnInput("first-turn"));
-  await new Promise((resolve) => setTimeout(resolve, 70));
-  const controller = new AbortController();
-  const secondTurn = second.turns.runTurn(turnInput("second-turn", controller.signal));
-  setTimeout(() => controller.abort(), 50);
-  assert.deepEqual(await secondTurn, { reply: "", stopped: true });
-  assert.equal((await firstTurn).reply, "first");
-  assert.equal(readFileSync(join(dir, "oauth-events"), "utf8"), "first\n");
-  const persisted = JSON.parse(readFileSync(authFile, "utf8")) as Record<string, unknown>;
-  assert.equal((persisted.tokens as Record<string, unknown>).access_token, "shared-access");
-});
+
 
 test("Codex fails closed when OAuth auth is removed after startup", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "qm-codex-oauth-delete-test-"));
@@ -1456,7 +1168,7 @@ test("Codex fails closed when OAuth auth is removed after startup", async (t) =>
     });
   assert.equal((await run("before-delete")).reply, "delete");
   rmSync(authFile);
-  await assert.rejects(run("after-delete"), /auth\.json is unavailable/);
+  await assert.rejects(run("after-delete"), /OAuth auth is unavailable/);
 });
 
 test("Codex app-server exits reject turns without unhandled rejections", async (t) => {
