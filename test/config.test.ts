@@ -498,20 +498,19 @@ test("an unknown DEPLOY_PROVIDER still falls back to docker", () => {
   assert.equal(loadConfig({ DEPLOY_PROVIDER: "nope" }).deployProvider, "docker");
 });
 
-test("SANDBOX_BACKEND=porter locates the API the same way the deploy provider does and keeps its own token", () => {
+test("SANDBOX_BACKEND=porter locates the API and shares the deploy provider's token", () => {
   assert.throws(
-    () => loadConfig({ SANDBOX_BACKEND: "porter", PORTER_SANDBOX_TOKEN: "tok" }),
+    () => loadConfig({ SANDBOX_BACKEND: "porter", PORTER_DEPLOY_API_TOKEN: "tok" }),
     /PORTER_DEPLOY_PROJECT_ID/,
   );
   const inCluster = loadConfig({
     SANDBOX_BACKEND: "porter",
     DEPLOY_PROVIDER: "porter",
-    PORTER_SANDBOX_TOKEN: "sb-tok",
-    PORTER_DEPLOY_API_TOKEN: "dep-tok",
+    PORTER_DEPLOY_API_TOKEN: "tok",
     PORTER_CLUSTER_ID: "3",
     PORTER_SANDBOX_TTL_SEC: "120",
   });
-  assert.equal(inCluster.porterSandbox.token, "sb-tok");
+  assert.equal(inCluster.porterSandbox.token, "tok");
   assert.equal(inCluster.porterSandbox.ttlSec, 120);
-  assert.equal(inCluster.porterDeploy.token, "dep-tok");
+  assert.equal(inCluster.porterDeploy.token, "tok");
 });

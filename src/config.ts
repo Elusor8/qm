@@ -355,7 +355,7 @@ function porterDeployEnv(env: NodeJS.ProcessEnv): PorterDeployEnv {
 }
 
 function porterSandboxEnv(env: NodeJS.ProcessEnv): PorterSandboxEnv {
-  const token = env.PORTER_SANDBOX_TOKEN;
+  const token = env.PORTER_DEPLOY_API_TOKEN;
   const baseUrl = porterApiBaseUrl(env);
   const ttlSec = numEnvStrict("PORTER_SANDBOX_TTL_SEC", env.PORTER_SANDBOX_TTL_SEC);
   return {

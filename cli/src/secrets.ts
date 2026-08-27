@@ -128,8 +128,16 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
   {
     name: "PORTER_DEPLOY_API_TOKEN",
     service: "core",
-    required: { when: { kind: "env-equals", service: "core", name: "DEPLOY_PROVIDER", value: "porter" } },
-    description: "Porter API token used only by qm's opt-in per-deployment app publisher.",
+    required: {
+      when: {
+        kind: "any",
+        conditions: [
+          { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "porter" },
+          { kind: "env-equals", service: "core", name: "DEPLOY_PROVIDER", value: "porter" },
+        ],
+      },
+    },
+    description: "Porter API token for the sandbox backend and the per-deployment app publisher.",
   },
   {
     name: "SPRITES_TOKEN",
@@ -144,12 +152,6 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     required: { when: { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "smolmachines" } },
     description: "smolmachines API key for the agent-computer substrate.",
     generate: "create an API key in the smolmachines console (https://smolmachines.com/console)",
-  },
-  {
-    name: "PORTER_SANDBOX_TOKEN",
-    service: "core",
-    required: { when: { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "porter" } },
-    description: "Porter API token for the sandbox backend.",
   },
   {
     name: "DATABASE_URL",

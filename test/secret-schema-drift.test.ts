@@ -97,20 +97,15 @@ test("production rejects weak encryption key material for managed credentials", 
   assert.deepEqual(validateCoreSecretEnv({ ...env, CONNECTOR_SECRET_KEY: "short" }), ["CONNECTOR_SECRET_KEY"]);
 });
 
-test("porter sandbox backend requires PORTER_SANDBOX_TOKEN", () => {
-  const missing = validateCoreSecretEnv({ SANDBOX_BACKEND: "porter" } as NodeJS.ProcessEnv);
-  assert.ok(missing.includes("PORTER_SANDBOX_TOKEN"));
-  const ok = validateCoreSecretEnv({ SANDBOX_BACKEND: "porter", PORTER_SANDBOX_TOKEN: "t-1" } as NodeJS.ProcessEnv);
-  assert.ok(!ok.includes("PORTER_SANDBOX_TOKEN"));
-});
-
-test("each porter role demands its own token, matching the CLI's unconditional env-equals rules", () => {
+test("both porter roles share PORTER_DEPLOY_API_TOKEN", () => {
+  assert.deepEqual(validateCoreSecretEnv({ SANDBOX_BACKEND: "porter" } as NodeJS.ProcessEnv), ["PORTER_DEPLOY_API_TOKEN"]);
+  assert.deepEqual(validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter" } as NodeJS.ProcessEnv), ["PORTER_DEPLOY_API_TOKEN"]);
   assert.deepEqual(
-    validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter", PORTER_SANDBOX_TOKEN: "t" } as NodeJS.ProcessEnv),
-    ["PORTER_DEPLOY_API_TOKEN"],
-  );
-  assert.deepEqual(
-    validateCoreSecretEnv({ SANDBOX_BACKEND: "porter", PORTER_DEPLOY_API_TOKEN: "t" } as NodeJS.ProcessEnv),
-    ["PORTER_SANDBOX_TOKEN"],
+    validateCoreSecretEnv({
+      SANDBOX_BACKEND: "porter",
+      DEPLOY_PROVIDER: "porter",
+      PORTER_DEPLOY_API_TOKEN: "t-1",
+    } as NodeJS.ProcessEnv),
+    [],
   );
 });
