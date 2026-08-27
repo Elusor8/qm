@@ -57,13 +57,3 @@ export async function readTree(
   }
   return out;
 }
-
-export async function writeTree(
-  write: (absPath: string, data: Uint8Array) => Promise<void>,
-  root: string,
-  dir: string,
-): Promise<void> {
-  for (const f of await readTree(dir, { tolerateMissing: true })) {
-    await write(posixJoin(root, normalizeRelPath(f.path)), bytes(f.data));
-  }
-}

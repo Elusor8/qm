@@ -3,8 +3,7 @@ import { LRUCache } from "lru-cache";
 import { NotFoundError } from "porter-sandbox";
 import type { Deployment, DeploymentVersion } from "./deploy-store.ts";
 import type { DeployEndpoint, DeployProvider } from "./deploy-provider.ts";
-import { writeTree } from "./deploy-fs.ts";
-import { waitAppReady } from "./app-ready.ts";
+import { waitAppReady, writeTree } from "./shared-deploy-provider.ts";
 import {
   createPorterClient,
   createPorterExec,

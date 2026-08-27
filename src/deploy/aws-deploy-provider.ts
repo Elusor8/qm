@@ -1,11 +1,9 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { LRUCache } from "lru-cache";
 import { orgId as configOrgId } from "../config.ts";
 import { AssumeRoleCommand, STSClient } from "@aws-sdk/client-sts";
 import type { Deployment, DeploymentVersion } from "./deploy-store.ts";
 import type { DeployEndpoint, DeployProvider, DeployReconcileInput } from "./deploy-provider.ts";
-import { writeTree } from "./deploy-fs.ts";
-import { waitAppReady } from "./app-ready.ts";
+import { bytes, normalizeRelPath, posixJoin, readTree } from "./deploy-fs.ts";
 import { AwsApiError, createMicrovmApi, createMicrovmClient, type AwsMicrovmApi } from "../sandbox/aws-microvm-api.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
@@ -33,9 +31,11 @@ const READY_PATH = `${APP_DIR}/.qm-ready`;
 const PID_PATH = "/tmp/qm-app.pid";
 const LOG_PATH = "/tmp/qm-app.log";
 const APP_READY_WINDOW_SEC = 60;
+const APP_READY_EXEC_TIMEOUT_SEC = 90;
 const APP_PORT_RELEASE_TICKS = 40;
 const APP_START_EXEC_TIMEOUT_SEC = 60;
 const EXIT_APP_PORT_HELD = 97;
+const EXIT_APP_EXITED = 98;
 
 const LISTENING_ON_APP_PORT = (port: number): string =>
   `listening() { curl -s -o /dev/null --max-time 1 http://127.0.0.1:${port}/; [ "$?" != "7" ]; }`;
@@ -100,7 +100,7 @@ export function createAwsDeployProvider(opts: AwsDeployProviderOptions): DeployP
   const store = opts.store ?? createMemoryMap<StoredDeployBody>();
   const launchQueue = createKeyedQueue<string>();
   const advisoryLock = opts.advisoryLock ?? createNoopAdvisoryLock();
-  const resolveCache = new LRUCache<string, DeployEndpoint>({ max: 500, ttl: RESOLVE_CACHE_MS });
+  const resolveCache = new Map<string, { endpoint: DeployEndpoint; untilMs: number }>();
   const inflightResolves = new Map<string, Promise<DeployEndpoint | null>>();
   const resolveGens = new Map<string, number>();
   const bumpResolveGen = (id: string): void => {
@@ -415,6 +415,15 @@ export function createAwsDeployProvider(opts: AwsDeployProviderOptions): DeployP
     if (r.code !== 0) throw new Error(`aws deploy git checkout failed: ${r.stderr.slice(0, 300)}`);
   }
 
+  async function writeFiles(
+    id: string,
+    endpoint: string,
+    root: string,
+    files: Array<{ path: string; data: string | Uint8Array }>,
+  ): Promise<void> {
+    for (const f of files) await writeAbs(id, endpoint, posixJoin(root, normalizeRelPath(f.path)), bytes(f.data));
+  }
+
   async function startApp(id: string, endpoint: string, version: DeploymentVersion): Promise<void> {
     const envExports = Object.entries(version.env ?? {})
       .filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
@@ -442,16 +451,28 @@ export function createAwsDeployProvider(opts: AwsDeployProviderOptions): DeployP
       );
     }
     if (r.code !== 0) throw new Error(`aws deploy app start failed: ${r.stderr.slice(0, 300)}`);
-    await waitAppReadyOn(id, endpoint);
+    await waitAppReady(id, endpoint);
   }
 
-  const waitAppReadyOn = (id: string, endpoint: string): Promise<void> =>
-    waitAppReady((script, timeoutSec) => execRaw(id, endpoint, script, timeoutSec), {
-      appPort,
-      windowSec: APP_READY_WINDOW_SEC,
-      pidPath: PID_PATH,
-      logPath: LOG_PATH,
-    });
+  async function waitAppReady(id: string, endpoint: string): Promise<void> {
+    const probe =
+      `pid=$(cat ${shq(PID_PATH)} 2>/dev/null || true); died=0; ` +
+      `end=$(( $(date +%s) + ${APP_READY_WINDOW_SEC} )); ` +
+      `while [ "$(date +%s)" -lt "$end" ]; do ` +
+      `curl -s --max-time 2 -o /dev/null http://127.0.0.1:${appPort}/ && exit 0; ` +
+      `kill -0 -"$pid" 2>/dev/null || died=1; ` +
+      `sleep 0.5; done; [ "$died" = 1 ] && exit ${EXIT_APP_EXITED}; exit 1`;
+    const r = await execRaw(id, endpoint, probe, APP_READY_EXEC_TIMEOUT_SEC);
+    if (r.code === 0) return;
+    const log = await execRaw(id, endpoint, `tail -c 2000 ${shq(LOG_PATH)} 2>/dev/null || true`, 30)
+      .then((out) => `${out.stdout}${out.stderr}`.trim())
+      .catch(() => "");
+    const why =
+      r.code === EXIT_APP_EXITED
+        ? `the version's entrypoint exited without binding port ${appPort}`
+        : `app never listened on port ${appPort} within ${APP_READY_WINDOW_SEC}s`;
+    throw new Error(why + (log ? `; last output from the entrypoint:\n${log}` : "; the entrypoint produced no output"));
+  }
 
   async function materialize(
     d: Deployment,
@@ -464,9 +485,10 @@ export function createAwsDeployProvider(opts: AwsDeployProviderOptions): DeployP
     if (input?.gitBundle && version.commit) {
       await checkoutBundle(id, endpoint, input.gitBundle, version.commit);
     } else {
-      await writeTree((abs, data) => writeAbs(id, endpoint, abs, data), APP_DIR, version.snapshotDir);
+      await writeFiles(id, endpoint, APP_DIR, await readTree(version.snapshotDir, { tolerateMissing: true }));
     }
-    if (version.homeDir) await writeTree((abs, data) => writeAbs(id, endpoint, abs, data), HOME_DIR, version.homeDir);
+    if (version.homeDir)
+      await writeFiles(id, endpoint, HOME_DIR, await readTree(version.homeDir, { tolerateMissing: true }));
     await writeAbs(id, endpoint, READY_PATH, Buffer.from(`${version.commit ?? version.version}\n`));
     if (litestream) {
       await launchQueue(d.id, async () => {
@@ -607,14 +629,19 @@ export function createAwsDeployProvider(opts: AwsDeployProviderOptions): DeployP
 
     async resolveEndpoint(d, _version): Promise<DeployEndpoint | null> {
       const cached = resolveCache.get(d.id);
-      if (cached) return cached;
+      if (cached && Date.now() < cached.untilMs) return cached.endpoint;
       const inflight = inflightResolves.get(d.id);
       if (inflight) return inflight;
       const gen = resolveGens.get(d.id) ?? 0;
       const genCurrent = (): boolean => (resolveGens.get(d.id) ?? 0) === gen;
       const resolve = resolveLive(d, genCurrent)
         .then((endpoint) => {
-          if (endpoint && genCurrent()) resolveCache.set(d.id, endpoint);
+          if (endpoint && genCurrent()) {
+            if (resolveCache.size > 500) {
+              for (const [k, v] of resolveCache) if (Date.now() >= v.untilMs) resolveCache.delete(k);
+            }
+            resolveCache.set(d.id, { endpoint, untilMs: Date.now() + RESOLVE_CACHE_MS });
+          }
           return endpoint;
         })
         .finally(() => {
