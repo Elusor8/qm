@@ -238,11 +238,7 @@ export class CodexAppServer {
       this.pending.delete(id);
       waiter?.reject(error instanceof Error ? error : new Error(String(error)));
     });
-    if (!validate) return result;
-    return result.then((value) => {
-      if (!validate(value)) throw new CodexRpcError("Codex app-server response has an invalid result");
-      return value;
-    });
+    return result;
   }
 
   async notify(method: string, params?: unknown): Promise<void> {

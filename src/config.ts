@@ -14,7 +14,7 @@ import { validateCoreSecretEnv } from "./deployment/secret-schema.ts";
 import { DEFAULT_CAPTURE_QUIET_MS } from "./memory/strategies/per-turn.ts";
 import { parseSecurityPosture, type SecurityPosture } from "./security/security-posture.ts";
 import { slackPluginConfigFromEnv, type SlackPluginConfig } from "./slack/config.ts";
-import { codexAuthFileForEnv, readCodexOAuthAuthFile } from "./harness/codex-auth.ts";
+import { codexAuthFileForEnv, readCodexOAuthAuthFile } from "./harness/codex-auth-file.ts";
 import {
   MODEL_PROVIDERS,
   defaultModelForProvider,

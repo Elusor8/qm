@@ -1,7 +1,13 @@
 import { mkdirSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { baseModelProviders, configuredModelForHarness, harnessCarriedModelAuth, providerKeysPresent, type Config } from "./config.ts";
+import {
+  baseModelProviders,
+  configuredModelForHarness,
+  harnessCarriedModelAuth,
+  providerKeysPresent,
+  type Config,
+} from "./config.ts";
 import type { ServerDeps } from "./api/deps.ts";
 import { createIdentityService, type DeactivationRecord, type IdentityService } from "./identity/identity-service.ts";
 import {

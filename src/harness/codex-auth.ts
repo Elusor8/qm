@@ -2,63 +2,44 @@ import { randomBytes } from "node:crypto";
 import { open as openFile } from "node:fs/promises";
 import {
   chmodSync,
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { swallow } from "../util/errors.ts";
+import {
+  asObject,
+  CODEX_OAUTH_ISSUER,
+  codexOAuthJwtAccountId,
+  codexOAuthJwtAccountIdFromToken,
+  isCodexOAuthJwt,
+  readJsonFile,
+  type JsonObject,
+} from "./codex-auth-file.ts";
 
-type JsonObject = Record<string, unknown>;
+export {
+  codexAuthFileForEnv,
+  codexOAuthAccessToken,
+  codexOAuthRefreshToken,
+  readCodexOAuthAuthFile,
+  sanitizedCodexOAuthAuth,
+} from "./codex-auth-file.ts";
+import {
+  codexOAuthAccessToken,
+  codexOAuthRefreshToken,
+  readCodexOAuthAuthFile,
+  sanitizedCodexOAuthAuth,
+} from "./codex-auth-file.ts";
 
-const CODEX_OAUTH_MODES = new Set(["chatgpt", "chatgptAuthTokens"]);
 const heldOAuthLockPaths = new Set<string>();
-const CODEX_OAUTH_ISSUER = "https://auth.openai.com";
 const CODEX_OAUTH_JWKS = createRemoteJWKSet(new URL(`${CODEX_OAUTH_ISSUER}/.well-known/jwks.json`));
-
-function asObject(value: unknown): JsonObject | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
-}
-
-function codexOAuthJwtAccountIdFromToken(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.split(".").length !== 3) return undefined;
-  try {
-    const payload = asObject(JSON.parse(Buffer.from(value.split(".")[1] ?? "", "base64url").toString("utf8")));
-    const claims = payload ? asObject(payload["https://api.openai.com/auth"]) : null;
-    return typeof claims?.chatgpt_account_id === "string" && claims.chatgpt_account_id
-      ? claims.chatgpt_account_id
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isCodexOAuthJwt(value: unknown): boolean {
-  if (typeof value !== "string" || value.split(".").length !== 3) return false;
-  try {
-    const header = asObject(JSON.parse(Buffer.from(value.split(".")[0] ?? "", "base64url").toString("utf8")));
-    const payload = asObject(JSON.parse(Buffer.from(value.split(".")[1] ?? "", "base64url").toString("utf8")));
-    return header?.alg === "RS256" && payload?.iss === CODEX_OAUTH_ISSUER;
-  } catch {
-    return false;
-  }
-}
-
-function codexOAuthJwtAccountId(value: unknown): string | undefined {
-  const auth = asObject(value);
-  const tokens = auth ? asObject(auth.tokens) : null;
-  return codexOAuthJwtAccountIdFromToken(tokens?.id_token);
-}
 
 async function verifiedCodexOAuthJwtAccountId(token: string): Promise<string | undefined> {
   try {
@@ -73,83 +54,6 @@ async function verifiedCodexOAuthJwtAccountId(token: string): Promise<string | u
   } catch {
     return undefined;
   }
-}
-
-function readJsonFile(path: string): JsonObject | null {
-  try {
-    return asObject(JSON.parse(readFileSync(path, "utf8")));
-  } catch {
-    return null;
-  }
-}
-
-function expandPath(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
-  return resolve(path);
-}
-
-export function codexAuthFileForEnv(env: NodeJS.ProcessEnv, includeDefault = false): string | undefined {
-  const explicit = env.CODEX_AUTH_FILE?.trim();
-  if (explicit) return expandPath(explicit);
-  if (!includeDefault) return undefined;
-  const codexHome = env.CODEX_HOME?.trim();
-  if (codexHome) return join(expandPath(codexHome), "auth.json");
-  const home = env.HOME?.trim();
-  return home ? join(expandPath(home), ".codex", "auth.json") : undefined;
-}
-
-function isCodexOAuthAuth(value: unknown): value is JsonObject {
-  const auth = asObject(value);
-  if (!auth || typeof auth.auth_mode !== "string" || !CODEX_OAUTH_MODES.has(auth.auth_mode)) return false;
-  const tokens = asObject(auth.tokens);
-  return Boolean(
-    tokens &&
-    typeof tokens.access_token === "string" &&
-    tokens.access_token &&
-    typeof tokens.refresh_token === "string" &&
-    tokens.refresh_token &&
-    codexOAuthJwtAccountId(auth),
-  );
-}
-
-export function readCodexOAuthAuthFile(path: string): JsonObject | null {
-  try {
-    if (statSync(path).mode & 0o077) return null;
-  } catch {
-    return null;
-  }
-  const auth = readJsonFile(path);
-  return isCodexOAuthAuth(auth) ? auth : null;
-}
-
-export function sanitizedCodexOAuthAuth(auth: JsonObject): JsonObject {
-  const copy: JsonObject = {};
-  for (const key of ["auth_mode", "last_refresh", "tokens"] as const) {
-    if (key === "tokens") {
-      const tokens = asObject(auth.tokens);
-      if (tokens) {
-        copy.tokens = Object.fromEntries(
-          ["access_token", "refresh_token", "id_token", "account_id"].flatMap((token) =>
-            typeof tokens[token] === "string" ? [[token, tokens[token]]] : [],
-          ),
-        );
-      }
-    } else if (key in auth) copy[key] = auth[key];
-  }
-  return copy;
-}
-
-export function codexOAuthRefreshToken(value: unknown): string | undefined {
-  const auth = asObject(value);
-  const tokens = auth ? asObject(auth.tokens) : null;
-  return typeof tokens?.refresh_token === "string" && tokens.refresh_token ? tokens.refresh_token : undefined;
-}
-
-export function codexOAuthAccessToken(value: unknown): string | undefined {
-  const auth = asObject(value);
-  const tokens = auth ? asObject(auth.tokens) : null;
-  return typeof tokens?.access_token === "string" && tokens.access_token ? tokens.access_token : undefined;
 }
 
 function writeJsonAtomically(path: string, value: JsonObject): void {
@@ -227,6 +131,7 @@ export async function acquireCodexOAuthAuthLock(
   sourcePath: string,
   signal?: AbortSignal,
   timeoutMs = 120_000,
+  pollMs = 100,
 ): Promise<CodexOAuthAuthLock> {
   const path = lockPath(sourcePath);
   const deadline = Date.now() + timeoutMs;
@@ -293,40 +198,9 @@ export async function acquireCodexOAuthAuthLock(
         const timer = setTimeout(() => {
           signal?.removeEventListener("abort", onAbort);
           resolveWait();
-        }, 100);
+        }, pollMs);
         signal?.addEventListener("abort", onAbort, { once: true });
       });
-    }
-  }
-  throw new Error("timed out acquiring the Codex OAuth auth lock");
-}
-
-type SyncLock = { fd: number; owner: string };
-
-function lockFile(sourcePath: string): SyncLock {
-  const path = lockPath(sourcePath);
-  for (let attempt = 0; attempt < 25; attempt += 1) {
-    try {
-      const fd = openSync(path, "wx", 0o600);
-      const owner = `${process.pid}:${randomBytes(8).toString("hex")}`;
-      try {
-        writeSync(fd, owner);
-        heldOAuthLockPaths.add(path);
-      } catch (error) {
-        closeSync(fd);
-        try {
-          unlinkSync(path);
-        } catch (cleanupError) {
-          swallow("codex: oauth lock creation cleanup", cleanupError);
-        }
-        throw error;
-      }
-      return { fd, owner };
-    } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-      if (code !== "EEXIST") throw error;
-      removeStaleLock(path);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
   }
   throw new Error("timed out acquiring the Codex OAuth auth lock");
@@ -343,7 +217,7 @@ export async function syncCodexOAuthAuthFile(
   if (!sourcePath) return true;
   const child = readCodexOAuthAuthFile(childPath);
   if (!child) return false;
-  const lock = heldLockPath ? undefined : lockFile(sourcePath);
+  const lock = heldLockPath ? undefined : await acquireCodexOAuthAuthLock(sourcePath, undefined, 250, 10);
   let result: boolean;
   let cleanupError: unknown;
   try {
@@ -416,24 +290,12 @@ export async function syncCodexOAuthAuthFile(
       return true;
     })();
   } finally {
-    if (lock !== undefined) {
-      const path = lockPath(sourcePath);
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          if (readFileSync(path, "utf8") !== lock.owner) break;
-          unlinkSync(path);
-          heldOAuthLockPaths.delete(path);
-          break;
-        } catch (error) {
-          if (attempt === 2) cleanupError = error;
-        }
-      }
+    if (lock) {
       try {
-        closeSync(lock.fd);
+        await lock.release();
       } catch (error) {
-        cleanupError ??= error;
+        cleanupError = error;
       }
-      heldOAuthLockPaths.delete(path);
     }
   }
   if (cleanupError) throw cleanupError;

@@ -906,6 +906,12 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
     const onSetupCancel = () => stopSetup(setupCancelled);
     turn.cancel?.addEventListener("abort", onSetupCancel, { once: true });
     const setupTimer = wallMs > 0 ? setTimeout(() => stopSetup(setupTimedOut), wallMs) : undefined;
+    const finishSetup = () => {
+      setupSettled = true;
+      if (setupTimer) clearTimeout(setupTimer);
+      turn.cancel?.removeEventListener("abort", onSetupCancel);
+      releaseSetupUser();
+    };
     const awaitSetup = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, setupStop]);
     let rt: Runtime;
     try {
@@ -915,14 +921,9 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }),
       );
     } catch (error) {
-      setupSettled = true;
-      if (setupTimer) clearTimeout(setupTimer);
-      turn.cancel?.removeEventListener("abort", onSetupCancel);
-      releaseSetupUser();
+      finishSetup();
       await closeIdleRuntime();
-      if (error === setupCancelled) {
-        return { reply: "", stopped: true };
-      }
+      if (error === setupCancelled) return { reply: "", stopped: true };
       throw error;
     }
     let turnAuthLock: CodexOAuthAuthLock | undefined;
@@ -958,6 +959,14 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
       } catch (error) {
         return error;
       }
+    };
+    const failSetup = async (error: unknown): Promise<HarnessTurnResult> => {
+      const releaseError = await releaseTurnAuthError();
+      finishSetup();
+      await closeIdleRuntime();
+      if (releaseError) throw releaseError;
+      if (error === setupCancelled) return { reply: "", stopped: true };
+      throw error;
     };
     try {
       const sourceAuth = authPath ? readCodexOAuthAuthFile(authPath) : null;
@@ -1011,17 +1020,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }
       }
     } catch (error) {
-      const releaseError = await releaseTurnAuthError();
-      setupSettled = true;
-      if (setupTimer) clearTimeout(setupTimer);
-      turn.cancel?.removeEventListener("abort", onSetupCancel);
-      releaseSetupUser();
-      await closeIdleRuntime();
-      if (releaseError) throw releaseError;
-      if (error === setupCancelled) {
-        return { reply: "", stopped: true };
-      }
-      throw error;
+      return failSetup(error);
     }
     let ref!: ToolContextRef;
     let toolAbort!: AbortController;
@@ -1076,15 +1075,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         },
       };
     } catch (error) {
-      const releaseError = await releaseTurnAuthError();
-      setupSettled = true;
-      if (setupTimer) clearTimeout(setupTimer);
-      turn.cancel?.removeEventListener("abort", onSetupCancel);
-      releaseSetupUser();
-      await closeIdleRuntime();
-      if (releaseError) throw releaseError;
-      if (error === setupCancelled) return { reply: "", stopped: true };
-      throw error;
+      return failSetup(error);
     }
     let started: { thread: { id: string }; model?: string };
     try {
@@ -1110,17 +1101,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }),
       );
     } catch (error) {
-      const releaseError = await releaseTurnAuthError();
-      setupSettled = true;
-      if (setupTimer) clearTimeout(setupTimer);
-      turn.cancel?.removeEventListener("abort", onSetupCancel);
-      releaseSetupUser();
-      await closeIdleRuntime();
-      if (releaseError) throw releaseError;
-      if (error === setupCancelled) {
-        return { reply: "", stopped: true };
-      }
-      throw error;
+      return failSetup(error);
     }
     let threadId!: string;
     let replay!: ReturnType<typeof replayItems>;
@@ -1141,17 +1122,7 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         }),
       );
     } catch (error) {
-      const releaseError = await releaseTurnAuthError();
-      setupSettled = true;
-      if (setupTimer) clearTimeout(setupTimer);
-      turn.cancel?.removeEventListener("abort", onSetupCancel);
-      releaseSetupUser();
-      await closeIdleRuntime();
-      if (releaseError) throw releaseError;
-      if (error === setupCancelled) {
-        return { reply: "", stopped: true };
-      }
-      throw error;
+      return failSetup(error);
     }
     let resolveCompleted!: (value: CodexTurn) => void;
     let rejectCompleted!: (error: Error) => void;
@@ -1197,21 +1168,10 @@ export function createCodexHarness(opts: CodexHarnessOptions = {}): Harness {
         stopped: false,
       };
     } catch (error) {
-      const releaseError = await releaseTurnAuthError();
-      setupSettled = true;
-      if (setupTimer) clearTimeout(setupTimer);
-      turn.cancel?.removeEventListener("abort", onSetupCancel);
-      releaseSetupUser();
-      await closeIdleRuntime();
-      if (releaseError) throw releaseError;
-      if (error === setupCancelled) return { reply: "", stopped: true };
-      throw error;
+      return failSetup(error);
     }
     active.set(threadId, state);
-    setupSettled = true;
-    if (setupTimer) clearTimeout(setupTimer);
-    turn.cancel?.removeEventListener("abort", onSetupCancel);
-    releaseSetupUser();
+    finishSetup();
     const promptEnvelope = {
       threadStart: {
         ...threadStartRequest,
