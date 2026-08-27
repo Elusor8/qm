@@ -863,7 +863,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       return timed("recall", async () => {
         const out: string[] = [];
         for (const scope of read) {
-          for (const fact of await deps.memory!.query(scope, q, limit)) {
+          for (const fact of await deps.memory!.query(scope, q, limit, { actorId: deps.createdBy })) {
             out.push(read.length > 1 ? `[${scope}] ${fact}` : fact);
           }
         }
@@ -880,7 +880,11 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
     async memoryRemember(facts: string[]): Promise<number | null> {
       const write = deps.memoryAccess?.write;
       if (!deps.memory || !write) return null;
-      return once(() => timed("memory_write", () => deps.memory!.capture(write, facts, Date.now(), deps.createdBy)));
+      return once(() =>
+        timed("memory_write", () =>
+          deps.memory!.capture(write, facts, Date.now(), deps.createdBy, { mode: "explicit", actorId: deps.createdBy }),
+        ),
+      );
     },
 
     async memoryRewrite(content: string): Promise<true | null> {
