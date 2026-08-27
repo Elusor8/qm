@@ -6,7 +6,7 @@ const ID = /^[a-z][a-z0-9-]{0,62}$/;
 const ARG = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 const ENV = /^[A-Z][A-Z0-9_]*$/;
 
-export interface McpMemoryAuthConfig {
+interface McpMemoryAuthConfig {
   clientId: string;
   clientSecret: string;
 }
@@ -26,7 +26,7 @@ export interface McpMemoryOperationConfig {
   idempotencyArg?: string;
 }
 
-export interface McpMemoryProviderConfig {
+interface McpMemoryProviderConfig {
   id: string;
   type: "mcp";
   url: string;

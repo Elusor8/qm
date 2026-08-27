@@ -132,5 +132,3 @@ export function createRoutedMemoryService(opts: {
     },
   };
 }
-
-export type { MemoryCaptureContext, MemoryRecallContext };
