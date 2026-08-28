@@ -104,6 +104,11 @@ test("production boot requires an explicit JWKS URI for custom issuers", () => {
   assert.equal(accepted.status, 0, accepted.stderr);
 });
 
+test("the default absolute session lifetime is 30 days", async () => {
+  const { DEFAULT_SESSION_MAX_TTL_S } = await import("../src/index.ts");
+  assert.equal(DEFAULT_SESSION_MAX_TTL_S, 30 * 24 * 60 * 60);
+});
+
 test("a session TTL above the default max ceiling still boots, but a contradictory pair does not", () => {
   const command = "import('./src/index.ts').then(m => m.bootChecks())";
   const baseEnv: NodeJS.ProcessEnv = {

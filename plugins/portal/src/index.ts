@@ -54,7 +54,10 @@ const PORT = portFromEnv(8097);
 const PUBLIC_URL = (process.env.PORTAL_PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
 const SESSION_SECRET = process.env.PORTAL_SESSION_SECRET;
 const SESSION_TTL_S = Number(process.env.PORTAL_SESSION_TTL_S ?? 28800);
-const SESSION_MAX_TTL_S = Number(process.env.PORTAL_SESSION_MAX_TTL_S ?? Math.max(86400, SESSION_TTL_S));
+export const DEFAULT_SESSION_MAX_TTL_S = 30 * 24 * 60 * 60;
+const SESSION_MAX_TTL_S = Number(
+  process.env.PORTAL_SESSION_MAX_TTL_S ?? Math.max(DEFAULT_SESSION_MAX_TTL_S, SESSION_TTL_S),
+);
 const SESSION_RENEW_AFTER_S = Math.floor(SESSION_TTL_S / 2);
 const COOKIE_DOMAIN = process.env.PORTAL_COOKIE_DOMAIN || undefined;
 const APPS_DOMAIN = process.env.PORTAL_APPS_DOMAIN || undefined;
