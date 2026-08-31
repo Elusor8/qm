@@ -1,7 +1,13 @@
 import { mkdirSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { baseModelProviders, configuredModelForHarness, providerKeysPresent, type Config } from "./config.ts";
+import {
+  baseModelProviders,
+  configuredModelForHarness,
+  harnessCarriedModelAuth,
+  providerKeysPresent,
+  type Config,
+} from "./config.ts";
 import type { ServerDeps } from "./api/deps.ts";
 import { createIdentityService, type DeactivationRecord, type IdentityService } from "./identity/identity-service.ts";
 import {
@@ -132,6 +138,7 @@ import {
 import {
   createKeychain,
   type ConnectorTokenStore,
+  type OAuthToken,
   type Keychain,
   type KeychainAsk,
   type KeychainCredential,
@@ -172,6 +179,8 @@ import { createPostgresEgressAuditSink } from "./admin/postgres-egress-audit-sin
 import { createConsentLinkStore, type ConsentLinkStore, type ConsentLinkRecord } from "./connectors/consent-link.ts";
 import { createModelGateway, type ModelGateway } from "./model/model-gateway.ts";
 import { createModelCredentialStore, type ModelCredentialStore } from "./model/model-credential-store.ts";
+import { refreshChatGPTTokens, refreshClaudeTokens } from "./model/subscription-oauth.ts";
+import { createUserModelCredentialStore, type UserModelCredentialStore } from "./model/user-model-credential-store.ts";
 import { setProviderBaseUrls } from "./model/provider-endpoints.ts";
 import { setCustomProviders } from "./model/custom-providers.ts";
 import { createCustomProviderStore, type CustomProviderStore } from "./model/custom-provider-store.ts";
@@ -181,6 +190,8 @@ import type { SessionStore } from "./sessions/session-store.ts";
 import { createMockHarness } from "./harness/mock-harness.ts";
 import { createOpenCodeHarness, openCodeHarnessConfigOptions } from "./harness/opencode-harness.ts";
 import { createCodexHarness, codexHarnessConfigOptions } from "./harness/codex-harness.ts";
+import { keychainCodexAuthStore } from "./harness/codex-auth-store.ts";
+import { keychainHarnessAuthEnv } from "./credentials/harness-auth-env.ts";
 import { createClaudeHarness, claudeHarnessConfigOptions } from "./harness/claude-harness.ts";
 import { createPiHarness, piHarnessConfigOptions } from "./harness/pi-harness.ts";
 import { createHarnessRouter, resolveRuntimeChoiceDurable } from "./harness/harness-router.ts";
@@ -254,6 +265,7 @@ import {
   auxiliaryModelFor,
   auxiliaryModelForProvider,
   defaultModelForHarness,
+  isHarnessId,
   modelProviderAvailabilityFor,
   type HarnessId,
 } from "./model/pi-models.ts";
@@ -336,6 +348,7 @@ export interface BuiltApp {
   secretDrops: SecretDropStore;
   modelGateway: ModelGateway;
   modelCredentials: ModelCredentialStore;
+  userModelCredentials: UserModelCredentialStore;
   customProviders: CustomProviderStore;
   refreshCustomProviders: () => Promise<void>;
   mcpServers: McpServerStore;
@@ -457,6 +470,7 @@ export function buildApp(
     approvedHarnesses: artifactMap<PersistedApprovedHarnesses>("approved_harness_configs"),
     orgAmbient: artifactMap<PersistedScopedFlag>("org_ambient_flag"),
     interactiveFastMode: artifactMap<PersistedScopedFlag>("interactive_fast_mode_flag"),
+    individualModelAuth: artifactMap<PersistedScopedFlag>("individual_model_auth_flag"),
     webuiModels: artifactMap<PersistedWebuiModels>("webui_model_configs"),
     peopleDirectoryUrls: artifactMap<PersistedPeopleDirectoryUrl>("people_directory_urls"),
     ackEmoji: artifactMap<PersistedAckEmoji>("ack_emoji"),
@@ -717,8 +731,40 @@ export function buildApp(
     grants: artifactMap<KeychainGrant>("keychain_grants"),
     asks: artifactMap<KeychainAsk>("keychain_asks"),
     key: credentialKey,
-    refreshConnector: makeRefresh({ resolveClient }),
+    refreshConnector: (() => {
+      const base = makeRefresh({ resolveClient });
+      // AI subscription logins ride the same connector-refresh machinery:
+      // the keychain calls this single-flight when a token is stale.
+      return async (host: string, token: OAuthToken, ctx?: { accountType?: string; clientRef?: string }) => {
+        if (token.refreshToken && host === "auth.openai.com") {
+          const fresh = await refreshChatGPTTokens(token.refreshToken);
+          return oauthTokenFromUserTokens(fresh);
+        }
+        if (token.refreshToken && host === "claude.ai") {
+          const fresh = await refreshClaudeTokens(token.refreshToken);
+          return oauthTokenFromUserTokens(fresh);
+        }
+        return base(host, token, ctx);
+      };
+    })(),
   });
+  const oauthTokenFromUserTokens = (fresh: {
+    accessToken: string;
+    refreshToken?: string;
+    idToken?: string;
+    accountId?: string;
+    expiresAt?: number;
+  }): OAuthToken => ({
+    accessToken: fresh.accessToken,
+    ...(fresh.refreshToken ? { refreshToken: fresh.refreshToken } : {}),
+    ...(fresh.idToken ? { idToken: fresh.idToken } : {}),
+    ...(fresh.accountId ? { accountId: fresh.accountId } : {}),
+    ...(fresh.expiresAt !== undefined ? { expiresAt: fresh.expiresAt } : {}),
+  });
+  // Per-user AI accounts live in the keychain itself (unified custody):
+  // same encryption, ownership, admin visibility, and removal flows as
+  // every other personal credential.
+  const userModelCredentials = createUserModelCredentialStore({ keychain: credentialStore });
   const keychain: Keychain | undefined = keychainKeyMaterial ? credentialStore : undefined;
   const browserSessionStore: BrowserSessionStore | undefined = keychainKeyMaterial
     ? createBrowserSessionStore({ sessions: artifactMap<StoredBrowserSession>("browser_sessions"), key: credentialKey })
@@ -822,8 +868,39 @@ export function buildApp(
         },
       }),
     ],
-    ["codex", createCodexHarness({ ...codexHarnessConfigOptions(config), signals: runSignals, tasks, mcpTools })],
-    ["claude", createClaudeHarness({ ...claudeHarnessConfigOptions(config), signals: runSignals, tasks, mcpTools })],
+    [
+      "codex",
+      createCodexHarness({
+        ...codexHarnessConfigOptions(config),
+        // Keychain custody: the subscription login lives encrypted in its
+        // owner's keychain; core refreshes it centrally and hands the harness
+        // ephemeral derived material. The credential can be (re)registered at
+        // runtime — resolution happens on every load.
+        ...(config.codexAuthCredential && keychain
+          ? { authStore: keychainCodexAuthStore({ keychain, credentialId: config.codexAuthCredential }) }
+          : {}),
+        signals: runSignals,
+        tasks,
+        mcpTools,
+      }),
+    ],
+    [
+      "claude",
+      createClaudeHarness({
+        ...claudeHarnessConfigOptions(config),
+        ...(config.claudeAuthCredential && keychain
+          ? {
+              authEnv: keychainHarnessAuthEnv(keychain, config.claudeAuthCredential, [
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKEN",
+              ]),
+            }
+          : {}),
+        signals: runSignals,
+        tasks,
+        mcpTools,
+      }),
+    ],
     ["mock", createMockHarness()],
   ]);
   const fallbackHarness = config.harness as HarnessId;
@@ -842,8 +919,11 @@ export function buildApp(
     if (!(await modelCredentials.availability()).openrouter) return undefined;
     return selectableModelCatalog(overrides.modelCredentialFetch);
   };
-  const harness = createHarnessRouter(adapters, adapters.get(fallbackHarness)!, (input) =>
-    resolveRuntimeChoiceDurable(
+  const harness = createHarnessRouter(adapters, adapters.get(fallbackHarness)!, (input) => {
+    if (input.runtimePinned && input.harness && isHarnessId(input.harness) && input.model) {
+      return { harnessId: input.harness, modelId: input.model };
+    }
+    return resolveRuntimeChoiceDurable(
       configStore,
       runtimeOrgScope,
       input.scopeLabel,
@@ -853,8 +933,8 @@ export function buildApp(
         ...(input.model ? { modelId: input.model } : {}),
       },
       hydrateModelCatalog,
-    ),
-  );
+    );
+  });
 
   const leaseTtlMs = config.leaseTtlMs;
   const maxAttempts = config.maxAttempts;
@@ -1028,6 +1108,8 @@ export function buildApp(
     identity,
     resolution,
     config: configStore,
+    defaultHarness: fallbackHarness,
+    userModelCredentials,
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     sessionTapeMode: config.sessionTapeMode,
     sessions,
@@ -1195,6 +1277,7 @@ export function buildApp(
     tasks,
     modelGateway,
     modelCredentials,
+    userModelCredentials,
     customProviders,
     refreshCustomProviders,
     mcpServers,
@@ -1554,6 +1637,7 @@ export function buildApp(
     secretDrops,
     modelGateway,
     modelCredentials,
+    userModelCredentials,
     customProviders,
     refreshCustomProviders,
     mcpServers,
@@ -1611,6 +1695,7 @@ export function serverDeps(
   slackEnvBotToken?: string,
 ): Omit<ServerDeps, "control"> {
   const configuredModel = configuredModelForHarness(config, config.harness);
+  const carriedModelAuth = harnessCarriedModelAuth(config);
   return {
     production: config.production,
     allowUnauthenticatedCore: config.allowUnauthenticatedCore,
@@ -1621,9 +1706,11 @@ export function serverDeps(
     ...(built.replayDedupe ? { replayDedupe: built.replayDedupe } : {}),
     config: built.config,
     ...(configuredModel ? { baseModelDefault: configuredModel } : {}),
+    ...(carriedModelAuth ? { harnessCarriedModelAuth: carriedModelAuth } : {}),
     modelProviders: modelProviderAvailabilityFor(config.harness, providerKeysPresent(config)),
     providerKeys: providerKeysPresent(config),
     modelCredentials: built.modelCredentials,
+    userModelCredentials: built.userModelCredentials,
     customProviders: built.customProviders,
     refreshCustomProviders: built.refreshCustomProviders,
     mcpServers: built.mcpServers,
