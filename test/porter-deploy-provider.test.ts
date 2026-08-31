@@ -17,6 +17,7 @@ const SERVER = [
   "const fs = require('fs');",
   "console.log('server starting');",
   "require('http').createServer((q, s) => {",
+  "  s.setHeader('connection', 'close');",
   "  if (q.url === '/data') return s.end(fs.readFileSync(process.env.DATA_DIR + '/note.txt', 'utf8'));",
   "  s.end('hello from ' + process.cwd() + ' v' + (process.env.APP_VERSION ?? '?'));",
   "}).listen(process.env.PORT);",
@@ -74,7 +75,7 @@ function make(extra: { terminateLag?: number; resolveCacheMs?: number } = {}): v
     appsDomain: "apps.test",
     namePrefix: "qmt",
     appPort,
-    readyWindowSec: 3,
+    readyWindowSec: 10,
     resolveCacheMs: extra.resolveCacheMs ?? 0,
     client: fake.client,
     store,
@@ -243,7 +244,7 @@ test("without an apps domain the cluster-assigned hostname becomes the URL", asy
   const bare = createPorterDeployProvider({
     namePrefix: "qmt",
     appPort,
-    readyWindowSec: 3,
+    readyWindowSec: 10,
     client: fake.client,
     store,
   });

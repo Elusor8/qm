@@ -58,8 +58,6 @@ const SCOPE_TAG = "qm-scope";
 const KIND_TAG = "qm-kind";
 const DEFAULT_PORTER_SANDBOX_IMAGE = "ghcr.io/porter-dev/qm-sandbox:latest";
 
-export type { PorterClientLike, PorterSandboxLike } from "./porter-client.ts";
-
 interface BodyEntry {
   name: string;
   sb: PorterSandboxLike;

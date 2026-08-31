@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -204,15 +204,21 @@ export function installFakePorter(opts: FakePorterOptions = {}): FakePorter {
           const script = body.command[body.command.length - 1] ?? "";
           execScripts.push(script);
           mkdirSync(cur.tmp, { recursive: true });
-          const r = spawnSync("sh", ["-c", remap(cur, script)], {
-            encoding: "buffer",
-            maxBuffer: 128 * 1024 * 1024,
+          const child = spawn("sh", ["-c", remap(cur, script)], {
             env: { ...process.env, ...cur.env, COPYFILE_DISABLE: "1" },
           });
+          const stdout: Buffer[] = [];
+          const stderr: Buffer[] = [];
+          child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+          child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+          const [code, sig] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+            child.on("error", reject);
+            child.on("close", (c, s) => resolve([c, s]));
+          });
           return {
-            stdout: (r.stdout ?? Buffer.alloc(0)).toString("utf8"),
-            stderr: (r.stderr ?? Buffer.alloc(0)).toString("utf8"),
-            exit_code: r.status ?? (r.signal ? 137 : -1),
+            stdout: Buffer.concat(stdout).toString("utf8"),
+            stderr: Buffer.concat(stderr).toString("utf8"),
+            exit_code: code ?? (sig ? 137 : -1),
           };
         },
       },
