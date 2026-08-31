@@ -177,7 +177,7 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
         if (existing) {
           const wantProxy = egressMode === "proxy";
           const hasProxy = existing.sb.tags?.[EGRESS_TAG] === "proxy";
-          if (wantProxy === hasProxy) {
+          if (!wantProxy || hasProxy) {
             scopeByBody.set(existing.name, scope);
             return { name: existing.name, coldStart: false };
           }

@@ -67,7 +67,7 @@ const freeListener = (): void => {
   if (appPort) spawnSync("sh", ["-c", `lsof -ti tcp:${appPort} -sTCP:LISTEN | xargs kill 2>/dev/null; true`]);
 };
 
-function make(extra: { terminateLag?: number; resolveCacheMs?: number } = {}): void {
+function make(extra: { terminateLag?: number; resolveCacheMs?: number; visibility?: "public" | "private" } = {}): void {
   fake?.cleanup();
   fake = installFakePorter(extra.terminateLag ? { terminateLag: extra.terminateLag } : {});
   store = createMemoryMap<StoredPorterDeployBody>();
@@ -77,6 +77,7 @@ function make(extra: { terminateLag?: number; resolveCacheMs?: number } = {}): v
     appPort,
     readyWindowSec: 10,
     resolveCacheMs: extra.resolveCacheMs ?? 0,
+    ...(extra.visibility ? { visibility: extra.visibility } : {}),
     client: fake.client,
     store,
   });
@@ -102,7 +103,7 @@ test("apply serves the app on a stable public domain", async () => {
   const body = fake.bodies()[0]!;
   assert.equal(body.phase, "running");
   assert.deepEqual(body.networking, [
-    { port: appPort, domains: [{ domain: "myapp.apps.test", visibility: "public" }] },
+    { port: appPort, domains: [{ domain: "myapp.apps.test", visibility: "private" }] },
   ]);
   assert.equal(body.tags["qm-deploy"], "dep-1");
   assert.equal(body.env?.APP_VERSION, "1");
@@ -111,6 +112,14 @@ test("apply serves the app on a stable public domain", async () => {
   assert.match(await fetchText("/"), /^hello from .*-app v1$/);
   assert.equal(provider.profile.dataDir, "/data");
   assert.equal(provider.profile.managedScaleToZero, false);
+});
+
+test("explicit public visibility opts the domain out of the private default", async () => {
+  make({ visibility: "public" });
+  await provider.apply(deployment("dep-1b", "shown"), version({ "server.js": SERVER }, "node server.js"));
+  assert.deepEqual(fake.bodies()[0]!.networking, [
+    { port: appPort, domains: [{ domain: "shown.apps.test", visibility: "public" }] },
+  ]);
 });
 
 test("redeploy keeps the domain and the /data volume and retires the old body", async () => {

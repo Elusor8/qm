@@ -65,7 +65,7 @@ export interface PorterDeployProviderOptions {
 export function createPorterDeployProvider(opts: PorterDeployProviderOptions): DeployProvider {
   const appsDomain = opts.appsDomain;
   const image = opts.runnerImage ?? DEFAULT_RUNNER_IMAGE;
-  const visibility = opts.visibility ?? "public";
+  const visibility = opts.visibility ?? "private";
   const prefix = opts.namePrefix ?? "qm";
   const appPort = opts.appPort ?? APP_PORT_DEFAULT;
   const readyWindowSec = opts.readyWindowSec ?? APP_READY_WINDOW_SEC_DEFAULT;
