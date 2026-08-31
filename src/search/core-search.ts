@@ -1,5 +1,4 @@
 import type { Principal } from "../types.ts";
-import { collectBytes } from "../util/bytes.ts";
 
 export const SEARCH_PRINCIPALS_HEADER = "x-qm-principals";
 const SEARCH_DEFAULT_LIMIT = 20;
@@ -127,13 +126,26 @@ export function createHttpSearchBackend(opts: {
       });
       if (!response.ok) throw new Error(`search backend ${opts.name} returned ${response.status}`);
       if (!response.body) throw new Error(`search backend ${opts.name} returned an empty body`);
-      const bytes = await collectBytes(response.body, {
-        maxBytes: SEARCH_RESPONSE_MAX_BYTES,
-        tooLarge: () => new Error(`search backend ${opts.name} response is too large`),
-      });
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > SEARCH_RESPONSE_MAX_BYTES) {
+          await reader.cancel();
+          throw new Error(`search backend ${opts.name} response is too large`);
+        }
+        chunks.push(value);
+      }
+      const data = Buffer.concat(
+        chunks.map((chunk) => Buffer.from(chunk)),
+        size,
+      );
       let body: unknown;
       try {
-        body = JSON.parse(bytes.data.toString("utf8"));
+        body = JSON.parse(data.toString("utf8"));
       } catch {
         throw new Error(`search backend ${opts.name} returned invalid JSON`);
       }
