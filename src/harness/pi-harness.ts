@@ -2089,26 +2089,33 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         return oneShot("pi-judge", model, providerKeys, systemPrompt, prompt);
       },
 
-      async screenSecurity({ payload, signal, recordModelCall, recordLlmRequest }) {
+      async screenSecurity({
+        payload,
+        modelId: configuredScreenModel,
+        systemPrompt = SECURITY_SCREEN_SYSTEM_PROMPT,
+        signal,
+        recordModelCall,
+        recordLlmRequest,
+      }) {
         try {
-          const modelId = detectModelId();
+          const modelId = configuredScreenModel ?? detectModelId();
           const model = getRequiredModel(modelId);
           const providerKeys = await resolveProviderKeys();
           if (!keyForModel(providerKeys, model)) return undefined;
           recordModelCall({
             model: modelId,
-            inputTokens: countTokens(SECURITY_SCREEN_SYSTEM_PROMPT) + countTokens(payload),
+            inputTokens: countTokens(systemPrompt) + countTokens(payload),
             entryCount: 1,
           });
           await recordLlmRequest?.({
             turnSeq: null,
             step: -1,
             model: modelId,
-            promptEnvelope: { system: SECURITY_SCREEN_SYSTEM_PROMPT, messages: [{ role: "user", content: payload }] },
+            promptEnvelope: { system: systemPrompt, messages: [{ role: "user", content: payload }] },
             truncated: false,
           });
           return parseSecurityScreenVerdict(
-            await oneShot("pi-security-screen", model, providerKeys, SECURITY_SCREEN_SYSTEM_PROMPT, payload, {
+            await oneShot("pi-security-screen", model, providerKeys, systemPrompt, payload, {
               signal,
             }),
           );

@@ -107,6 +107,48 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
     ),
   },
   {
+    id: "auto-flagger",
+    kind: "custom",
+    target: "org",
+    clearable: true,
+    label: "The model and classification rubric used to screen external content while Auto posture is active.",
+    readKey: "autoFlagger",
+    get: (deps) => deps.config!.getAutoFlaggerConfig(),
+    apply: async (ctx, _actor, scope) => {
+      const bad = orgOnly(scope, "the Auto flagger is org-wide");
+      if (bad) return bad;
+      const body = ctx.body as { harnessId?: unknown; modelId?: unknown; rubric?: unknown; reset?: unknown };
+      if (body.reset === true) {
+        ctx.deps.config!.setAutoFlaggerConfig(null);
+        return { ok: true };
+      }
+      if (typeof body.harnessId !== "string" || !isHarnessId(body.harnessId) || body.harnessId === "mock") {
+        return { error: "auto-flagger requires a valid harnessId" };
+      }
+      if (typeof body.modelId !== "string" || !body.modelId.trim()) {
+        return { error: "auto-flagger requires a modelId" };
+      }
+      if (!modelSupportedByHarness(body.modelId.trim(), body.harnessId)) {
+        return { error: `model ${body.modelId.trim()} is not supported by ${body.harnessId}` };
+      }
+      if (typeof body.rubric !== "string" || !body.rubric.trim() || body.rubric.length > 20_000) {
+        return { error: "auto-flagger requires a non-empty rubric of at most 20000 characters" };
+      }
+      const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
+      const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
+      const providers = modelProviderAvailabilityFor(body.harnessId, configuredKeys, managedKeys);
+      if (!modelServiceable(body.modelId.trim(), providers)) {
+        return { error: `model ${body.modelId.trim()} isn't serviceable on this deployment` };
+      }
+      ctx.deps.config!.setAutoFlaggerConfig({
+        harnessId: body.harnessId,
+        modelId: body.modelId.trim(),
+        rubric: body.rubric.trim(),
+      });
+      return { ok: true };
+    },
+  },
+  {
     id: "approval-grant-modes",
     kind: "custom",
     target: "any",

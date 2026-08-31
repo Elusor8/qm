@@ -4077,6 +4077,28 @@
                     ><span class="status" id="st-security-posture"></span>
                   </div>
                 </section>
+                <section class="card hidden" id="card-auto-flagger">
+                  <div class="head">
+                    <h2>Auto flagger</h2>
+                    <p>
+                      Model and classification rubric used to screen external context and tool results in Auto mode. The
+                      security boundary and required verdict format remain fixed.
+                    </p>
+                  </div>
+                  <div class="body">
+                    <label for="auto-flagger-harness">Harness</label>
+                    <select id="auto-flagger-harness" style="max-width: 360px"></select>
+                    <label for="auto-flagger-model">Model</label>
+                    <select id="auto-flagger-model" style="max-width: 440px"></select>
+                    <label for="auto-flagger-rubric">Classification rubric</label>
+                    <textarea id="auto-flagger-rubric" rows="10" style="width: 100%"></textarea>
+                  </div>
+                  <div class="foot">
+                    <button class="primary" data-save="auto-flagger">Apply</button>
+                    <button id="auto-flagger-reset" type="button">Restore default</button>
+                    <span class="status" id="st-auto-flagger"></span>
+                  </div>
+                </section>
                 <section class="card setting-row hidden" id="card-approval-grant-modes">
                   <div class="head">
                     <h2>Approval grant options</h2>
@@ -6401,6 +6423,38 @@
         const showSecurityPosture = "securityPosture" in (r.data || {});
         $("card-security-posture").classList.toggle("hidden", !showSecurityPosture);
         if (showSecurityPosture) $("security-posture").value = r.data.securityPosture || "auto";
+        const showAutoFlagger = scope.startsWith("org:") && "autoFlagger" in (r.data || {});
+        $("card-auto-flagger").classList.toggle("hidden", !showAutoFlagger);
+        if (showAutoFlagger) {
+          const current = r.data.autoFlagger || r.data.autoFlaggerDefault;
+          const harness = $("auto-flagger-harness");
+          const model = $("auto-flagger-model");
+          const harnessOptions = r.data.harnessOptions || [];
+          const modelsByHarness = r.data.modelsByHarness || {};
+          harness.textContent = "";
+          harnessOptions.forEach((id) => {
+            const option = document.createElement("option");
+            option.value = id;
+            option.textContent = { pi: "Pi", opencode: "OpenCode", codex: "Codex", claude: "Claude Code" }[id] || id;
+            harness.appendChild(option);
+          });
+          harness.value = current.harnessId;
+          const syncAutoFlaggerModels = () => {
+            const options = modelsByHarness[harness.value] || [];
+            const prior = model.value || current.modelId;
+            model.textContent = "";
+            options.forEach((entry) => {
+              const option = document.createElement("option");
+              option.value = entry.id;
+              option.textContent = entry.name + " (" + entry.id + ")";
+              model.appendChild(option);
+            });
+            model.value = options.some((entry) => entry.id === prior) ? prior : (options[0] || {}).id || "";
+          };
+          harness.oninput = syncAutoFlaggerModels;
+          syncAutoFlaggerModels();
+          $("auto-flagger-rubric").value = current.rubric;
+        }
         const showGrantModes = "approvalGrantModes" in (r.data || {});
         $("card-approval-grant-modes").classList.toggle("hidden", !showGrantModes);
         if (showGrantModes) {
@@ -8157,6 +8211,11 @@
       $("egress-deny").addEventListener("input", renderEgressValidation);
       const SAVE = {
         "security-posture": () => ({ posture: $("security-posture").value }),
+        "auto-flagger": () => ({
+          harnessId: $("auto-flagger-harness").value,
+          modelId: $("auto-flagger-model").value,
+          rubric: $("auto-flagger-rubric").value,
+        }),
         "approval-grant-modes": () => ({
           session: $("approval-grant-session").checked,
           always: $("approval-grant-always").checked,
@@ -8196,6 +8255,7 @@
       };
       const SAVE_ST = {
         "security-posture": "st-security-posture",
+        "auto-flagger": "st-auto-flagger",
         "approval-grant-modes": "st-approval-grant-modes",
         "command-policy": "st-policy",
         soul: "st-soul",
@@ -8218,6 +8278,7 @@
       };
       const SAVE_RELOADS = new Set([
         "soul",
+        "auto-flagger",
         "external-slack-participants",
         "runtime",
         "approved-harnesses",
@@ -8307,6 +8368,12 @@
         return Promise.resolve(true);
       }
       let governanceSaveSeq = 0;
+      $("auto-flagger-reset").onclick = async () => {
+        const r = await api("PUT", "/api/scopes/" + encodeURIComponent(scope) + "/auto-flagger", { reset: true });
+        if (!r.ok) return setStatus("st-auto-flagger", r.data?.message || "Reset failed.", "err");
+        await loadScope();
+        setStatus("st-auto-flagger", "Default restored", "ok");
+      };
       document.querySelectorAll("[data-save]").forEach((btn) => {
         btn.onclick = async () => {
           const key = btn.dataset.save;

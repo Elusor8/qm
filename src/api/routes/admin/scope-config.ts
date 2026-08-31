@@ -27,6 +27,7 @@ import {
   parseCommandPolicy,
 } from "../../../policy/command-policy.ts";
 import { isHostDenied } from "../../../resolution/egress-policy.ts";
+import { DEFAULT_SECURITY_SCREEN_RUBRIC } from "../../../security/security-posture.ts";
 import { discoverScopes } from "./common.ts";
 import { sessionCategory } from "./origins.ts";
 
@@ -331,6 +332,11 @@ export async function getScopeConfig(ctx: ApiCtx): Promise<void> {
     harnessDefault: deps.harnessId ?? "pi",
     harnessOptions: HARNESS_IDS.filter((id) => id !== "mock"),
     modelsByHarness: Object.fromEntries(HARNESS_IDS.map((id) => [id, modelsFor(id)])),
+    autoFlaggerDefault: {
+      harnessId: deps.harnessId ?? "pi",
+      modelId: defaultModelForHarness(deps.harnessId ?? "pi", deps.baseModelDefault),
+      rubric: DEFAULT_SECURITY_SCREEN_RUBRIC,
+    },
     browseModelOptions: SELECTABLE_BASE_MODELS.filter((m) =>
       modelServiceable(m.id, providersFor(deps.harnessId ?? "pi")),
     ),

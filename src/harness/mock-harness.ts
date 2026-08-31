@@ -780,18 +780,25 @@ export function createMockHarness(): Harness {
         return Promise.resolve(JSON.stringify({ act: false }));
       },
 
-      async screenSecurity({ payload, signal, recordModelCall, recordLlmRequest }) {
-        const model = "mock-security";
+      async screenSecurity({
+        payload,
+        modelId,
+        systemPrompt = SECURITY_SCREEN_SYSTEM_PROMPT,
+        signal,
+        recordModelCall,
+        recordLlmRequest,
+      }) {
+        const model = modelId ?? "mock-security";
         recordModelCall({
           model,
-          inputTokens: countTokens(SECURITY_SCREEN_SYSTEM_PROMPT) + countTokens(payload),
+          inputTokens: countTokens(systemPrompt) + countTokens(payload),
           entryCount: 1,
         });
         await recordLlmRequest?.({
           turnSeq: null,
           step: -1,
           model,
-          promptEnvelope: { system: SECURITY_SCREEN_SYSTEM_PROMPT, messages: [{ role: "user", content: payload }] },
+          promptEnvelope: { system: systemPrompt, messages: [{ role: "user", content: payload }] },
           truncated: false,
         });
         if (/!security-screen-hang/i.test(payload)) {

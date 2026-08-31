@@ -157,6 +157,15 @@ test("governance renders simple settings as compact rows with contextual actions
   assert.match(html, /"turnWallClockSec" in r\.data/);
 });
 
+test("governance exposes Auto flagger runtime and rubric controls", () => {
+  assert.match(html, /id="card-auto-flagger"/);
+  assert.match(html, /id="auto-flagger-harness"/);
+  assert.match(html, /id="auto-flagger-model"/);
+  assert.match(html, /id="auto-flagger-rubric"/);
+  assert.match(html, /id="auto-flagger-reset"/);
+  assert.match(html, /data-save="auto-flagger"/);
+});
+
 test("compact governance rows preserve policy detail and collapse before they overflow", () => {
   assert.doesNotMatch(html, /#view-governance \.setting-row > \.head p[^}]*line-clamp/);
   assert.doesNotMatch(html, /#view-governance \.setting-row > \.foot \.status[^}]*white-space:\s*nowrap/);
