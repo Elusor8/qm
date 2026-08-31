@@ -426,3 +426,16 @@ test("baseModelProviders constrains the base model only when a provider is decla
     "with no declaration the shipped default stands, so upgrading never moves a deployment's model or its billing",
   );
 });
+
+test("SEARCH_BACKENDS validates external indices", () => {
+  assert.deepEqual(loadConfig({}).searchBackends, []);
+  assert.deepEqual(
+    loadConfig({ SEARCH_BACKENDS: '[{"name":"company-brain","url":"https://brain.example.test/search"}]' })
+      .searchBackends,
+    [{ name: "company-brain", url: "https://brain.example.test/search" }],
+  );
+  assert.throws(
+    () => loadConfig({ SEARCH_BACKENDS: '[{"name":"brain","url":"http://example.test"}]' }),
+    /SEARCH_BACKENDS/,
+  );
+});

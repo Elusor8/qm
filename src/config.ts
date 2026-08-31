@@ -156,6 +156,7 @@ export interface Config {
   smolmachinesSandbox: SmolmachinesSandboxEnv;
   awsDeploy: AwsDeployEnv;
   flyDeploy: FlyDeployEnv;
+  searchBackends: Array<{ name: string; url: string }>;
 }
 
 export function configuredModelForHarness(config: Config, harness: string): string | undefined {
@@ -630,6 +631,38 @@ function modelProviderEnvStrict(env: NodeJS.ProcessEnv): ModelProvider | undefin
   return declared;
 }
 
+function searchBackendsEnvStrict(raw: string | undefined): Array<{ name: string; url: string }> {
+  if (!raw?.trim()) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("SEARCH_BACKENDS must be a JSON array of {name,url} objects");
+  }
+  if (!Array.isArray(value) || value.length > 16)
+    throw new Error("SEARCH_BACKENDS must be a JSON array with at most 16 entries");
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw new Error("SEARCH_BACKENDS entries must be {name,url} objects");
+    const candidate = entry as Record<string, unknown>;
+    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+    const rawUrl = typeof candidate.url === "string" ? candidate.url.trim() : "";
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,62})$/.test(name) || seen.has(name))
+      throw new Error("SEARCH_BACKENDS names must be unique lowercase DNS labels");
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      throw new Error(`SEARCH_BACKENDS url for ${name} is invalid`);
+    }
+    if (url.protocol !== "https:" || url.username || url.password || url.hash || url.hostname.endsWith("."))
+      throw new Error(`SEARCH_BACKENDS url for ${name} must be HTTPS without credentials or fragments`);
+    seen.add(name);
+    return { name, url: url.toString() };
+  });
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const harness = harnessEnvStrict(env.HARNESS);
   const codexAuthCredential = env.CODEX_AUTH_CREDENTIAL?.trim() || undefined;
@@ -816,6 +849,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sandboxBackend,
     ...(sandboxSecondaryBackend ? { sandboxSecondaryBackend } : {}),
     deployProvider,
+    searchBackends: searchBackendsEnvStrict(env.SEARCH_BACKENDS),
     ...(env.EGRESS_SERVICE_HOSTS
       ? {
           egressServiceHosts: env.EGRESS_SERVICE_HOSTS.split(",")
