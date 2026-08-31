@@ -98,8 +98,12 @@ test("production rejects weak encryption key material for managed credentials", 
 });
 
 test("both porter roles share PORTER_DEPLOY_API_TOKEN", () => {
-  assert.deepEqual(validateCoreSecretEnv({ SANDBOX_BACKEND: "porter" } as NodeJS.ProcessEnv), ["PORTER_DEPLOY_API_TOKEN"]);
-  assert.deepEqual(validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter" } as NodeJS.ProcessEnv), ["PORTER_DEPLOY_API_TOKEN"]);
+  assert.deepEqual(validateCoreSecretEnv({ SANDBOX_BACKEND: "porter" } as NodeJS.ProcessEnv), [
+    "PORTER_DEPLOY_API_TOKEN",
+  ]);
+  assert.deepEqual(validateCoreSecretEnv({ DEPLOY_PROVIDER: "porter" } as NodeJS.ProcessEnv), [
+    "PORTER_DEPLOY_API_TOKEN",
+  ]);
   assert.deepEqual(
     validateCoreSecretEnv({
       SANDBOX_BACKEND: "porter",

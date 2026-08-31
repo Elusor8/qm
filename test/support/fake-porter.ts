@@ -78,14 +78,14 @@ export function installFakePorter(opts: FakePorterOptions = {}): FakePorter {
   const bodyById = (id: string): [string, BodyRecord] | undefined => [...bodies.entries()].find(([, b]) => b.id === id);
 
   const remap = (b: BodyRecord, script: string): string => {
-    const remapTmp = new RegExp(`${escapeRe(b.home)}/tmp/|/tmp/`, "g");
+    const remapTmp = new RegExp(`${escapeRe(GUEST_HOME)}/tmp/|/tmp/`, "g");
     let out = script
       .replace(/\btimeout (?:-k \d+ )?\d+ /g, "")
+      .replace(remapTmp, `${b.tmp}/`)
       .replace(pathRe(GUEST_HOME), b.home)
       .replace(pathRe(GUEST_APP), b.app);
     for (const [guest, dir] of Object.entries(b.mounts))
       if (guest !== GUEST_HOME) out = out.replace(pathRe(guest), dir);
-    out = out.replace(remapTmp, `${b.tmp}/`);
     return `export HOME=${JSON.stringify(b.home)}; ${out}`;
   };
 

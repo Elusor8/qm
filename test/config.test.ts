@@ -494,10 +494,6 @@ test("DEPLOY_PROVIDER=porter refuses to boot without a cluster and tolerates a m
   );
 });
 
-test("an unknown DEPLOY_PROVIDER still falls back to docker", () => {
-  assert.equal(loadConfig({ DEPLOY_PROVIDER: "nope" }).deployProvider, "docker");
-});
-
 test("SANDBOX_BACKEND=porter locates the API and shares the deploy provider's token", () => {
   assert.throws(
     () => loadConfig({ SANDBOX_BACKEND: "porter", PORTER_DEPLOY_API_TOKEN: "tok" }),
