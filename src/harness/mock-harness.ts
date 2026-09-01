@@ -13,6 +13,7 @@ import { deterministicCompactSummary, estimateHistoryTokens } from "./context-co
 import { countTokens } from "../util/tokens.ts";
 import { errMessage } from "../util/errors.ts";
 import { SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
+import { McpReadOnlyError } from "../mcp/mcp-tool-service.ts";
 
 const READ_ONLY_BLOCKED_PREFIXES = [
   "!preamble",
@@ -105,6 +106,10 @@ export function createMockHarness(): Harness {
         const addressedCmd = /<addressed-messages[^>]*>\s*<message[^>]*>\s*(![^<\n]+)/.exec(turn.input)?.[1]?.trim();
         const cmd = firstLine.startsWith("<") ? (whyCmd ?? addressedCmd ?? turn.input) : turn.input;
         const command0 = cmd.split("\n")[0]?.trim() ?? "";
+        const mcpRest = command0.startsWith("!mcp ") ? command0.slice("!mcp ".length).trim() : null;
+        const mcpSplit = mcpRest?.indexOf(" ") ?? -1;
+        let mcpTool = "";
+        if (mcpRest !== null) mcpTool = mcpSplit === -1 ? mcpRest : mcpRest.slice(0, mcpSplit);
         const cacheMiss = command0 === "!cachemiss";
         const systemPromptTokens = countTokens(turn.systemPrompt);
         const prefixTokens = cacheMiss ? Math.max(2048, systemPromptTokens) : Math.max(1, systemPromptTokens);
@@ -420,16 +425,17 @@ export function createMockHarness(): Harness {
           }
           usedTool = true;
           reply = `ran ${ran}`;
-        } else if (command0.startsWith("!mcp ")) {
-          const rest = command0.slice("!mcp ".length).trim();
-          const split = rest.indexOf(" ");
-          const mcpTool = split === -1 ? rest : rest.slice(0, split);
-          const mcpArgs = split === -1 ? {} : (JSON.parse(rest.slice(split + 1)) as Record<string, unknown>);
-          usedTool = true;
+        } else if (mcpRest !== null) {
+          const mcpArgs = mcpSplit === -1 ? {} : (JSON.parse(mcpRest.slice(mcpSplit + 1)) as Record<string, unknown>);
           try {
             reply = `mcp: ${await turn.tools.callMcpTool(mcpTool, mcpArgs)}`;
+            usedTool = true;
           } catch (e) {
-            reply = `[mcp error] ${errMessage(e)}`;
+            if (e instanceof McpReadOnlyError) reply = "[strict/read-only posture: that tool is unavailable]";
+            else {
+              reply = `[mcp error] ${errMessage(e)}`;
+              usedTool = true;
+            }
           }
         } else if (command0.startsWith("!read ") && gateTool("read")) {
           usedTool = true;

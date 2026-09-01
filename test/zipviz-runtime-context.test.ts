@@ -107,12 +107,13 @@ function record(url: string, zipviz?: ZipvizBinding): McpServer {
   };
 }
 
-function dm(text: string): TurnRequest {
+function dm(text: string, readOnly = false): TurnRequest {
   return {
     surface: "test",
     actor: { externalId: "U1" },
     conversation: { kind: "dm", threadRef: "dm:U1:t1" },
     text,
+    ...(readOnly ? { readOnly: true } : {}),
   };
 }
 
@@ -236,6 +237,38 @@ test("a real QM turn signs the runtime context onto the bound ZipViz connector c
       }),
     );
     assert.deepEqual(calls[0]!.body.params?.arguments, { body: "hello" });
+  } finally {
+    await zipviz.close();
+  }
+});
+
+test("a read-only QM turn cannot call a mutating MCP connector", async () => {
+  const zipviz = await startZipvizServer();
+  try {
+    const { built } = await boundApp(zipviz.url, { secret: SIGNING_SECRET });
+    const result = await built.app.turn(dm(`!mcp ${NAMESPACED_TOOL} {"body":"hello"}`, true));
+    assert.equal(result.status, "ok", result.reason);
+    assert.equal(result.reply, "[strict/read-only posture: that tool is unavailable]");
+    assert.equal(toolCalls(zipviz.calls).length, 0);
+  } finally {
+    await zipviz.close();
+  }
+});
+
+test("a read-only QM turn can call an unbound read-only MCP connector", async () => {
+  const zipviz = await startZipvizServer();
+  try {
+    const built = buildApp(
+      testConfig({ dataDir: mkdtempSync(join(tmpdir(), "zipviz-read-only-")), signingSecret: SIGNING_SECRET }),
+    );
+    await built.mcpServers.put({ ...record(zipviz.url), readOnly: true });
+    await built.mcpToolService.refresh();
+    const result = await built.app.turn(dm(`!mcp ${NAMESPACED_TOOL} {"body":"hello"}`, true));
+    assert.equal(result.status, "ok", result.reason);
+    assert.equal(result.reply, "mcp: delivered");
+    const calls = toolCalls(zipviz.calls);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(zipvizHeaders(calls[0]!), {});
   } finally {
     await zipviz.close();
   }
