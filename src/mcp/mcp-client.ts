@@ -9,6 +9,13 @@
 // policy. See mcp-tool-service.ts for the layer that turns registered
 // servers into agent tools.
 
+import {
+  assertNoZipvizRuntimeArgs,
+  zipvizRuntimeContextHeaders,
+  type McpRuntimeContext,
+  type ZipvizSigning,
+} from "./zipviz-runtime-context.ts";
+
 const TOKEN_SKEW_MS = 60_000;
 const MCP_ACCEPT = "application/json, text/event-stream";
 
@@ -111,7 +118,7 @@ export interface McpClient {
   readonly base: string;
   readonly host: string;
   listTools(): Promise<McpRemoteTool[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
+  callTool(name: string, args: Record<string, unknown>, context?: McpRuntimeContext): Promise<McpToolResult>;
 }
 
 interface CachedToken {
@@ -122,6 +129,7 @@ interface CachedToken {
 export function createMcpClient(opts: {
   url: string;
   auth: McpAuth;
+  zipviz?: ZipvizSigning;
   fetchImpl?: McpFetch;
   now?: () => number;
 }): McpClient {
@@ -159,12 +167,17 @@ export function createMcpClient(opts: {
     return { authorization: `Bearer ${await mintToken(auth.clientId, auth.clientSecret)}` };
   }
 
-  async function rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
+  async function rpc(
+    method: string,
+    params: Record<string, unknown>,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<unknown> {
     const id = ++rpcId;
     const res = await fetchImpl(`${base}/mcp`, {
       method: "POST",
       headers: {
         ...(await authHeaders()),
+        ...extraHeaders,
         "content-type": "application/json",
         accept: MCP_ACCEPT,
       },
@@ -198,8 +211,13 @@ export function createMcpClient(opts: {
       }
       return out;
     },
-    async callTool(name, args) {
-      const result = (await rpc("tools/call", { name, arguments: args })) as McpToolResult;
+    async callTool(name, args, context) {
+      let runtimeHeaders: Record<string, string> = {};
+      if (opts.zipviz) {
+        assertNoZipvizRuntimeArgs(args);
+        runtimeHeaders = zipvizRuntimeContextHeaders({ signing: opts.zipviz, context, nowMs: now() });
+      }
+      const result = (await rpc("tools/call", { name, arguments: args }, runtimeHeaders)) as McpToolResult;
       if (result.isError) throw new Error(`mcp tool ${name} error: ${mcpResultText(result) || "(no detail)"}`);
       return result;
     },

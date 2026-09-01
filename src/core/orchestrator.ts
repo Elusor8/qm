@@ -2018,6 +2018,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
           ...(deps.execTimeoutCeilingMs !== undefined ? { execTimeoutCeilingMs: deps.execTimeoutCeilingMs } : {}),
           ...(deps.ledger ? { ledger: deps.ledger } : {}),
+          threadRef: session.threadRef,
           ...(input.runId ? { runId: input.runId } : {}),
           attempt: input.attempt ?? 1,
           ...(backgroundBroker ? { backgroundBroker } : {}),

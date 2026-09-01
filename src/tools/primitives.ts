@@ -418,6 +418,7 @@ export interface ToolContextDeps {
   execTimeoutMs?: number;
   execTimeoutCeilingMs?: number;
   ledger?: ToolLedger;
+  threadRef?: string;
   runId?: string;
   attempt?: number;
   backgroundBroker?: BackgroundExecBroker;
@@ -905,7 +906,11 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
 
     async callMcpTool(name: string, args: Record<string, unknown>): Promise<string> {
       if (!deps.mcp) throw new Error("no MCP connectors are configured");
-      return deps.mcp.call(name, args, deps.createdBy);
+      return deps.mcp.call(name, args, deps.createdBy, {
+        actorId: deps.createdBy,
+        threadRef: deps.threadRef ?? "",
+        nativeEventId: runId ?? "",
+      });
     },
 
     async backgroundStart(command: string, opts?: { ttlSeconds?: number }): Promise<BackgroundStartResult> {

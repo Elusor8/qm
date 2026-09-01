@@ -11,6 +11,7 @@ import { NonRetryableTurnError } from "../core/turn-error.ts";
 import { NeedsApproval } from "../tools/primitives.ts";
 import { deterministicCompactSummary, estimateHistoryTokens } from "./context-compaction.ts";
 import { countTokens } from "../util/tokens.ts";
+import { errMessage } from "../util/errors.ts";
 import { SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
 
 const READ_ONLY_BLOCKED_PREFIXES = [
@@ -419,6 +420,17 @@ export function createMockHarness(): Harness {
           }
           usedTool = true;
           reply = `ran ${ran}`;
+        } else if (command0.startsWith("!mcp ")) {
+          const rest = command0.slice("!mcp ".length).trim();
+          const split = rest.indexOf(" ");
+          const mcpTool = split === -1 ? rest : rest.slice(0, split);
+          const mcpArgs = split === -1 ? {} : (JSON.parse(rest.slice(split + 1)) as Record<string, unknown>);
+          usedTool = true;
+          try {
+            reply = `mcp: ${await turn.tools.callMcpTool(mcpTool, mcpArgs)}`;
+          } catch (e) {
+            reply = `[mcp error] ${errMessage(e)}`;
+          }
         } else if (command0.startsWith("!read ") && gateTool("read")) {
           usedTool = true;
           reply = "";
