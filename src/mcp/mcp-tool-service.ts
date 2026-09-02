@@ -10,6 +10,7 @@ import type { AuditLog } from "../audit/audit-log.ts";
 import { errMessage } from "../util/errors.ts";
 import { createMcpClient, mcpResultText, type McpAuth, type McpClient, type McpFetch } from "./mcp-client.ts";
 import type { McpServer, McpServerStore } from "./mcp-server-store.ts";
+import type { McpRuntimeContext, ZipvizSigning } from "./zipviz-runtime-context.ts";
 
 const REFRESH_INTERVAL_MS = 5 * 60_000;
 const MAX_TOOLS_PER_SERVER = 64;
@@ -25,11 +26,19 @@ export interface McpToolDescriptor {
   readOnly: boolean;
 }
 
+export interface McpToolCallOptions {
+  principalId?: string;
+  runtimeContext?: McpRuntimeContext;
+  readOnly?: boolean;
+}
+
+export class McpReadOnlyError extends Error {}
+
 export interface McpToolService {
   /** Current snapshot of injectable tools across enabled servers. */
   toolDefs(): McpToolDescriptor[];
   /** Call a namespaced tool. Returns the tool's text output (clamped). */
-  call(name: string, args: Record<string, unknown>, principalId?: string): Promise<string>;
+  call(name: string, args: Record<string, unknown>, options?: McpToolCallOptions): Promise<string>;
   /** Force a registry re-read + tools/list refresh (admin save path, tests). */
   refresh(): Promise<void>;
   /** Probe a server config without persisting it. Returns its tool names. */
@@ -47,6 +56,7 @@ function authOf(server: McpServer): McpAuth {
 export function createMcpToolService(opts: {
   servers: McpServerStore;
   audit?: AuditLog;
+  signingSecret?: string;
   fetchImpl?: McpFetch;
   now?: () => number;
   refreshIntervalMs?: number;
@@ -67,12 +77,19 @@ export function createMcpToolService(opts: {
     });
   }
 
+  function zipvizOf(server: McpServer): ZipvizSigning | undefined {
+    if (!server.zipviz) return undefined;
+    return { binding: server.zipviz, secret: opts.signingSecret ?? "" };
+  }
+
   function clientFor(server: McpServer): McpClient {
     const cached = clients.get(server.id);
     if (cached && JSON.stringify(cached.server) === JSON.stringify(server)) return cached.client;
+    const zipviz = zipvizOf(server);
     const client = createMcpClient({
       url: server.url,
       auth: authOf(server),
+      ...(zipviz ? { zipviz } : {}),
       ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
       now,
     });
@@ -117,26 +134,30 @@ export function createMcpToolService(opts: {
 
   return {
     toolDefs: () => snapshot,
-    async call(name, args, principalId) {
+    async call(name, args, options = {}) {
       const def = snapshot.find((t) => t.name === name);
       if (!def) throw new Error(`unknown MCP tool: ${name}`);
       const server = await opts.servers.get(def.serverId);
       if (!server || !server.enabled) throw new Error(`MCP server ${def.serverId} is not available`);
       try {
-        const result = await clientFor(server).callTool(def.remoteName, args);
-        record("call", `${def.serverId}/${def.remoteName}`, "ok", principalId);
+        if (options.readOnly && !server.readOnly)
+          throw new McpReadOnlyError(`MCP tool ${name} is unavailable in read-only turns`);
+        const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
+        record("call", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
         const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
         return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
       } catch (e) {
-        record("call", `${def.serverId}/${def.remoteName}`, `error: ${errMessage(e)}`, principalId);
+        record("call", `${def.serverId}/${def.remoteName}`, `error: ${errMessage(e)}`, options.principalId);
         throw e;
       }
     },
     refresh,
     async probe(server) {
+      const zipviz = zipvizOf(server);
       const client = createMcpClient({
         url: server.url,
         auth: authOf(server),
+        ...(zipviz ? { zipviz } : {}),
         ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
         now,
       });

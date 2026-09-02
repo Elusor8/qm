@@ -409,6 +409,7 @@ export interface ToolContextDeps {
   memoryScopeId?: ScopeId;
   memoryAccess?: { write?: ScopeId; read: ScopeId[] };
   mcp?: McpToolService;
+  readOnly?: boolean;
   sessionHistory?: { search(q: string, limit?: number): Promise<string[]> };
   actingSlackUserId?: string;
   layerAuth?: {
@@ -418,6 +419,7 @@ export interface ToolContextDeps {
   execTimeoutMs?: number;
   execTimeoutCeilingMs?: number;
   ledger?: ToolLedger;
+  threadRef?: string;
   runId?: string;
   attempt?: number;
   backgroundBroker?: BackgroundExecBroker;
@@ -905,7 +907,15 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
 
     async callMcpTool(name: string, args: Record<string, unknown>): Promise<string> {
       if (!deps.mcp) throw new Error("no MCP connectors are configured");
-      return deps.mcp.call(name, args, deps.createdBy);
+      return deps.mcp.call(name, args, {
+        principalId: deps.createdBy,
+        readOnly: deps.readOnly === true,
+        runtimeContext: {
+          actorId: deps.createdBy,
+          threadRef: deps.threadRef ?? "",
+          nativeEventId: runId ?? "",
+        },
+      });
     },
 
     async backgroundStart(command: string, opts?: { ttlSeconds?: number }): Promise<BackgroundStartResult> {

@@ -100,8 +100,32 @@ test("tool service exposes namespaced tools and calls through", async () => {
   const defs = service.toolDefs();
   assert.deepEqual(defs.map((d) => d.name).sort(), ["crm_query", "crm_update"]);
   assert.ok(defs.every((d) => d.readOnly));
-  const out = await service.call("crm_query", { q: "hello" }, "internal:U1");
+  const out = await service.call("crm_query", { q: "hello" }, { principalId: "internal:U1" });
   assert.equal(out, "ran query");
+  service.close();
+});
+
+test("read-only calls check the current server posture before outbound dispatch", async () => {
+  const backing = createMemoryMap<McpServer>();
+  const store = createMcpServerStore(backing);
+  const { fetch, calls } = fakeServerFetch();
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
+  await store.put(server());
+  await service.refresh();
+
+  assert.equal(await service.call("crm_query", {}, { readOnly: true }), "ran query");
+  await backing.put("crm", server({ readOnly: false }));
+  assert.ok(service.toolDefs().every((def) => def.readOnly));
+  const callsBeforeBlockedAttempt = calls.length;
+
+  await assert.rejects(() => service.call("crm_update", {}, { readOnly: true }), /unavailable in read-only turns/);
+  assert.equal(calls.length, callsBeforeBlockedAttempt);
+  assert.equal(await service.call("crm_update", {}), "ran update");
+
+  await service.refresh();
+  assert.ok(service.toolDefs().every((def) => !def.readOnly));
+  await backing.put("crm", server({ readOnly: true }));
+  assert.equal(await service.call("crm_query", {}, { readOnly: true }), "ran query");
   service.close();
 });
 

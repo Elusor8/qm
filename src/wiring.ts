@@ -599,7 +599,11 @@ export function buildApp(
     ? createPostgresMemoryService(config.databaseUrl)
     : createMemoryService(workspace);
   const mcpServers = createMcpServerStore(artifactMap<McpServer>("mcp_servers"));
-  const mcpToolService = createMcpToolService({ servers: mcpServers, audit: auditLog });
+  const mcpToolService = createMcpToolService({
+    servers: mcpServers,
+    audit: auditLog,
+    ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+  });
   const mcpTools = () => mcpToolService.toolDefs();
   const errors = config.databaseUrl ? createPostgresErrorLog(config.databaseUrl) : createErrorLog();
   const sandboxOnError = (e: { category: string; code: string; message: string; scopeLabel?: string }) =>

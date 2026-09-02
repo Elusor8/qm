@@ -5,6 +5,11 @@
 // model-provider credential, not like a personal connector.
 
 import { isValidMcpServerId, type McpServer, type McpServerAuthMode } from "../../../mcp/mcp-server-store.ts";
+import {
+  isValidZipvizAdapterKind,
+  isValidZipvizIdentifier,
+  type ZipvizBinding,
+} from "../../../mcp/zipviz-runtime-context.ts";
 import { sendJson } from "../../http.ts";
 import type { ApiCtx } from "../route.ts";
 import { audit, authorizeAdmin, orgScope } from "../shared.ts";
@@ -79,6 +84,50 @@ export async function putMcpServer(ctx: ApiCtx): Promise<void> {
     return sendJson(ctx.res, 400, { error: "bad_request", message: `auth must be one of ${AUTH_MODES.join(", ")}` });
   }
   const existing = await ctx.deps.mcpServers.get(id);
+  const candidate = b.zipviz === undefined ? existing?.zipviz : b.zipviz;
+  let zipviz: ZipvizBinding | undefined;
+  if (candidate !== undefined && candidate !== null) {
+    if (
+      !isValidZipvizAdapterKind(candidate.adapterKind) ||
+      !isValidZipvizIdentifier(candidate.adapterInstance) ||
+      !isValidZipvizIdentifier(candidate.mailbox) ||
+      !isValidZipvizIdentifier(candidate.actorExternalId) ||
+      typeof candidate.actorPrincipalId !== "string" ||
+      !candidate.actorPrincipalId.trim()
+    ) {
+      return sendJson(ctx.res, 400, {
+        error: "bad_request",
+        message:
+          "zipviz binding requires an explicit adapterKind, adapterInstance, mailbox, actorExternalId, and actorPrincipalId",
+      });
+    }
+    let actorPrincipalId = candidate.actorPrincipalId.trim();
+    if (ctx.deps.directory) {
+      let principal;
+      try {
+        principal = await ctx.deps.directory.get(actorPrincipalId);
+      } catch {
+        return sendJson(ctx.res, 503, {
+          error: "unavailable",
+          message: "the principal directory is unavailable",
+        });
+      }
+      if (!principal || principal.type !== "internal") {
+        return sendJson(ctx.res, 400, {
+          error: "bad_request",
+          message: "zipviz actorPrincipalId must resolve to one internal principal",
+        });
+      }
+      actorPrincipalId = principal.principalId;
+    }
+    zipviz = {
+      adapterKind: candidate.adapterKind,
+      adapterInstance: candidate.adapterInstance,
+      mailbox: candidate.mailbox,
+      actorExternalId: candidate.actorExternalId,
+      actorPrincipalId,
+    };
+  }
   const server: McpServer = {
     id,
     name: typeof b.name === "string" && b.name.trim() ? b.name.trim().slice(0, 80) : id,
@@ -93,6 +142,7 @@ export async function putMcpServer(ctx: ApiCtx): Promise<void> {
           clientSecret: typeof b.clientSecret === "string" && b.clientSecret ? b.clientSecret : existing?.clientSecret,
         }
       : {}),
+    ...(zipviz ? { zipviz } : {}),
     readOnly: b.readOnly !== false,
     enabled: b.enabled !== false,
     updatedAt: Date.now(),

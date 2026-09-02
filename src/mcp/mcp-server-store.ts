@@ -6,6 +6,7 @@
 // connector credentials — reachable only through core, never injected into sandboxes.
 
 import type { DurableMap } from "../persistence/durable-map.ts";
+import type { ZipvizBinding } from "./zipviz-runtime-context.ts";
 
 export type McpServerAuthMode = "none" | "bearer" | "client-credentials";
 
@@ -17,6 +18,7 @@ export interface McpServer {
   bearerToken?: string;
   clientId?: string;
   clientSecret?: string;
+  zipviz?: ZipvizBinding;
   readOnly: boolean;
   enabled: boolean;
   updatedAt: number;
