@@ -103,9 +103,13 @@ export async function putMcpServer(ctx: ApiCtx): Promise<void> {
     }
     let actorPrincipalId = candidate.actorPrincipalId.trim();
     if (ctx.deps.directory) {
+      // Resolve through the app's merged member view, not the raw directory
+      // store: email-auth principals (AUTH_ALLOWED_EMAILS) are internal members
+      // that never live in the synced directory table, and a deployment without
+      // Slack has nothing else in it. The internal-type check below is unchanged.
       let principal;
       try {
-        principal = await ctx.deps.directory.get(actorPrincipalId);
+        principal = await ctx.app.directoryMember(actorPrincipalId);
       } catch {
         return sendJson(ctx.res, 503, {
           error: "unavailable",
