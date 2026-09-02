@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildApp } from "../src/wiring.ts";
@@ -17,6 +17,7 @@ import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import {
   signZipvizRuntimeContext,
   ZIPVIZ_RUNTIME_CONTEXT_HEADERS,
+  zipvizCanonicalContextBytes,
   type ZipvizBinding,
 } from "../src/mcp/zipviz-runtime-context.ts";
 import { scopeId, type TurnRequest, type WorkspaceLayer } from "../src/types.ts";
@@ -25,24 +26,43 @@ import type { Sandbox, SandboxHandle } from "../src/sandbox/sandbox.ts";
 const SIGNING_SECRET = "qm-runtime-secret-32-characters-x";
 const MAILBOX = "gary.yc.viz";
 const ACTOR_EXTERNAL_ID = "qm-gary";
-const REMOTE_TOOL = "zipviz_qm_conversation_send";
-const NAMESPACED_TOOL = "zipviz_zipviz_qm_conversation_send";
+const REMOTE_TOOL = "conversation_mutate";
+const NAMESPACED_TOOL = "zipviz_conversation_mutate";
+const VECTOR = JSON.parse(readFileSync(new URL("./fixtures/runtime_context_v1.json", import.meta.url), "utf8")) as {
+  version: string;
+  secret: string;
+  timestamp: number;
+  binding: {
+    adapter_kind: string;
+    adapter_instance: string;
+    mailbox: string;
+    actor_external_id: string;
+  };
+  thread_ref: string;
+  native_event_id: string;
+  canonical: string;
+  signature: string;
+};
+const ADAPTER_KIND = VECTOR.binding.adapter_kind;
+const ADAPTER_INSTANCE = VECTOR.binding.adapter_instance;
 
 function contractSignature(input: {
   secret: string;
+  adapterKind: string;
+  adapterInstance: string;
   mailbox: string;
   actorExternalId: string;
-  adapterInstance: string;
   threadRef: string;
   nativeEventId: string;
   timestamp: number;
 }): string {
   const canonical = JSON.stringify([
-    "zipviz-qm-runtime-context",
+    "zipviz-runtime-context",
     "v1",
+    input.adapterKind,
+    input.adapterInstance,
     input.mailbox,
     input.actorExternalId,
-    input.adapterInstance,
     input.threadRef,
     input.nativeEventId,
   ]);
@@ -107,6 +127,16 @@ function record(url: string, zipviz?: ZipvizBinding): McpServer {
   };
 }
 
+function binding(actorPrincipalId: string): ZipvizBinding {
+  return {
+    mailbox: MAILBOX,
+    actorExternalId: ACTOR_EXTERNAL_ID,
+    actorPrincipalId,
+    adapterKind: ADAPTER_KIND,
+    adapterInstance: ADAPTER_INSTANCE,
+  };
+}
+
 function dm(text: string, readOnly = false): TurnRequest {
   return {
     surface: "test",
@@ -125,7 +155,7 @@ async function boundApp(url: string, opts: { secret?: string } = {}) {
     }),
   );
   const actorPrincipalId = built.identity.resolve({ externalId: "U1" }).id;
-  await built.mcpServers.put(record(url, { mailbox: MAILBOX, actorExternalId: ACTOR_EXTERNAL_ID, actorPrincipalId }));
+  await built.mcpServers.put(record(url, binding(actorPrincipalId)));
   await built.mcpToolService.refresh();
   return { built, actorPrincipalId };
 }
@@ -161,41 +191,60 @@ function boundService(url: string, secret?: string) {
   return { store, service };
 }
 
-test("canonical signing bytes match the published QM runtime context vector", () => {
-  const binding: ZipvizBinding = {
-    mailbox: MAILBOX,
-    actorExternalId: ACTOR_EXTERNAL_ID,
-    actorPrincipalId: "internal:U1",
-  };
+test("canonical signing bytes match the shared generic runtime context vector", () => {
+  const configured = binding("internal:U1");
   const claim = {
-    threadRef: "agent:main:webhook:mailbox-gary",
-    nativeEventId: "qm-turn-42",
-    timestamp: 1_800_000_000,
+    threadRef: VECTOR.thread_ref,
+    nativeEventId: VECTOR.native_event_id,
+    timestamp: VECTOR.timestamp,
   };
-  const signature = signZipvizRuntimeContext({ secret: SIGNING_SECRET, binding, ...claim });
-  assert.equal(signature, "v1=2abc66160c39210f1aa814b6d4c39bf67f0db53c862a3c36a5641fe4df6a3bee");
+  const signature = signZipvizRuntimeContext({ secret: VECTOR.secret, binding: configured, ...claim });
+  assert.deepEqual(ZIPVIZ_RUNTIME_CONTEXT_HEADERS, {
+    threadRef: "x-zipviz-runtime-thread-ref",
+    nativeEventId: "x-zipviz-runtime-native-event-id",
+    timestamp: "x-zipviz-runtime-context-timestamp",
+    signature: "x-zipviz-runtime-context-signature",
+  });
+  assert.equal(zipvizCanonicalContextBytes(configured, claim), VECTOR.canonical);
+  assert.equal(signature, VECTOR.signature);
   assert.equal(
     signature,
     contractSignature({
-      secret: SIGNING_SECRET,
-      mailbox: MAILBOX,
-      actorExternalId: ACTOR_EXTERNAL_ID,
-      adapterInstance: "qm-reference",
+      secret: VECTOR.secret,
+      adapterKind: VECTOR.binding.adapter_kind,
+      adapterInstance: VECTOR.binding.adapter_instance,
+      mailbox: VECTOR.binding.mailbox,
+      actorExternalId: VECTOR.binding.actor_external_id,
       ...claim,
     }),
   );
 
   const tampered = [
-    signZipvizRuntimeContext({ secret: `${SIGNING_SECRET}x`, binding, ...claim }),
-    signZipvizRuntimeContext({ secret: SIGNING_SECRET, binding: { ...binding, mailbox: "other.mailbox" }, ...claim }),
+    signZipvizRuntimeContext({ secret: `${VECTOR.secret}x`, binding: configured, ...claim }),
     signZipvizRuntimeContext({
-      secret: SIGNING_SECRET,
-      binding: { ...binding, actorExternalId: "qm-someone-else" },
+      secret: VECTOR.secret,
+      binding: { ...configured, adapterKind: "https://zipviz.ai/adapters/other" },
       ...claim,
     }),
-    signZipvizRuntimeContext({ secret: SIGNING_SECRET, binding, ...claim, threadRef: "agent:main:webhook:other" }),
-    signZipvizRuntimeContext({ secret: SIGNING_SECRET, binding, ...claim, nativeEventId: "qm-turn-43" }),
-    signZipvizRuntimeContext({ secret: SIGNING_SECRET, binding, ...claim, timestamp: claim.timestamp + 1 }),
+    signZipvizRuntimeContext({
+      secret: VECTOR.secret,
+      binding: { ...configured, adapterInstance: "qm-runtime-other" },
+      ...claim,
+    }),
+    signZipvizRuntimeContext({ secret: VECTOR.secret, binding: { ...configured, mailbox: "other.mailbox" }, ...claim }),
+    signZipvizRuntimeContext({
+      secret: VECTOR.secret,
+      binding: { ...configured, actorExternalId: "qm-someone-else" },
+      ...claim,
+    }),
+    signZipvizRuntimeContext({
+      secret: VECTOR.secret,
+      binding: configured,
+      ...claim,
+      threadRef: "agent:main:webhook:other",
+    }),
+    signZipvizRuntimeContext({ secret: VECTOR.secret, binding: configured, ...claim, nativeEventId: "qm-turn-43" }),
+    signZipvizRuntimeContext({ secret: VECTOR.secret, binding: configured, ...claim, timestamp: claim.timestamp + 1 }),
   ];
   for (const other of tampered) assert.notEqual(other, signature);
   assert.equal(new Set(tampered).size, tampered.length);
@@ -228,9 +277,10 @@ test("a real QM turn signs the runtime context onto the bound ZipViz connector c
       headers[ZIPVIZ_RUNTIME_CONTEXT_HEADERS.signature],
       contractSignature({
         secret: SIGNING_SECRET,
+        adapterKind: ADAPTER_KIND,
+        adapterInstance: ADAPTER_INSTANCE,
         mailbox: MAILBOX,
         actorExternalId: ACTOR_EXTERNAL_ID,
-        adapterInstance: "qm-reference",
         threadRef: "dm:U1:t1",
         nativeEventId,
         timestamp,
@@ -292,6 +342,25 @@ test("an unbound MCP connector receives none of the zipviz runtime headers", asy
   }
 });
 
+test("an unbound MCP connector preserves caller-owned arguments with reserved-looking names", async () => {
+  const zipviz = await startZipvizServer();
+  try {
+    const built = buildApp(
+      testConfig({ dataDir: mkdtempSync(join(tmpdir(), "zipviz-unbound-args-")), signingSecret: SIGNING_SECRET }),
+    );
+    await built.mcpServers.put(record(zipviz.url));
+    await built.mcpToolService.refresh();
+    const result = await built.app.turn(dm(`!mcp ${NAMESPACED_TOOL} {"thread_ref":"connector-owned"}`));
+    assert.equal(result.status, "ok", result.reason);
+    const calls = toolCalls(zipviz.calls);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0]!.body.params?.arguments, { thread_ref: "connector-owned" });
+    assert.deepEqual(zipvizHeaders(calls[0]!), {});
+  } finally {
+    await zipviz.close();
+  }
+});
+
 test("model-supplied runtime context fields are rejected before the outbound call", async () => {
   const zipviz = await startZipvizServer();
   try {
@@ -328,18 +397,16 @@ test("a bound connector fails closed without thread, event, or the bound princip
   const zipviz = await startZipvizServer();
   const { store, service } = boundService(zipviz.url, SIGNING_SECRET);
   try {
-    await store.put(
-      record(zipviz.url, { mailbox: MAILBOX, actorExternalId: ACTOR_EXTERNAL_ID, actorPrincipalId: "U1" }),
-    );
+    await store.put(record(zipviz.url, binding("U1")));
     await service.refresh();
 
     await assert.rejects(
       () => serviceToolContext(service, { threadRef: "dm:U1:t1" }).callMcpTool(NAMESPACED_TOOL, {}),
-      /stable QM native event id/,
+      /stable runtime native event id/,
     );
     await assert.rejects(
       () => serviceToolContext(service, { runId: "run-1" }).callMcpTool(NAMESPACED_TOOL, {}),
-      /QM thread reference/,
+      /runtime thread reference/,
     );
     await assert.rejects(
       () =>
@@ -347,7 +414,7 @@ test("a bound connector fails closed without thread, event, or the bound princip
           NAMESPACED_TOOL,
           {},
         ),
-      /not bound to the acting QM principal/,
+      /not bound to the acting runtime principal/,
     );
     assert.equal(toolCalls(zipviz.calls).length, 0);
   } finally {
@@ -360,9 +427,7 @@ test("a retried logical turn reuses the native event id; a new turn gets a new o
   const zipviz = await startZipvizServer();
   const { store, service } = boundService(zipviz.url, SIGNING_SECRET);
   try {
-    await store.put(
-      record(zipviz.url, { mailbox: MAILBOX, actorExternalId: ACTOR_EXTERNAL_ID, actorPrincipalId: "U1" }),
-    );
+    await store.put(record(zipviz.url, binding("U1")));
     await service.refresh();
     const call = (runId: string, attempt: number) =>
       serviceToolContext(service, { threadRef: "dm:U1:t1", runId, attempt }).callMcpTool(NAMESPACED_TOOL, {});
@@ -381,9 +446,10 @@ test("a retried logical turn reuses the native event id; a new turn gets a new o
         headers[ZIPVIZ_RUNTIME_CONTEXT_HEADERS.signature],
         contractSignature({
           secret: SIGNING_SECRET,
+          adapterKind: ADAPTER_KIND,
+          adapterInstance: ADAPTER_INSTANCE,
           mailbox: MAILBOX,
           actorExternalId: ACTOR_EXTERNAL_ID,
-          adapterInstance: "qm-reference",
           threadRef: "dm:U1:t1",
           nativeEventId: headers[ZIPVIZ_RUNTIME_CONTEXT_HEADERS.nativeEventId]!,
           timestamp: Number(headers[ZIPVIZ_RUNTIME_CONTEXT_HEADERS.timestamp]),

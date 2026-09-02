@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "secret": "test-only-runtime-context-secret-32-bytes",
+  "timestamp": 1800000000,
+  "binding": {
+    "adapter_kind": "https://zipviz.ai/adapters/qm",
+    "adapter_instance": "qm-runtime-australia-1",
+    "mailbox": "gary.yc.viz",
+    "actor_external_id": "qm-gary"
+  },
+  "thread_ref": "agent:main:webhook:mailbox-gary",
+  "native_event_id": "qm-turn-42",
+  "canonical": "[\"zipviz-runtime-context\",\"v1\",\"https://zipviz.ai/adapters/qm\",\"qm-runtime-australia-1\",\"gary.yc.viz\",\"qm-gary\",\"agent:main:webhook:mailbox-gary\",\"qm-turn-42\"]",
+  "signature": "v1=89767d34323c0d88ba6f4c2fde5d73d2de71666e12daae6c8601eea25cffb21c"
+}

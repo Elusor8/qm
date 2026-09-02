@@ -118,10 +118,7 @@ test("read-only calls check the current server posture before outbound dispatch"
   assert.ok(service.toolDefs().every((def) => def.readOnly));
   const callsBeforeBlockedAttempt = calls.length;
 
-  await assert.rejects(
-    () => service.call("crm_update", {}, { readOnly: true }),
-    /unavailable in read-only turns/,
-  );
+  await assert.rejects(() => service.call("crm_update", {}, { readOnly: true }), /unavailable in read-only turns/);
   assert.equal(calls.length, callsBeforeBlockedAttempt);
   assert.equal(await service.call("crm_update", {}), "ran update");
 

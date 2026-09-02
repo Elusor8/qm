@@ -5,7 +5,11 @@
 // model-provider credential, not like a personal connector.
 
 import { isValidMcpServerId, type McpServer, type McpServerAuthMode } from "../../../mcp/mcp-server-store.ts";
-import { isValidZipvizIdentifier, type ZipvizBinding } from "../../../mcp/zipviz-runtime-context.ts";
+import {
+  isValidZipvizAdapterKind,
+  isValidZipvizIdentifier,
+  type ZipvizBinding,
+} from "../../../mcp/zipviz-runtime-context.ts";
 import { sendJson } from "../../http.ts";
 import type { ApiCtx } from "../route.ts";
 import { audit, authorizeAdmin, orgScope } from "../shared.ts";
@@ -80,10 +84,12 @@ export async function putMcpServer(ctx: ApiCtx): Promise<void> {
     return sendJson(ctx.res, 400, { error: "bad_request", message: `auth must be one of ${AUTH_MODES.join(", ")}` });
   }
   const existing = await ctx.deps.mcpServers.get(id);
-  let zipviz: ZipvizBinding | undefined = b.zipviz === null ? undefined : existing?.zipviz;
-  if (b.zipviz !== undefined && b.zipviz !== null) {
-    const candidate = b.zipviz as Partial<ZipvizBinding>;
+  const candidate = b.zipviz === undefined ? existing?.zipviz : b.zipviz;
+  let zipviz: ZipvizBinding | undefined;
+  if (candidate !== undefined && candidate !== null) {
     if (
+      !isValidZipvizAdapterKind(candidate.adapterKind) ||
+      !isValidZipvizIdentifier(candidate.adapterInstance) ||
       !isValidZipvizIdentifier(candidate.mailbox) ||
       !isValidZipvizIdentifier(candidate.actorExternalId) ||
       typeof candidate.actorPrincipalId !== "string" ||
@@ -91,13 +97,35 @@ export async function putMcpServer(ctx: ApiCtx): Promise<void> {
     ) {
       return sendJson(ctx.res, 400, {
         error: "bad_request",
-        message: "zipviz binding requires an explicit mailbox, actorExternalId, and actorPrincipalId",
+        message:
+          "zipviz binding requires an explicit adapterKind, adapterInstance, mailbox, actorExternalId, and actorPrincipalId",
       });
     }
+    let actorPrincipalId = candidate.actorPrincipalId.trim();
+    if (ctx.deps.directory) {
+      let principal;
+      try {
+        principal = await ctx.deps.directory.get(actorPrincipalId);
+      } catch {
+        return sendJson(ctx.res, 503, {
+          error: "unavailable",
+          message: "the principal directory is unavailable",
+        });
+      }
+      if (!principal || principal.type !== "internal") {
+        return sendJson(ctx.res, 400, {
+          error: "bad_request",
+          message: "zipviz actorPrincipalId must resolve to one internal principal",
+        });
+      }
+      actorPrincipalId = principal.principalId;
+    }
     zipviz = {
+      adapterKind: candidate.adapterKind,
+      adapterInstance: candidate.adapterInstance,
       mailbox: candidate.mailbox,
       actorExternalId: candidate.actorExternalId,
-      actorPrincipalId: candidate.actorPrincipalId.trim(),
+      actorPrincipalId,
     };
   }
   const server: McpServer = {
