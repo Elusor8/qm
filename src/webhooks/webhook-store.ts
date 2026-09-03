@@ -16,6 +16,7 @@ export interface CreateWebhookInput extends CreateTriggerInput {
   action: string;
   verification: Webhook["verification"];
   filters?: Webhook["filters"];
+  allowMutatingTools?: boolean;
 }
 
 export interface WebhookStore {
@@ -42,6 +43,7 @@ export function createWebhookStore(backing: DurableMap<Webhook> = createMemoryMa
         throw new Error("every webhook filter requires a path and at least one value");
       }
       const filters = input.filters?.length ? input.filters : undefined;
+      const allowMutatingTools = input.allowMutatingTools === true;
       const contentId = hashId([
         contentPart(input.owner),
         contentPart(input.ownerScopeId),
@@ -49,12 +51,14 @@ export function createWebhookStore(backing: DurableMap<Webhook> = createMemoryMa
         contentPart(input.verification),
         contentPart(filters),
         contentPart(input.destination),
+        contentPart(allowMutatingTools),
       ]);
       const webhook = await createDeduped(backing, contentId, (id) => ({
         ...buildTriggerBase(input, id, Date.now()),
         action: input.action,
         verification: input.verification,
         ...(filters ? { filters } : {}),
+        ...(allowMutatingTools ? { allowMutatingTools: true } : {}),
       }));
       if (webhook.enabled) return webhook;
       await setTriggerEnabled(backing, webhook.id, true);

@@ -47,6 +47,30 @@ function githubReq(rawBody: string, deliveryId = "d-1", event = "issues") {
   };
 }
 
+test("a webhook turn is floored to read-only connectors by default, and only an explicit opt-out lifts it (ELU-504)", async () => {
+  const { webhooks, calls, receiver } = harness();
+  const base = {
+    ownerScopeId: scopeId("personal", "U1"),
+    owner: "U1",
+    createdBy: "U1",
+    verification: { scheme: "github" as const, secret: SECRET },
+  };
+  const floored = await webhooks.create({ ...base, action: "triage this issue" });
+  const lifted = await webhooks.create({ ...base, action: "reply through the connector", allowMutatingTools: true });
+  assert.equal(floored.allowMutatingTools, undefined);
+  assert.equal(lifted.allowMutatingTools, true);
+
+  const body = JSON.stringify({ action: "opened", issue: { number: 7 } });
+  assert.deepEqual(await receiver.deliver(floored.id, githubReq(body, "d-floor")), { status: 202 });
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.readOnly, true, "default webhook turn must be read-only");
+  assert.deepEqual(await receiver.deliver(lifted.id, githubReq(body, "d-lift")), { status: 202 });
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]?.readOnly, undefined, "opted-out webhook turn keeps the owner's full connector set");
+});
+
 test("a valid delivery fires a turn as the owner, in the owner scope, with the event rendered in", async () => {
   const { webhooks, deliveries, calls, receiver } = harness();
   const wh = await webhooks.create({
