@@ -70,6 +70,7 @@ export interface WebhookCreateRequest {
   verification: Webhook["verification"];
   filters?: Webhook["filters"];
   destinationKey?: string;
+  allowMutatingTools?: boolean;
 }
 
 export type WebhookCreateResult =
@@ -722,6 +723,7 @@ export function createControlService(app: App, scheduler?: Scheduler, admin?: Ad
         createdBy: capability.actorId,
         ownerScopeId: capability.scopeId,
         ...(req.filters?.length ? { filters: req.filters } : {}),
+        ...(req.allowMutatingTools === true ? { allowMutatingTools: true } : {}),
         ...(resolved.destination ? { destination: resolved.destination } : {}),
         ...(consentRecipient
           ? { recipientConsent: { recipientId: consentRecipient, status: "pending" as const } }

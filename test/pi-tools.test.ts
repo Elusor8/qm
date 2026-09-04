@@ -1008,7 +1008,7 @@ test("the surface tool is NAMED after its surface — a telegram surface produce
   assert.equal(posted.ok, true);
 });
 
-test("readOnly assembles ONLY observational tools — no execute/background/write/publish/control", () => {
+test("readOnly assembles ONLY observational tools — no execute/write/publish/control", async () => {
   const ref: ToolContextRef = { current: fakeToolContext(), scopeLabel: "personal:U1" };
   const full = createPiTools(ref, { controlTools: true, scratchExec: true, reachExec: true });
   const readOnly = createPiTools(ref, { controlTools: true, scratchExec: true, reachExec: true, readOnly: true });
@@ -1017,10 +1017,35 @@ test("readOnly assembles ONLY observational tools — no execute/background/writ
   for (const t of ["execute", "background", "read", "write", "publish", "cron", "webhook", "guidance"]) {
     assert.ok(names(full).has(t), `full toolset has ${t}`);
   }
-  assert.deepEqual([...names(readOnly)].sort(), ["finish_silently", "history", "memory"]);
-  for (const t of ["execute", "background", "read", "write", "publish", "cron", "webhook", "guidance"]) {
+  assert.deepEqual([...names(readOnly)].sort(), ["background", "finish_silently", "history", "memory"]);
+  for (const t of ["execute", "read", "write", "publish", "cron", "webhook", "guidance"]) {
     assert.ok(!names(readOnly).has(t), `read-only toolset drops ${t}`);
   }
+
+  const bg = readOnly.find((t) => t.name === "background");
+  const polled = (await call(bg, { action: "poll", process_id: "p1" })) as { content: Array<{ text?: string }> };
+  assert.match(polled.content[0]?.text ?? "", /more output/);
+  for (const action of ["start", "write", "stop", "watch", "unwatch"]) {
+    const refused = (await call(bg, { action, command: "sleep 1", process_id: "p1", monitor_id: "m1", data: "x" })) as {
+      content: Array<{ text?: string }>;
+    };
+    assert.match(refused.content[0]?.text ?? "", /read-only wake/, `read-only background refuses ${action}`);
+  }
+
+  const readOnlyDelivering = createPiTools(ref, {
+    controlTools: true,
+    scratchExec: true,
+    reachExec: true,
+    readOnly: true,
+    surfaceTools: true,
+  });
+  assert.deepEqual([...names(readOnlyDelivering)].sort(), [
+    "background",
+    "history",
+    "memory",
+    "slack",
+    "stay_silent",
+  ]);
 });
 
 test("finish_silently on a poll fire terminates the turn at the tool contract; off one it no-ops", async () => {

@@ -113,6 +113,7 @@ export function createWebhookReceiver(deps: WebhookReceiverDeps): WebhookReceive
         securityScreenData: event.securityScreenData,
         fireKey,
         surface: "webhook",
+        readOnly: wh.allowMutatingTools !== true,
         ...(destination ? { destination } : {}),
         recipientConsentRequired: true,
         ...(wh.recipientConsent ? { recipientConsent: wh.recipientConsent } : {}),

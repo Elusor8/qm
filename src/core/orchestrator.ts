@@ -1812,7 +1812,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           conversation,
           session,
           scopeId,
-          strictReadOnly,
           defaultDestination,
           blobTransfer,
           fileRegistration,
@@ -2691,7 +2690,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const primarySubturnEndSeq = emittedEntries.at(-1)?.seq;
         if (
           input.addressed &&
-          !strictReadOnly &&
           input.surfaceTools &&
           surfaceToolDeps &&
           spine.surfaceOutboundCount === 0 &&
@@ -3150,7 +3148,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             : { status: "pending_approval", sessionId: session.id, pendingApprovals: approvals };
         } else if (isPollFire && !outbound.attachments.length && isSilentPollReply(reply)) {
           finalResult = { status: "silent", sessionId: session.id };
-        } else if (input.surfaceTools && surfaceToolDeps && !strictReadOnly) {
+        } else if (input.surfaceTools && surfaceToolDeps) {
           finalResult = { status: "silent", sessionId: session.id, ...(result.stopped ? { stopped: true } : {}) };
         } else {
           finalResult = {

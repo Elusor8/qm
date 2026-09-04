@@ -67,7 +67,7 @@ function filterLines(chunk: string, pattern: string): string {
 function describeEvent(ev: MonitorEvent): string {
   if (ev.kind === "exited") return `It just exited with code ${ev.code}.`;
   if (ev.kind === "expired") {
-    return "Your watch on it expired (the job may still be running — `background poll` it, or arm a new watch if you still need one).";
+    return "Your watch on it expired (the job may still be running — `background poll` it; ask the user if a new watch is still wanted).";
   }
   if (ev.kind === "lost") return "It is no longer on your computer (likely lost to a restart) — treat it as gone.";
   if (ev.kind === "quiet") {
@@ -95,7 +95,7 @@ function renderEvent(m: Monitor, output: string, ev: MonitorEvent): { input: str
       "",
       "Act on this. The user can't see the job, so when something changed that's worth telling them, reply with a brief update — it posts to this conversation — saying where things stand and what to expect next. " +
         replyGuidance(ev) +
-        "Use the `background` tool (poll/stop/watch) if you need more than what's shown.",
+        "Use the `background` tool (poll/list) if you need more than what's shown.",
     ].join("\n"),
     securityScreenData: capped,
   };
@@ -131,6 +131,7 @@ export function createMonitorPoller(deps: MonitorPollerDeps): MonitorPoller {
       securityScreenData: event.securityScreenData,
       fireKey,
       surface: "monitor",
+      readOnly: true,
       threadRef: m.threadRef,
       ...(m.destination ? { destination: m.destination } : {}),
       ...(withErrorNotice

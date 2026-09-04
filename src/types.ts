@@ -245,6 +245,7 @@ export interface Webhook extends TriggerBase {
   action: string;
   verification: WebhookVerification;
   filters?: WebhookFilter[];
+  allowMutatingTools?: boolean;
   lastDeliveryId?: string;
   lastError?: string;
 }

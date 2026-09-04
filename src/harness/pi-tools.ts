@@ -309,7 +309,8 @@ export function coreToolOptions(config: Config): CoreToolOptions {
   };
 }
 
-const READ_ONLY_TOOL_NAMES = new Set(["memory", "history", "finish_silently"]);
+const READ_ONLY_TOOL_NAMES = new Set(["memory", "history", "background", "finish_silently"]);
+const READ_ONLY_BACKGROUND_ACTIONS = new Set(["poll", "list"]);
 
 export function pauseStampAfterToolCall(
   ref: Pick<ToolContextRef, "pausedOnApproval" | "silentRequested">,
@@ -1234,6 +1235,14 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
         process_id: params.process_id,
         ...(params.monitor_id ? { monitor_id: params.monitor_id } : {}),
       });
+      if (opts?.readOnly && !READ_ONLY_BACKGROUND_ACTIONS.has(params.action)) {
+        return recordResult(
+          callId,
+          { tool: "background", action: params.action, readOnly: true },
+          text("[this is a read-only wake — background jobs can be polled and listed here, but not started, written to, stopped, or watched]"),
+          true,
+        );
+      }
       try {
         switch (params.action) {
           case "start": {
@@ -1906,6 +1915,13 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
       destinationKey: Type.Optional(
         Type.String({ description: 'create only: a key from the "Where scheduled tasks post" menu.' }),
       ),
+      allowMutatingTools: Type.Optional(
+        Type.Boolean({
+          description:
+            "create only: let this webhook's turns use mutating connectors. Off by default — a webhook carries " +
+            "third-party content, so its turns are floored to read-only connectors unless you opt out here.",
+        }),
+      ),
       limit: Type.Optional(Type.Integer({ minimum: 1, description: "list only: page size (default 25, max 100)." })),
       offset: Type.Optional(
         Type.Integer({
@@ -1935,6 +1951,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
             verification: params.verification,
             ...(params.filters?.length ? { filters: params.filters } : {}),
             ...(params.destinationKey !== undefined ? { destinationKey: params.destinationKey } : {}),
+            ...(params.allowMutatingTools === true ? { allowMutatingTools: true } : {}),
           });
           if (isUnavailable(r)) return unavailable(callId, "webhook");
           if (!r.ok)
@@ -2980,7 +2997,10 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
     updateGoal,
   ];
   const mcpNames = new Set(mcpTools.map((t) => t.name));
-  const active = opts?.readOnly ? tools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name) || mcpNames.has(t.name)) : tools;
+  const deliveryNames = surfaceTools ? new Set([surface.name, staySilent.name]) : new Set<string>();
+  const active = opts?.readOnly
+    ? tools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name) || mcpNames.has(t.name) || deliveryNames.has(t.name))
+    : tools;
   return active.map((t) => withToolBodyTiming(withToolApprovalGate(t, ref, { recordCall, recordResult }), ref));
 }
 

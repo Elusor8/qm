@@ -18,7 +18,8 @@ function isCreateWebhook(b: unknown): b is CreateWebhookInput {
     isObj(v) &&
     isWebhookVerification(v) &&
     (b.filters === undefined || isWebhookFilters(b.filters)) &&
-    (b.destination === undefined || isObj(b.destination))
+    (b.destination === undefined || isObj(b.destination)) &&
+    (b.allowMutatingTools === undefined || typeof b.allowMutatingTools === "boolean")
   );
 }
 
@@ -87,7 +88,16 @@ const WEBHOOK_ERROR_STATUS: Record<string, number> = {
 async function createWebhook(ctx: ApiCtx): Promise<void> {
   const { res, app, deps, body, capability } = ctx;
   if (capability) {
-    const b = body as { verification?: unknown; action?: unknown; filters?: unknown; destinationKey?: unknown };
+    const b = body as {
+      verification?: unknown;
+      action?: unknown;
+      filters?: unknown;
+      destinationKey?: unknown;
+      allowMutatingTools?: unknown;
+    };
+    if (b.allowMutatingTools !== undefined && typeof b.allowMutatingTools !== "boolean") {
+      return sendJson(res, 400, { error: "bad_request", message: "allowMutatingTools must be a boolean" });
+    }
     const ver = isObj(b.verification) ? (b.verification as { scheme?: unknown; secret?: unknown }) : undefined;
     if (!ver || !isWebhookVerification(ver) || typeof b.action !== "string") {
       return sendJson(res, 400, {
@@ -107,6 +117,7 @@ async function createWebhook(ctx: ApiCtx): Promise<void> {
         verification: { scheme: ver.scheme as Webhook["verification"]["scheme"], secret: ver.secret as string },
         ...(Array.isArray(b.filters) ? { filters: b.filters as Webhook["filters"] } : {}),
         ...(typeof b.destinationKey === "string" ? { destinationKey: b.destinationKey } : {}),
+        ...(b.allowMutatingTools === true ? { allowMutatingTools: true } : {}),
       },
       capability,
       deps.publicUrl,
