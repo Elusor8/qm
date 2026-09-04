@@ -74,6 +74,46 @@ test("register → list elides the secret; the inbound URL is returned", async (
   }
 });
 
+test("the source-auth create path refuses a malformed allowMutatingTools instead of silently flooring the webhook (ELU-504 review)", async () => {
+  const srv = start(SECRET);
+  try {
+    const bad = JSON.stringify({
+      ownerScopeId: "personal:U1",
+      owner: "U1",
+      createdBy: "U1",
+      action: "triage",
+      verification: { scheme: "github", secret: HOOK_SECRET },
+      allowMutatingTools: "yes",
+    });
+    const rejected = await fetch(`${srv.base}/v1/webhooks`, {
+      method: "POST",
+      headers: sign("POST", "/v1/webhooks", bad),
+      body: bad,
+    });
+    assert.equal(rejected.status, 400, "a non-boolean must be refused, not degraded to read-only");
+
+    // The boolean itself still round-trips on this path.
+    const good = JSON.stringify({
+      ownerScopeId: "personal:U1",
+      owner: "U1",
+      createdBy: "U1",
+      action: "triage",
+      verification: { scheme: "github", secret: HOOK_SECRET },
+      allowMutatingTools: true,
+    });
+    const created = await fetch(`${srv.base}/v1/webhooks`, {
+      method: "POST",
+      headers: sign("POST", "/v1/webhooks", good),
+      body: good,
+    });
+    assert.equal(created.status, 200);
+    const { webhook } = (await created.json()) as { webhook: { allowMutatingTools?: boolean } };
+    assert.equal(webhook.allowMutatingTools, true);
+  } finally {
+    await srv.close();
+  }
+});
+
 test("with a public base configured, the inbound URL is ABSOLUTE (publicly reachable, not the 6PN api base)", async () => {
   const srv = start(SECRET, "https://portal.example.com/");
   try {

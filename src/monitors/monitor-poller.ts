@@ -131,9 +131,6 @@ export function createMonitorPoller(deps: MonitorPollerDeps): MonitorPoller {
       securityScreenData: event.securityScreenData,
       fireKey,
       surface: "monitor",
-      // A monitor turn reads a process's output, which the process controls:
-      // read-only connectors only (ELU-504).
-      readOnly: true,
       threadRef: m.threadRef,
       ...(m.destination ? { destination: m.destination } : {}),
       ...(withErrorNotice

@@ -1906,6 +1906,13 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
       destinationKey: Type.Optional(
         Type.String({ description: 'create only: a key from the "Where scheduled tasks post" menu.' }),
       ),
+      allowMutatingTools: Type.Optional(
+        Type.Boolean({
+          description:
+            "create only: let this webhook's turns use mutating connectors. Off by default — a webhook carries " +
+            "third-party content, so its turns are floored to read-only connectors unless you opt out here.",
+        }),
+      ),
       limit: Type.Optional(Type.Integer({ minimum: 1, description: "list only: page size (default 25, max 100)." })),
       offset: Type.Optional(
         Type.Integer({
@@ -1935,6 +1942,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
             verification: params.verification,
             ...(params.filters?.length ? { filters: params.filters } : {}),
             ...(params.destinationKey !== undefined ? { destinationKey: params.destinationKey } : {}),
+            ...(params.allowMutatingTools === true ? { allowMutatingTools: true } : {}),
           });
           if (isUnavailable(r)) return unavailable(callId, "webhook");
           if (!r.ok)

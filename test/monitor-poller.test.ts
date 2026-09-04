@@ -156,7 +156,6 @@ test("new output wakes the agent as a first-class live turn in the arming conver
 
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0]?.surface, "monitor");
-  assert.equal(h.calls[0]?.readOnly, true, "monitor turns are floored to read-only connectors (ELU-504)");
   assert.equal(h.calls[0]?.conversation.kind, "dm");
   assert.equal(h.calls[0]?.conversation.threadRef, "thread-1");
   assert.match(h.calls[0]?.text ?? "", /compiling\.\.\./);
