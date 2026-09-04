@@ -1021,6 +1021,15 @@ test("readOnly assembles ONLY observational tools — no execute/background/writ
   for (const t of ["execute", "background", "read", "write", "publish", "cron", "webhook", "guidance"]) {
     assert.ok(!names(readOnly).has(t), `read-only toolset drops ${t}`);
   }
+
+  const readOnlyDelivering = createPiTools(ref, {
+    controlTools: true,
+    scratchExec: true,
+    reachExec: true,
+    readOnly: true,
+    surfaceTools: true,
+  });
+  assert.deepEqual([...names(readOnlyDelivering)].sort(), ["history", "memory", "slack", "stay_silent"]);
 });
 
 test("finish_silently on a poll fire terminates the turn at the tool contract; off one it no-ops", async () => {

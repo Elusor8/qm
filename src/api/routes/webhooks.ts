@@ -19,8 +19,6 @@ function isCreateWebhook(b: unknown): b is CreateWebhookInput {
     isWebhookVerification(v) &&
     (b.filters === undefined || isWebhookFilters(b.filters)) &&
     (b.destination === undefined || isObj(b.destination)) &&
-    // Validated on this path too (ELU-504 review): a malformed value must be
-    // refused, not silently degraded to the read-only default.
     (b.allowMutatingTools === undefined || typeof b.allowMutatingTools === "boolean")
   );
 }

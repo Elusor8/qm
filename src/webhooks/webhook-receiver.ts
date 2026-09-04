@@ -113,8 +113,6 @@ export function createWebhookReceiver(deps: WebhookReceiverDeps): WebhookReceive
         securityScreenData: event.securityScreenData,
         fireKey,
         surface: "webhook",
-        // Third-party content drives this turn: floor it to read-only MCP
-        // connectors unless the owner opted the webhook out (ELU-504).
         readOnly: wh.allowMutatingTools !== true,
         ...(destination ? { destination } : {}),
         recipientConsentRequired: true,

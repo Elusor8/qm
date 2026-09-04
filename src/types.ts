@@ -245,13 +245,6 @@ export interface Webhook extends TriggerBase {
   action: string;
   verification: WebhookVerification;
   filters?: WebhookFilter[];
-  /**
-   * A webhook turn carries third-party content, so by default it runs floored
-   * to read-only MCP connectors (the same boundary `/v1/turns` callers opt into
-   * with `readOnly`). The owner sets this to let the turn use mutating
-   * connectors — a deliberate decision recorded on the webhook, never the
-   * default (ELU-504).
-   */
   allowMutatingTools?: boolean;
   lastDeliveryId?: string;
   lastError?: string;

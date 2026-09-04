@@ -2988,7 +2988,10 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
     updateGoal,
   ];
   const mcpNames = new Set(mcpTools.map((t) => t.name));
-  const active = opts?.readOnly ? tools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name) || mcpNames.has(t.name)) : tools;
+  const deliveryNames = surfaceTools ? new Set([surface.name, staySilent.name]) : new Set<string>();
+  const active = opts?.readOnly
+    ? tools.filter((t) => READ_ONLY_TOOL_NAMES.has(t.name) || mcpNames.has(t.name) || deliveryNames.has(t.name))
+    : tools;
   return active.map((t) => withToolBodyTiming(withToolApprovalGate(t, ref, { recordCall, recordResult }), ref));
 }
 

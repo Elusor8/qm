@@ -131,6 +131,7 @@ export function createMonitorPoller(deps: MonitorPollerDeps): MonitorPoller {
       securityScreenData: event.securityScreenData,
       fireKey,
       surface: "monitor",
+      readOnly: true,
       threadRef: m.threadRef,
       ...(m.destination ? { destination: m.destination } : {}),
       ...(withErrorNotice

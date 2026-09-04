@@ -92,7 +92,6 @@ test("the source-auth create path refuses a malformed allowMutatingTools instead
     });
     assert.equal(rejected.status, 400, "a non-boolean must be refused, not degraded to read-only");
 
-    // The boolean itself still round-trips on this path.
     const good = JSON.stringify({
       ownerScopeId: "personal:U1",
       owner: "U1",

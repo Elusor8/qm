@@ -56,7 +56,6 @@ export interface SurfaceToolsContext {
   conversation: Conversation;
   session: Session;
   scopeId: ScopeId;
-  strictReadOnly: boolean;
   defaultDestination: Destination | undefined;
   blobTransfer: BlobTransferStore;
   fileRegistration: ArtifactRegistration;
@@ -82,7 +81,6 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
     conversation,
     session,
     scopeId,
-    strictReadOnly,
     defaultDestination,
     blobTransfer,
     fileRegistration,
@@ -90,7 +88,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
     postProvenance,
     spine,
   } = ctx;
-  if (strictReadOnly || !(input.surfaceTools && defaultDestination && deps.deliveries)) return undefined;
+  if (!(input.surfaceTools && defaultDestination && deps.deliveries)) return undefined;
   const deliveries = deps.deliveries;
   const currentDestination = defaultDestination;
   let editRefConsumed = false;
