@@ -309,7 +309,8 @@ export function coreToolOptions(config: Config): CoreToolOptions {
   };
 }
 
-const READ_ONLY_TOOL_NAMES = new Set(["memory", "history", "finish_silently"]);
+const READ_ONLY_TOOL_NAMES = new Set(["memory", "history", "background", "finish_silently"]);
+const READ_ONLY_BACKGROUND_ACTIONS = new Set(["poll", "list"]);
 
 export function pauseStampAfterToolCall(
   ref: Pick<ToolContextRef, "pausedOnApproval" | "silentRequested">,
@@ -1234,6 +1235,14 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
         process_id: params.process_id,
         ...(params.monitor_id ? { monitor_id: params.monitor_id } : {}),
       });
+      if (opts?.readOnly && !READ_ONLY_BACKGROUND_ACTIONS.has(params.action)) {
+        return recordResult(
+          callId,
+          { tool: "background", action: params.action, readOnly: true },
+          text("[this is a read-only wake — background jobs can be polled and listed here, but not started, written to, stopped, or watched]"),
+          true,
+        );
+      }
       try {
         switch (params.action) {
           case "start": {
