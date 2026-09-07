@@ -1039,13 +1039,7 @@ test("readOnly assembles ONLY observational tools — no execute/write/publish/c
     readOnly: true,
     surfaceTools: true,
   });
-  assert.deepEqual([...names(readOnlyDelivering)].sort(), [
-    "background",
-    "history",
-    "memory",
-    "slack",
-    "stay_silent",
-  ]);
+  assert.deepEqual([...names(readOnlyDelivering)].sort(), ["background", "history", "memory", "slack", "stay_silent"]);
 });
 
 test("finish_silently on a poll fire terminates the turn at the tool contract; off one it no-ops", async () => {
