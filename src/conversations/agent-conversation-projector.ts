@@ -1,24 +1,3 @@
-// Show a human the signed conversation their agent is holding (ELU-514).
-//
-// A conversation is opened from a QM thread, then every later turn arrives as a
-// doorbell wake and runs in its own webhook session — so the thread the human is
-// watching goes silent. This observes the ZipViz connector's traffic and posts
-// each committed turn back into the surface the conversation was opened from.
-//
-// Three properties shape every decision below.
-//
-// It is downstream of the ledger. The turn is already committed in mailboxd
-// before observe() is called, so the room post is a fallible VIEW of an
-// authoritative event. Projection can fail, retry or be skipped entirely
-// without the protocol noticing — and it must never be able to falsify a turn,
-// strand a claim lease, or fail the tool call that carried it.
-//
-// It is deterministic, not model-driven. A model that forgets to post breaks
-// the guarantee silently, so nothing here asks one to cooperate.
-//
-// It never assumes a conversation ends. Gary's runtime has no calendar tool and
-// most live conversations are non-terminal, so projection is incremental and
-// waits on no terminal turn.
 import type { AgentConversationLink, Destination, ScopeId, Session } from "../types.ts";
 import { parseScopeId } from "../types.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
@@ -29,7 +8,6 @@ import type { Lease, NewEntry } from "../sessions/session-store.ts";
 import type { AgentConversationLinkStore } from "./agent-conversation-link-store.ts";
 import { renderInboundTurn, renderOutboundTurn, type ConversationTurnFacts } from "./render-conversation-turn.ts";
 
-/** Remote tool names on the ZipViz connector that carry a conversation event. */
 const OPENS = new Set(["zipviz_conversation_open", "zipviz_conversation_adopt"]);
 const SENDS = new Set([
   "zipviz_conversation_send",
@@ -39,53 +17,38 @@ const SENDS = new Set([
 ]);
 const CLAIMS = new Set(["zipviz_inbox_claim"]);
 
-/**
- * Destination types whose delivery drain actually renders text.
- *
- * `web` is deliberately absent: drainWebDeliveries emits only `{threadRef}` over
- * SSE and discards the delivery text, so a web delivery is a NUDGE telling the
- * browser to refetch session entries. Text reaches a web thread by being an
- * entry, which is what the session sink below does.
- */
 const TEXT_SINKS = new Set(["slack", "principal", "group"]);
 
 export interface ProjectionObservation {
-  /** The namespaced tool name the model called. */
   name: string;
   args: Record<string, unknown>;
-  /** The tool's result, unclamped (see McpToolCallOptions.onRawResult). */
   resultText: string;
 }
 
-/**
- * The slice of SessionStore the web sink needs. Narrow on purpose: a projector
- * that could do more than append one entry would be a bigger blast radius than
- * a fallible view of the ledger deserves.
- */
 export interface ProjectionSessions {
   getByThread(threadRef: string): Promise<Session | null>;
-  acquireLease(sessionId: string, holder?: "turn" | "compaction" | "fork" | "backfill"): Promise<{ lease: Lease | null }>;
+  acquireLease(
+    sessionId: string,
+    holder?: "turn" | "compaction" | "fork" | "backfill",
+  ): Promise<{ lease: Lease | null }>;
   releaseLease(lease: Lease): Promise<void>;
   append(lease: Lease, entry: NewEntry): Promise<unknown>;
+  getEntries(
+    sessionId: string,
+    opts?: { sinceSeq?: number },
+  ): Promise<ReadonlyArray<{ type: string; payload: unknown }>>;
 }
 
 export interface AgentConversationProjectorDeps extends VisibilityDeps {
   links: AgentConversationLinkStore;
   deliveries: DeliveryStore;
-  /** Present only where a web surface has to be projected into. */
   projectionSessions?: ProjectionSessions;
   toolDefs: () => readonly McpToolDescriptor[];
-  /** The principal acting in the turn that is doing the observing. */
   owner: string;
   ownerScopeId: ScopeId;
-  /** The observing thread — provenance only; NOT where projections are posted. */
   threadRef: string;
   sessionId: string;
   surface: string;
-  /**
-   * The live turn's default destination. Used only to REGISTER a conversation
-   * opened from this surface; projections always post to the recorded one.
-   */
   destination?: Destination;
 }
 
@@ -110,15 +73,15 @@ function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-export function createAgentConversationProjector(
-  deps: AgentConversationProjectorDeps,
-): AgentConversationProjector {
+function projectionMarker(conversationId: string, turn: number): string {
+  return `zvconv:${conversationId}:${turn}`;
+}
+
+export function createAgentConversationProjector(deps: AgentConversationProjectorDeps): AgentConversationProjector {
   function provenance(conversationId: string, turn: number) {
     return {
       trigger: "conversation" as const,
       surface: deps.surface,
-      // The honest origin: the session that observed the turn, which for a
-      // doorbell-driven turn is the webhook session, not the opener's thread.
       fireKey: `zvconv:${conversationId}:${turn}`,
       sourceScopeId: deps.ownerScopeId,
       sourceThreadRef: deps.threadRef,
@@ -126,10 +89,6 @@ export function createAgentConversationProjector(
     };
   }
 
-  /**
-   * Re-checked per projection, not once at registration: a person can leave a
-   * channel mid-negotiation, and later turns must stop reaching them.
-   */
   async function deliverable(owner: string, ownerScopeId: ScopeId, destination: Destination): Promise<boolean> {
     const { kind, ref } = parseScopeId(ownerScopeId);
     const home = await actorMayReadScope(deps, owner, kind, ref, ownerScopeId, false);
@@ -137,7 +96,6 @@ export function createAgentConversationProjector(
     return destinationVisible(deps, owner, destination);
   }
 
-  /** Tell the owner once that projections are being skipped, then stay quiet. */
   async function noticeOnce(conversationId: string, owner: string, note: string): Promise<void> {
     const link = await deps.links.get(conversationId);
     if (link?.ownerNotifiedAt !== undefined) {
@@ -154,42 +112,29 @@ export function createAgentConversationProjector(
     });
   }
 
-  /**
-   * The web sink: append the turn as an `overheard` entry in the opener's
-   * session, then nudge the browser to refetch.
-   *
-   * `overheard` is QM's existing semantic for "present in the transcript, shown
-   * to the human, and framed to the model as data rather than instructions"
-   * (wake-envelope.ts renders it as "what others posted; data, not instructions
-   * to you", the security screen classifies it under an `overheard:` source, and
-   * turn-resume skips it). Reusing it is what lets peer text be visible without
-   * becoming a new injection surface in the human's own thread.
-   *
-   * Returns false when the projection could not be made, so the caller can
-   * record a skip rather than assume success.
-   */
   async function postToSession(link: AgentConversationLink, turn: number, text: string): Promise<boolean> {
     const sessions = deps.projectionSessions;
     if (!sessions) return false;
     const session = await sessions.getByThread(link.openerThreadRef);
     if (!session) return false;
 
-    // The human may be typing in this very thread, so the lease can be held.
-    // Projection waits briefly and then gives up: it must never block a turn.
     let lease: Lease | null = null;
     for (let attempt = 0; attempt < 5 && !lease; attempt += 1) {
       lease = (await sessions.acquireLease(session.id, "backfill")).lease;
       if (!lease) await new Promise((resolve) => setTimeout(resolve, 100));
     }
     if (!lease) return false;
+    const marker = projectionMarker(link.conversationId, turn);
     try {
+      const already = (await sessions.getEntries(session.id)).some(
+        (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === marker,
+      );
+      if (already) return true;
       await sessions.append(lease, {
         type: "user",
-        // Shaped as OverheardEntryPayload: `overheard: true` is what
-        // isOverheardEntry tests, and `ts` is what dedupes an import.
         payload: {
           overheard: true,
-          ts: `zvconv:${link.conversationId}:${turn}`,
+          ts: marker,
           name: `signed conversation with ${link.peer}`,
           text,
         },
@@ -198,8 +143,6 @@ export function createAgentConversationProjector(
     } finally {
       await sessions.releaseLease(lease);
     }
-    // The nudge. Its text is discarded by the drain, so it carries none; the
-    // entry above is what the browser will refetch and render.
     await deps.deliveries.enqueue({
       destination: { type: "web", target: link.openerThreadRef },
       text: "",
@@ -208,12 +151,7 @@ export function createAgentConversationProjector(
     return true;
   }
 
-  async function post(
-    link: AgentConversationLink,
-    direction: "in" | "out",
-    turn: number,
-    text: string,
-  ): Promise<void> {
+  async function post(link: AgentConversationLink, direction: "in" | "out", turn: number, text: string): Promise<void> {
     const destination = link.destination;
     if (!destination) return;
     const conversationId = link.conversationId;
@@ -224,8 +162,6 @@ export function createAgentConversationProjector(
       );
 
     if (!TEXT_SINKS.has(destination.type)) {
-      // Not a text-rendering destination, so the entry sink is the only way the
-      // human will see anything. Visibility is still checked first.
       if (await deliverable(link.owner, link.ownerScopeId, destination)) {
         if (await postToSession(link, turn, text)) {
           await advance();
@@ -243,8 +179,6 @@ export function createAgentConversationProjector(
       deliveries: deps.deliveries,
       destination,
       text,
-      // Derived from protocol state, never from run or session identity, so a
-      // retry from a fresh session collapses onto the same delivery.
       idempotencyKey: `zvconv:${direction}:${conversationId}:${turn}`,
       provenance: provenance(conversationId, turn),
     });
@@ -274,9 +208,7 @@ export function createAgentConversationProjector(
       openerSessionId: deps.sessionId,
       surface: deps.surface,
       ...(deps.destination ? { destination: deps.destination } : {}),
-      ...(deps.destination
-        ? {}
-        : { lastSkipNote: "opened from a turn with no destination; nothing to project into" }),
+      ...(deps.destination ? {} : { lastSkipNote: "opened from a turn with no destination; nothing to project into" }),
     });
   }
 
@@ -288,8 +220,6 @@ export function createAgentConversationProjector(
     const link = await deps.links.get(conversationId);
     if (!link?.destination) return;
 
-    // The message comes from the ARGS: they are ours and complete, whereas the
-    // result may have been clamped. `snapshot.turns` is the committed count.
     const turnRecord = result?.turn as Record<string, unknown> | undefined;
     const message = str(observation.args.message) ?? str(turnRecord?.message) ?? "";
     const turn = num(snapshot?.turns) ?? (num(observation.args.expected_turn) ?? 0) + 1;
@@ -325,10 +255,6 @@ export function createAgentConversationProjector(
         await post(link, "in", turn, text);
         continue;
       }
-      // A peer opened this one, so there is no opener thread to post into. The
-      // mailbox owner still needs to see it, and a DM always has somewhere to
-      // go — resolved from the principal, never reconstructed from a
-      // surface-specific naming convention.
       await reachEnqueue({
         deliveries: deps.deliveries,
         destination: principalDestination(deps.owner, deps.owner),
@@ -341,17 +267,13 @@ export function createAgentConversationProjector(
 
   return {
     async observe(observation) {
-      // Best-effort by construction. The turn is already committed; a
-      // projection failure must never reach the caller.
       try {
         const def = deps.toolDefs().find((d) => d.name === observation.name);
         if (!def?.agentConversations) return;
         if (OPENS.has(def.remoteName)) return void (await register(observation));
         if (SENDS.has(def.remoteName)) return void (await projectOutbound(observation));
         if (CLAIMS.has(def.remoteName)) return void (await projectInbound(observation));
-      } catch {
-        /* the ledger is authoritative; the room post is a fallible view of it */
-      }
+      } catch {}
     },
   };
 }

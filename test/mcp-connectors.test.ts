@@ -149,8 +149,6 @@ test("unknown tool call rejects", async () => {
   service.close();
 });
 
-// ELU-514. The projector observes a claim result to learn which conversation a
-// turn belongs to. Two properties make that possible.
 test("marks ZipViz-bound tools as observable, and only those", async () => {
   const { fetch } = fakeServerFetch();
   const store = createMcpServerStore(createMemoryMap());
@@ -171,8 +169,6 @@ test("marks ZipViz-bound tools as observable, and only those", async () => {
 });
 
 test("onRawResult sees the untruncated result while the model's view stays clamped", async () => {
-  // A claim result carrying a long peer message would otherwise be cut
-  // mid-JSON exactly when the projector needs to parse it.
   const long = "x".repeat(70_000);
   const fetch: McpFetch = async (_url, init) => {
     const req = JSON.parse(init.body) as { id: number; method: string };
@@ -188,26 +184,60 @@ test("onRawResult sees the untruncated result while the model's view stays clamp
   await service.refresh();
 
   let raw: { text: string } | undefined;
-  const out = await service.call("crm_query", {}, { onRawResult: (r) => (raw = r) });
+  const out = await service.call(
+    "crm_query",
+    {},
+    {
+      onRawResult: (r) => {
+        raw = r;
+      },
+    },
+  );
 
   assert.equal(raw?.text.length, 70_000, "the observer must see the whole result");
   assert.ok(out.length < 70_000, "the model's view is still bounded");
   assert.ok(out.endsWith("[truncated]"));
 });
 
-test("an observer that throws cannot fail the tool call", async () => {
-  // Projection is best-effort by construction; it must never turn a successful
-  // MCP call into an error the agent has to handle.
+test("an observer whose promise rejects cannot fail the tool call", async () => {
   const { fetch } = fakeServerFetch();
   const store = createMcpServerStore(createMemoryMap());
   const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
   await store.put(server());
   await service.refresh();
 
-  const out = await service.call("crm_query", {}, {
-    onRawResult: () => {
-      throw new Error("projector exploded");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const out = await service.call(
+      "crm_query",
+      {},
+      { onRawResult: async () => Promise.reject(new Error("async boom")) },
+    );
+    assert.equal(out, "ran query");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("an observer that throws cannot fail the tool call", async () => {
+  const { fetch } = fakeServerFetch();
+  const store = createMcpServerStore(createMemoryMap());
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
+  await store.put(server());
+  await service.refresh();
+
+  const out = await service.call(
+    "crm_query",
+    {},
+    {
+      onRawResult: () => {
+        throw new Error("projector exploded");
+      },
     },
-  });
+  );
   assert.equal(out, "ran query");
 });

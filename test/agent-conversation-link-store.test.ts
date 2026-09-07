@@ -27,7 +27,6 @@ test("records the destination verbatim, keyed on the conversation id", async () 
 
   assert.equal(link.conversationId, CONVERSATION);
   assert.equal(link.id, CONVERSATION, "the conversation id is the key, not a generated one");
-  // Recorded, never reconstructed: a Session cannot yield a posting target.
   assert.deepEqual(link.destination, {
     type: "slack",
     target: "C1:1700000000.1",
@@ -36,19 +35,17 @@ test("records the destination verbatim, keyed on the conversation id", async () 
   assert.deepEqual(await store.get(CONVERSATION), link);
 });
 
-// The observation that opens a conversation can be replayed. A replay must not
-// mint a second binding or overwrite the destination already recorded.
 test("is idempotent on the conversation id", async () => {
   const store = createAgentConversationLinkStore();
   const first = await store.record(input());
-  const second = await store.record(input({ destination: { type: "slack", target: "C-OTHER" }, openerSessionId: "sess-2" }));
+  const second = await store.record(
+    input({ destination: { type: "slack", target: "C-OTHER" }, openerSessionId: "sess-2" }),
+  );
 
   assert.deepEqual(second, first);
   assert.equal((await store.list()).length, 1);
 });
 
-// The whole point of keying on the conversation id: an attested runtime does
-// not send a thread ref at all, and the link must still be findable.
 test("is findable when the opener's thread ref is absent, as under attestation", async () => {
   const store = createAgentConversationLinkStore();
   await store.record(input({ externalThreadRef: undefined }));
@@ -71,8 +68,6 @@ test("advances each side's projected turn independently", async () => {
   assert.equal((await store.get(CONVERSATION))?.lastProjectedOutTurn, 3);
 });
 
-// A refused projection tells the owner once. A twelve-turn negotiation into a
-// channel they have left must not send twelve notices.
 test("stamps the owner notice once and never again", async () => {
   const store = createAgentConversationLinkStore();
   await store.record(input());
@@ -93,8 +88,6 @@ test("advance and noteSkip are no-ops for an unknown conversation", async () => 
   assert.equal((await store.list()).length, 0);
 });
 
-// assertNoEscalation is the trigger-store guard: a link must not claim a scope
-// wider than the person creating it holds.
 test("refuses a link whose scope exceeds the creator's", async () => {
   const store = createAgentConversationLinkStore();
   await assert.rejects(

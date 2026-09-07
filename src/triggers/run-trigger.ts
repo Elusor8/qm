@@ -16,17 +16,9 @@ import { principalDestination, reachEnqueue } from "../reach/reach.ts";
 import { consentRequiredRecipient, recipientConsentSatisfied } from "./trigger-store.ts";
 import type { VisibilityDirectory } from "../directory/visibility.ts";
 import { samePerson } from "../directory/person.ts";
-// The gates live in one place now, because the agent-conversation projector
-// asks the same question before posting a turn (ELU-514).
-import {
-  actorMayReadScope,
-  destinationVisible,
-  MEMBERSHIP_SKIP_NOTE,
-  UNKNOWN_HOME_SKIP_NOTE,
-} from "./trigger-visibility.ts";
+import { actorMayReadScope, destinationVisible, MEMBERSHIP_SKIP_NOTE } from "./trigger-visibility.ts";
 export { destinationVisible } from "./trigger-visibility.ts";
 import type { CurrentScopeMembers } from "../resolution/scope-membership.ts";
-
 
 export interface TriggerDeps {
   deliveries: DeliveryStore;

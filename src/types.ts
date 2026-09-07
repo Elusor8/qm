@@ -262,34 +262,17 @@ export interface Monitor extends TriggerBase {
   lastError?: string;
 }
 
-/**
- * The binding between a signed ZipViz conversation and the QM surface that
- * opened it, so later turns can be shown to the human who started it (ELU-514).
- *
- * Keyed on `conversationId`, deliberately, and NOT on the opener's thread ref:
- * the conversation id is present in every turn view unconditionally, while the
- * thread ref is suppressed for an attested runtime. Keying on the id means a
- * later switch to the attested `qm_turns` doorbell needs no change here.
- *
- * `destination` is recorded rather than reconstructed. A Session carries only
- * scopeId/channelName/surface, and the sole mapping from those to a posting
- * target is a Slack-plugin string convention — putting that in core would
- * produce silent nonsense for other surfaces and lose `audienceScopeId`.
- */
 export interface AgentConversationLink extends TriggerBase {
   conversationId: string;
   mailbox: string;
   peer: string;
-  /** The opener's runtime thread. A secondary index; absent under attestation. */
   externalThreadRef?: string;
   openerThreadRef: string;
   openerSessionId: string;
-  /** The surface the conversation was opened from; picks the projection sink. */
   surface: string;
   lastProjectedInTurn?: number;
   lastProjectedOutTurn?: number;
   lastSkipNote?: string;
-  /** One-shot, so a long negotiation cannot spam the owner with skip notices. */
   ownerNotifiedAt?: number;
 }
 

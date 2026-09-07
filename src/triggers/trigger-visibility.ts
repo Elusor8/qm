@@ -1,14 +1,3 @@
-// The "may this actor still reach this place?" gates, shared rather than
-// duplicated.
-//
-// Two callers now ask the same question: runTrigger, before delivering a
-// trigger's reply, and the agent-conversation projector, before posting a
-// signed turn into the surface that opened the conversation (ELU-514). A second
-// implementation would drift, and drift here means either a delivery to a
-// channel someone has left or a refusal to deliver one they can still see.
-//
-// Deps are structural, so this module does not import TriggerDeps and
-// TriggerDeps does not have to know about it.
 import type { Destination, ScopeId } from "../types.ts";
 import { parseScopeId } from "../types.ts";
 import { isVisible, type VisibilityDirectory } from "../directory/visibility.ts";
