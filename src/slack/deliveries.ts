@@ -256,7 +256,8 @@ export function createDeliveryPoller(deps: {
             );
             const root = threadTs ?? (res?.ts ? String(res.ts) : undefined);
             if (root) threads.mark(channel, root, true);
-            if (!d.destination.identity) mirrorSelfPost(channel, res?.ts, text, { sub: threadTs });
+            if (!d.destination.identity && !isConversationDelivery(d))
+              mirrorSelfPost(channel, res?.ts, text, { sub: threadTs });
             if (composedUploadError) {
               await client.chat
                 .postMessage(slackReplyArgs(channel, uploadFailureNote(composedUploadError), root))
@@ -321,7 +322,8 @@ export function createDeliveryPoller(deps: {
                 const posted = isConversationDelivery(d)
                   ? await postWithVerify(client, { ...args }, d.idempotencyKey, conversationPostOptions(d))
                   : await client.chat.postMessage(args);
-                mirrorSelfPost(channel, posted?.ts, text, { kind: "dm", sub: threadTs });
+                if (!isConversationDelivery(d))
+                  mirrorSelfPost(channel, posted?.ts, text, { kind: "dm", sub: threadTs });
               }
               if (d.attachments?.length && !uploadError) {
                 try {

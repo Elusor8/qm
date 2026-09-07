@@ -19,6 +19,7 @@ import {
   RECENT_HISTORY_LIMIT,
   RECENT_THREAD_LIMIT,
   slackFileName,
+  withoutConversationProjections,
 } from "./conversation-view.ts";
 
 export function createSurfaceContextFulfiller(deps: {
@@ -75,11 +76,27 @@ export function createSurfaceContextFulfiller(deps: {
   ): Promise<{ raw: any[]; hasMore: boolean }> {
     const page = before ? { latest: before, inclusive: false } : {};
     if (threadTs) {
-      const res = await client.conversations.replies({ channel, ts: threadTs, limit: RECENT_THREAD_LIMIT, ...page });
-      return { raw: res.messages ?? [], hasMore: Boolean(res.has_more) };
+      const res = await client.conversations.replies({
+        channel,
+        ts: threadTs,
+        limit: RECENT_THREAD_LIMIT,
+        include_all_metadata: true,
+        ...page,
+      });
+      return { raw: withoutConversationProjections(res.messages ?? []), hasMore: Boolean(res.has_more) };
     }
-    const res = await client.conversations.history({ channel, limit: RECENT_HISTORY_LIMIT, ...page });
-    return { raw: ((res.messages ?? []) as any[]).slice().reverse(), hasMore: Boolean(res.has_more) };
+    const res = await client.conversations.history({
+      channel,
+      limit: RECENT_HISTORY_LIMIT,
+      include_all_metadata: true,
+      ...page,
+    });
+    return {
+      raw: withoutConversationProjections((res.messages ?? []) as any[])
+        .slice()
+        .reverse(),
+      hasMore: Boolean(res.has_more),
+    };
   }
 
   async function findMessageAt(

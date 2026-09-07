@@ -1,3 +1,4 @@
+import { isProjectedConversationMessage } from "../conversations/conversation-delivery.ts";
 import { swallow } from "../util/errors.ts";
 import {
   type ActorAssertion,
@@ -25,6 +26,10 @@ const RECENT_KEEP_SUBTYPES = new Set(["file_share", "bot_message", "thread_broad
 const MEMBERS_SHOW_MAX = 40;
 
 export const slackFileName = (f: SlackFile): string => f.name || f.title || f.id || "file";
+
+export function withoutConversationProjections(raw: any[]): any[] {
+  return raw.filter((m) => !isProjectedConversationMessage(m ?? {}));
+}
 
 export function reactionTallies(raw: unknown): ReactionTally[] {
   if (!Array.isArray(raw)) return [];
@@ -113,20 +118,36 @@ export function createConversationSerializer(deps: {
   async function fetchRawConversation(client: any, channel: string, threadTs: string | undefined): Promise<any[]> {
     try {
       if (threadTs) {
-        return (
-          (await client.conversations.replies({ channel, ts: threadTs, limit: RECENT_THREAD_LIMIT })).messages ?? []
+        return withoutConversationProjections(
+          (
+            await client.conversations.replies({
+              channel,
+              ts: threadTs,
+              limit: RECENT_THREAD_LIMIT,
+              include_all_metadata: true,
+            })
+          ).messages ?? [],
         );
       }
-      const history = ((await client.conversations.history({ channel, limit: RECENT_HISTORY_LIMIT })).messages ?? [])
+      const history = withoutConversationProjections(
+        (await client.conversations.history({ channel, limit: RECENT_HISTORY_LIMIT, include_all_metadata: true }))
+          .messages ?? [],
+      )
         .slice()
         .reverse();
       const threadParents = history.filter((m: any) => m.ts && Number(m.reply_count) > 0).slice(-MAX_EXPANDED_THREADS);
       const expanded = await Promise.all(
         threadParents.map(async (p: any) => {
           try {
-            return (
-              (await client.conversations.replies({ channel, ts: p.ts, limit: EXPANDED_THREAD_REPLY_LIMIT }))
-                .messages ?? []
+            return withoutConversationProjections(
+              (
+                await client.conversations.replies({
+                  channel,
+                  ts: p.ts,
+                  limit: EXPANDED_THREAD_REPLY_LIMIT,
+                  include_all_metadata: true,
+                })
+              ).messages ?? [],
             );
           } catch {
             return [];
