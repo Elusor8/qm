@@ -1,5 +1,10 @@
 import type { ConversationTurn, OverheardMessage, ScopeId, SessionEntry } from "../types.ts";
-import { contextSummaryPayload, forModelContext, INTERRUPTED_TOOL_RESULT } from "./context-compaction.ts";
+import {
+  contextSummaryPayload,
+  forModelContext,
+  isHumanOnlyEntry,
+  INTERRUPTED_TOOL_RESULT,
+} from "./context-compaction.ts";
 import { isoFromTs, messageTag } from "../util/message-tag.ts";
 
 export { INTERRUPTED_TOOL_RESULT };
@@ -29,6 +34,7 @@ function overheardPayload(e: SessionEntry): OverheardEntryPayload | null {
 export function recordedMessageTimestamps(history: readonly SessionEntry[]): Set<string> {
   const seen = new Set<string>();
   for (const e of history) {
+    if (isHumanOnlyEntry(e)) continue;
     if (e.type !== "user") continue;
     const ts = (e.payload as { ts?: unknown } | null)?.ts;
     if (typeof ts === "string" && ts) seen.add(ts);
@@ -128,6 +134,7 @@ const hasToolCall = (m: PiReplayMessage): boolean =>
 export function reconstructMessagesFromHistory(history: readonly SessionEntry[]): PiReplayMessage[] {
   const resultByCallId = new Map<string, SessionEntry>();
   for (const e of history) {
+    if (isHumanOnlyEntry(e)) continue;
     if (e.type !== "tool_result") continue;
     const cid = (e.payload as { callId?: unknown } | null)?.callId;
     if (typeof cid === "string" && cid) resultByCallId.set(cid, e);
@@ -147,6 +154,7 @@ export function reconstructMessagesFromHistory(history: readonly SessionEntry[])
   });
 
   for (const e of history) {
+    if (isHumanOnlyEntry(e)) continue;
     const summary = contextSummaryPayload(e);
     if (summary) {
       raw.push(userMsg(`[Earlier conversation summary]\n${summary.text}`, e.createdAt));
@@ -295,6 +303,7 @@ export function replayPreamble(history: SessionEntry[]): string {
       .replaceAll("END TRANSCRIPT>>>", "END_TRANSCRIPT");
   const lines: string[] = [];
   for (const e of history) {
+    if (isHumanOnlyEntry(e)) continue;
     const summary = contextSummaryPayload(e);
     const overheard = overheardPayload(e);
     if (summary) lines.push(`Prior summary: ${summary.text}`);

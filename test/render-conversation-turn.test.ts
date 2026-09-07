@@ -85,7 +85,7 @@ test("caps long text and says so, without splitting a surrogate pair", () => {
   assert.ok(out.length < 9_000);
   assert.ok(out.includes("truncated"), "the loss is stated, not silent");
 
-  const emoji = "\u{1F600}".repeat(3_000); // 6,000 code units
+  const emoji = "\u{1F600}".repeat(3_000);
   const capped = sanitiseForDisplay(emoji, 101);
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped), "no dangling high surrogate");
 });

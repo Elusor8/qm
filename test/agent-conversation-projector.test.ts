@@ -142,6 +142,7 @@ async function assertProjected(fixture: Awaited<ReturnType<typeof setup>>, direc
   assert.ok(isOverheardEntry(entries[0]!));
   assert.equal(entries[0]!.scopeLabel, OWNER_SCOPE);
   assert.deepEqual(entries[0]!.payload, {
+    kind: "agent_conversation_projection",
     overheard: true,
     ts: MARKER,
     name: `signed conversation with ${PEER}`,

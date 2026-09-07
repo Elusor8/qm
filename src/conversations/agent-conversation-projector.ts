@@ -164,6 +164,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         await sessions.append(lease, {
           type: "user",
           payload: {
+            kind: "agent_conversation_projection",
             overheard: true,
             ts: marker,
             name: `signed conversation with ${link.peer ?? "the peer"}`,

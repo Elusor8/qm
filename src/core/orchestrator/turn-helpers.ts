@@ -187,7 +187,9 @@ export async function recentPrincipalDeliveryNote(
   threadRef: string,
 ): Promise<string> {
   if (!deliveries) return "";
-  const recent = await deliveries.listByRecipientThread(threadRef, { limit: 5 });
+  const recent = (await deliveries.listByRecipientThread(threadRef, { limit: 5 })).filter(
+    (delivery) => delivery.provenance?.trigger !== "conversation" && !delivery.idempotencyKey.startsWith("zvconv:"),
+  );
   if (!recent.length) return "";
   const lines = recent.map((d) => {
     const from = d.destination.onBehalfOf ? ` from ${d.destination.onBehalfOf}` : "";

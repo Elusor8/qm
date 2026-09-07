@@ -56,7 +56,7 @@ import {
   type CapabilityClaims,
 } from "../auth/capability-token.ts";
 import type { GapWork, HarnessLlmRequestRecord, HarnessTurnResult } from "../harness/harness.ts";
-import { forModelContext } from "../harness/context-compaction.ts";
+import { forModelContext, isHumanOnlyEntry } from "../harness/context-compaction.ts";
 import {
   renderSecurityPolicyPrompt,
   securityScreenPayload,
@@ -2135,8 +2135,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const historyHasSecurityTaint = rawEntries.some(
           (entry) => (entry.payload as { securityTainted?: unknown } | null)?.securityTainted === true,
         );
-        const priorTurns = historyHasSecurityTaint ? undefined : input.priorTurns;
-        if (historyHasSecurityTaint) {
+        const historyNeedsFilteredReplay = historyHasSecurityTaint || rawEntries.some(isHumanOnlyEntry);
+        const priorTurns = historyNeedsFilteredReplay ? undefined : input.priorTurns;
+        if (historyNeedsFilteredReplay) {
           await deps.harness.turns.resetSession?.(session.id);
         }
         const visibleHistory = filterHistory(forModelContext(rawEntries, { includeSecurityTainted: false }));
@@ -2174,7 +2175,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           );
         };
         const tapeRows = await (async () => {
-          if (historyHasSecurityTaint || rawEntries.length > 500) return undefined;
+          if (historyNeedsFilteredReplay || rawEntries.length > 500) return undefined;
           try {
             const preAppended = new Set(preAppendedSeqs);
             const priorMaxSeq = rawEntries.reduce((m, e) => (preAppended.has(e.seq) ? m : Math.max(m, e.seq)), -1);
