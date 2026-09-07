@@ -261,6 +261,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     `CREATE INDEX IF NOT EXISTS sessions_by_activity ON sessions((COALESCE(last_activity, created_at)) DESC, id DESC)`,
     `CREATE INDEX IF NOT EXISTS sessions_by_scope_activity
         ON sessions(scope_id, (COALESCE(last_activity, created_at)) DESC, id DESC)`,
+    `CREATE INDEX IF NOT EXISTS session_entries_projection_marker ON session_entries(session_id, ((payload::jsonb)->>'ts')) WHERE type = 'user' AND payload LIKE '%zvconv:%'`,
     `CREATE INDEX IF NOT EXISTS session_entries_user_ts ON session_entries(created_at) WHERE type = 'user'`,
     `CREATE INDEX IF NOT EXISTS session_entries_session_created ON session_entries(session_id, created_at DESC)`,
     `CREATE OR REPLACE FUNCTION entry_search_text(payload text) RETURNS text
@@ -477,6 +478,17 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         );
         return full;
       });
+    },
+
+    async hasProjectionMarker(sessionId, ts) {
+      return (
+        (
+          await q(
+            "SELECT 1 FROM session_entries WHERE session_id = $1 AND type = 'user' AND payload LIKE '%zvconv:%' AND (payload::jsonb)->>'ts' = $2 LIMIT 1",
+            [sessionId, ts],
+          )
+        ).length > 0
+      );
     },
 
     async clearSecurityTaint(sessionId) {

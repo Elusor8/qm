@@ -38,6 +38,7 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS provenance JSONB`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS recipient_thread_ref TEXT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT FALSE`,
+    `CREATE INDEX IF NOT EXISTS idx_deliveries_conversation_pending ON deliveries ((provenance->'conversation'->>'sideKey')) WHERE delivered_at IS NULL AND NOT shadow`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliver_latency_ms INT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS slack_api_ms INT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_expires_at BIGINT`,
@@ -95,8 +96,14 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
                   ELSE claim_attempts END,
                 claim_expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT + $2
           WHERE id IN (
-            SELECT id FROM deliveries
-             WHERE delivered_at IS NULL AND NOT shadow AND destination->>'type' = $1
+            SELECT candidate.id FROM deliveries candidate
+             WHERE candidate.delivered_at IS NULL AND NOT candidate.shadow AND candidate.destination->>'type' = $1
+               AND NOT EXISTS (
+                 SELECT 1 FROM deliveries prior
+                  WHERE prior.delivered_at IS NULL AND NOT prior.shadow
+                    AND prior.provenance->'conversation'->>'sideKey' = candidate.provenance->'conversation'->>'sideKey'
+                    AND (prior.provenance->'conversation'->>'turn')::numeric < (candidate.provenance->'conversation'->>'turn')::numeric
+               )
                AND (claim_expires_at IS NULL
                  OR claim_expires_at <= (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT)
              ORDER BY created_at

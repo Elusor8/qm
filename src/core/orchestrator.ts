@@ -1995,6 +1995,22 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           memoryScopeId,
           ...(memoryAccess ? { memoryAccess } : {}),
           ...(deps.mcp ? { mcp: deps.mcp } : {}),
+          ...(deps.conversationProjection
+            ? {
+                onMcpRawResult: (observation) =>
+                  deps.conversationProjection!.capture(
+                    {
+                      owner: actor.id,
+                      ownerScopeId: scopeId,
+                      threadRef: session.threadRef,
+                      sessionId: session.id,
+                      surface: input.surface ?? session.surface ?? "unknown",
+                      destination: defaultDestination,
+                    },
+                    observation,
+                  ),
+              }
+            : {}),
           ...(strictReadOnly ? { readOnly: true } : {}),
           sessionHistory: {
             search: async (q: string, limit?: number) =>

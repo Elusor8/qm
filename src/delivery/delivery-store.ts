@@ -60,7 +60,18 @@ export function createDeliveryStore(): DeliveryStore {
       const now = Date.now();
       const rows = [...deliveries.values()].filter(
         (d) =>
-          d.deliveredAt === null && !d.shadow && d.destination.type === type && (claimedUntil.get(d.id) ?? 0) <= now,
+          d.deliveredAt === null &&
+          !d.shadow &&
+          d.destination.type === type &&
+          (claimedUntil.get(d.id) ?? 0) <= now &&
+          ![...deliveries.values()].some(
+            (prior) =>
+              prior.deliveredAt === null &&
+              !prior.shadow &&
+              d.provenance?.conversation?.sideKey &&
+              prior.provenance?.conversation?.sideKey === d.provenance.conversation.sideKey &&
+              (prior.provenance.conversation.turn ?? Infinity) < (d.provenance.conversation.turn ?? -1),
+          ),
       );
       for (const d of rows) {
         claimedUntil.set(d.id, now + ttlMs);

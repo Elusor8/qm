@@ -190,6 +190,12 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       return opts?.limit !== undefined ? filtered.slice(-opts.limit) : filtered;
     },
 
+    async hasProjectionMarker(sessionId, ts) {
+      return (entries.get(sessionId) ?? []).some(
+        (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === ts,
+      );
+    },
+
     async clearSecurityTaint(sessionId) {
       const log = entries.get(sessionId);
       if (!log) return false;

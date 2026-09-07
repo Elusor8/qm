@@ -451,6 +451,7 @@ export interface SessionStore {
 
   append(lease: Lease, entry: NewEntry): Promise<SessionEntry>;
   getEntries(sessionId: string, opts?: GetEntriesOptions): Promise<SessionEntry[]>;
+  hasProjectionMarker(sessionId: string, ts: string): Promise<boolean>;
   clearSecurityTaint(sessionId: string): Promise<boolean>;
 
   appendTape(lease: Lease, rec: NewTapeRecord): Promise<TapeRecord>;

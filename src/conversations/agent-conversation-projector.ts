@@ -39,6 +39,7 @@ export interface ProjectionSessions {
   ): Promise<{ lease: Lease | null }>;
   releaseLease(lease: Lease): Promise<void>;
   append(lease: Lease, entry: NewEntry): Promise<unknown>;
+  hasProjectionMarker?(sessionId: string, ts: string): Promise<boolean>;
   getEntries(
     sessionId: string,
     opts?: { sinceSeq?: number },
@@ -61,6 +62,8 @@ export interface AgentConversationProjectorDeps
 
 export interface AgentConversationProjector {
   observe(observation: ProjectionObservation): Promise<void>;
+  project(observation: ProjectionObservation): Promise<void>;
+  register(observation: ProjectionObservation, remoteName: string): Promise<AgentConversationLink | null>;
 }
 
 function parseJson(text: string): Record<string, unknown> | null {
@@ -101,7 +104,14 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
   function provenance(identity: AgentConversationIdentity, turn: number, ownerScopeId = deps.ownerScopeId) {
     return {
       trigger: "conversation" as const,
-      conversation: { ...identity, ownerScopeId },
+      conversation: {
+        conversationId: identity.conversationId,
+        mailbox: identity.mailbox,
+        owner: identity.owner,
+        ownerScopeId,
+        sideKey: agentConversationLinkId(identity),
+        turn,
+      },
       surface: deps.surface,
       fireKey: projectionMarker(identity, turn),
       sourceScopeId: deps.ownerScopeId,
@@ -145,9 +155,11 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         !(await deliverable(link.owner, link.ownerScopeId, link.destination))
       )
         return false;
-      const already = (await sessions.getEntries(session.id)).some(
-        (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === marker,
-      );
+      const already = sessions.hasProjectionMarker
+        ? await sessions.hasProjectionMarker(session.id, marker)
+        : (await sessions.getEntries(session.id)).some(
+            (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === marker,
+          );
       if (!already) {
         await sessions.append(lease, {
           type: "user",
@@ -188,7 +200,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         return;
       }
       await deps.links.noteSkip(link, `could not project into the ${destination.type} surface`);
-      return;
+      throw new Error(`could not project into the ${destination.type} surface`);
     }
     await reachEnqueue({
       deliveries: deps.deliveries,
@@ -258,7 +270,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
 
     const turnRecord = result?.turn as Record<string, unknown> | undefined;
     const signed = turnRecord?.conversation as Record<string, unknown> | undefined;
-    const message = str(observation.args.message) ?? str(turnRecord?.message) ?? "";
+    const message = str(turnRecord?.message) ?? str(observation.args.message) ?? "";
     const turn = num(signed?.turn) ?? num(snapshot?.turns) ?? (num(observation.args.expected_turn) ?? 0) + 1;
     const defaultIntent =
       remoteName === "zipviz_conversation_open" ? "propose" : remoteName.slice("zipviz_conversation_".length);
@@ -306,18 +318,24 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     }
   }
 
+  async function project(observation: ProjectionObservation): Promise<void> {
+    const def = deps.toolDefs().find((d) => d.name === observation.name);
+    if (!def?.agentConversations) return;
+    if (OPENS.has(def.remoteName)) {
+      const link = await register(observation, def.remoteName);
+      if (link && def.remoteName === "zipviz_conversation_open") await projectOutbound(observation, def.remoteName);
+      return;
+    }
+    if (SENDS.has(def.remoteName)) return projectOutbound(observation, def.remoteName);
+    if (CLAIMS.has(def.remoteName)) return projectInbound(observation);
+  }
+
   return {
+    project,
+    register,
     async observe(observation) {
       try {
-        const def = deps.toolDefs().find((d) => d.name === observation.name);
-        if (!def?.agentConversations) return;
-        if (OPENS.has(def.remoteName)) {
-          const link = await register(observation, def.remoteName);
-          if (link && def.remoteName === "zipviz_conversation_open") await projectOutbound(observation, def.remoteName);
-          return;
-        }
-        if (SENDS.has(def.remoteName)) return void (await projectOutbound(observation, def.remoteName));
-        if (CLAIMS.has(def.remoteName)) return void (await projectInbound(observation));
+        await project(observation);
       } catch (e) {
         swallow("agent conversation projection", e);
       }

@@ -188,7 +188,15 @@ export interface CandidateDestination extends Destination {
 export type BackgroundWakeTrigger = "cron" | "webhook" | "monitor" | (string & {});
 
 export interface DeliveryProvenance {
-  conversation?: { conversationId: string; mailbox: string; owner: string; ownerScopeId: ScopeId; notice?: boolean };
+  conversation?: {
+    conversationId: string;
+    mailbox: string;
+    owner: string;
+    ownerScopeId: ScopeId;
+    notice?: boolean;
+    sideKey?: string;
+    turn?: number;
+  };
   trigger: BackgroundWakeTrigger;
   surface: string;
   fireKey: string;

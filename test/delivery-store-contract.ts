@@ -236,4 +236,45 @@ export async function exerciseDeliveryStore(store: DeliveryStore): Promise<void>
     "an expired claim re-surfaces (at-least-once)",
   );
   await store.ack(abandoned.id, 700);
+  const binding = {
+    owner: "U1",
+    mailbox: "alice.example.viz",
+    conversationId: "contract-order",
+    ownerScopeId: "personal:U1",
+    sideKey: "contract-order-side",
+  };
+  for (const turn of [2, 1]) {
+    await store.enqueue({
+      destination: { type: "principal", target: "U1" },
+      text: `turn ${turn}`,
+      idempotencyKey: `zvconv:contract-order:${turn}`,
+      provenance: {
+        trigger: "conversation",
+        surface: "webhook",
+        fireKey: `turn:${turn}`,
+        sourceScopeId: "personal:U1",
+        sourceThreadRef: "wake",
+        conversation: { ...binding, turn },
+      },
+    });
+  }
+  const ordered = (rows: Awaited<ReturnType<typeof store.claimPending>>) =>
+    rows.filter((row) => row.provenance?.conversation?.sideKey === binding.sideKey);
+  const firstTurn = ordered(await store.claimPending("principal", 15_000));
+  assert.deepEqual(
+    firstTurn.map((row) => row.provenance?.conversation?.turn),
+    [1],
+  );
+  assert.equal(
+    ordered(await store.claimPending("principal", 15_000)).length,
+    0,
+    "a later turn cannot overtake an unacknowledged claimed turn",
+  );
+  await store.ack(firstTurn[0]!.id, Date.now());
+  const nextTurn = ordered(await store.claimPending("principal", 15_000));
+  assert.deepEqual(
+    nextTurn.map((row) => row.provenance?.conversation?.turn),
+    [2],
+  );
+  await store.ack(nextTurn[0]!.id, Date.now());
 }
