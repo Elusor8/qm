@@ -31,7 +31,7 @@ export interface ProjectionObservation {
   resultText: string;
 }
 
-export interface ProjectionSessions {
+interface ProjectionSessions {
   getByThread(threadRef: string): Promise<Session | null>;
   acquireLease(
     sessionId: string,

@@ -5,7 +5,7 @@ import { samePerson } from "../directory/person.ts";
 
 export const MEMBERSHIP_SKIP_NOTE =
   "the acting person is no longer a member of this trigger's home scope — run skipped";
-export const UNKNOWN_HOME_SKIP_NOTE =
+const UNKNOWN_HOME_SKIP_NOTE =
   "this trigger's home scope is missing from the directory snapshot (roster sync gap) and the acting person has no session there — run skipped";
 
 export interface VisibilityDeps {

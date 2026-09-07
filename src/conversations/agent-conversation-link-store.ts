@@ -9,7 +9,7 @@ export function agentConversationLinkId(identity: AgentConversationIdentity): st
   return JSON.stringify([identity.mailbox.trim().toLowerCase(), personKey(identity.owner), identity.conversationId]);
 }
 
-export interface CreateAgentConversationLinkInput extends CreateTriggerInput {
+interface CreateAgentConversationLinkInput extends CreateTriggerInput {
   conversationId: string;
   mailbox: string;
   peer?: string;

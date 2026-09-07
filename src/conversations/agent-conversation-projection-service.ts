@@ -22,7 +22,7 @@ const TOOLS = new Set([
   "zipviz_inbox_claim",
 ]);
 
-export interface ProjectionContext {
+interface ProjectionContext {
   owner: string;
   ownerScopeId: ScopeId;
   threadRef: string;

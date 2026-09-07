@@ -152,3 +152,64 @@ test("unlinked receiving owner starts at the first captured turn with no histori
   assert.equal(posted[0]!.destination.target, "U1");
   assert.equal((await f.progress.get(key))!.baselineTurn, 7);
 });
+
+test("long-lived and terminal conversations project every captured turn incrementally", async () => {
+  const f = await fixture();
+  for (let turn = 1; turn <= 20; turn++) {
+    const remote = turn === 1 ? "zipviz_conversation_open" : "zipviz_conversation_send";
+    const obs = observation(turn, remote);
+    if (turn % 2 === 0) {
+      obs.raw.conversationBinding.remoteName = "zipviz_inbox_claim";
+      obs.raw.text = JSON.stringify({
+        claimed: [
+          {
+            from: "bob.example.viz",
+            body: `turn ${turn}`,
+            conversation: {
+              conversation_id: side.conversationId,
+              turn,
+              intent: turn === 20 ? "complete" : "accept",
+              state: turn === 20 ? "completed" : "active",
+            },
+          },
+        ],
+      });
+    }
+    await f.service.capture(f.context, obs);
+    await f.service.sweep();
+    assert.equal((await f.sessions.getEntries(f.session.id)).length, turn);
+  }
+  assert.equal((await f.deliveries.pending("web")).length, 20);
+  assert.equal((await f.progress.get(key))!.lastTurn, 20);
+  const entries = await f.sessions.getEntries(f.session.id);
+  assert.match(JSON.stringify(entries.at(-1)), /complete/);
+  assert.ok(entries.every((entry) => (entry.payload as { kind: string }).kind === "agent_conversation_projection"));
+});
+
+test("adoption registers the actual response without a peer or fabricated history", async () => {
+  const f = await fixture();
+  const obs = observation(0, "zipviz_conversation_adopt");
+  obs.raw.text = JSON.stringify({
+    mailbox: side.mailbox,
+    conversation_id: side.conversationId,
+    binding_role: "ingress-owner",
+  });
+  await f.service.capture(f.context, obs);
+  const link = await f.links.get(side);
+  assert.equal(link?.destination?.target, f.session.threadRef);
+  assert.equal(link?.peer, undefined);
+  assert.equal((await f.sessions.getEntries(f.session.id)).length, 0);
+  assert.equal((await f.deliveries.pending("conversation-projection")).length, 0);
+  await f.service.capture(f.context, observation(9));
+  await f.service.sweep();
+  assert.equal((await f.sessions.getEntries(f.session.id)).length, 1);
+});
+
+test("an explicit no-destination opening stays silent through durable retry", async () => {
+  const f = await fixture();
+  await f.service.capture({ ...f.context, destination: undefined }, observation(1, "zipviz_conversation_open"));
+  await f.restart().sweep();
+  assert.equal((await f.sessions.getEntries(f.session.id)).length, 0);
+  assert.equal((await f.deliveries.pending("principal")).length, 0);
+  assert.equal((await f.links.get(side))?.destination, undefined);
+});

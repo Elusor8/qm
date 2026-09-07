@@ -18,8 +18,9 @@ const binding = {
   adapterInstance: "test",
 };
 
-for (const surface of ["web", "slack"] as const) {
-  test(`wired ${surface} opener captures the committed raw turn under its lease and projects after it completes`, async (t) => {
+for (const scenario of ["web", "slack", "capture-retry"] as const) {
+  const surface = scenario === "slack" ? "slack" : "web";
+  test(`wired ${scenario} opener captures the committed raw turn under its lease and projects after it completes`, async (t) => {
     const requests: Array<Record<string, any>> = [];
     t.mock.method(globalThis, "fetch", async (url: unknown, init: RequestInit) => {
       assert.equal(String(url), "https://mcp-projection.invalid/mcp");
@@ -73,13 +74,30 @@ for (const surface of ["web", "slack"] as const) {
     const name = built.mcpToolService.toolDefs()[0]!.name;
     const threadRef = `${surface}:U1:opener`;
     const deliveryTarget = surface === "web" ? threadRef : "C1:123.456";
-    const result = await built.app.turn({
+    let failedCapture = false;
+    if (scenario === "capture-retry") {
+      const enqueue = built.deliveries.enqueue.bind(built.deliveries);
+      t.mock.method(built.deliveries, "enqueue", async (input: Parameters<typeof enqueue>[0]) => {
+        if (input.destination.type === "conversation-projection" && !failedCapture) {
+          failedCapture = true;
+          throw new Error("durable capture unavailable");
+        }
+        return enqueue(input);
+      });
+    }
+    const request = {
       surface,
       actor: { externalId: "U1" },
-      conversation: { kind: "channel", threadRef, channelRef: "C1", audience: [{ externalId: "U1" }] },
+      conversation: { kind: "channel" as const, threadRef, channelRef: "C1", audience: [{ externalId: "U1" }] },
       deliveryTarget,
       text: `!mcp ${name} ${JSON.stringify({ mailbox, peer: "bob.example.viz", message: "UNCOMMITTED_ARGUMENT" })}`,
-    });
+    };
+    let result = await built.app.turn(request);
+    if (scenario === "capture-retry") {
+      assert.equal(result.status, "ok", "capture failure cannot falsify the committed MCP operation");
+      assert.equal((await built.deliveries.pending("conversation-projection")).length, 0);
+      result = await built.app.turn(request);
+    }
     assert.equal(result.status, "ok", result.reason);
     assert.ok(requests.some((request) => request.method === "tools/call"));
     const link = await built.conversationLinks.get({ owner: "U1", mailbox, conversationId });
@@ -130,5 +148,118 @@ for (const surface of ["web", "slack"] as const) {
       assert.equal(projected[0]!.channel, "C1");
       assert.match(projected[0]!.text, /SIGNED_COMMITTED_BODY/);
     }
+  });
+}
+
+for (const isError of [false, true]) {
+  test(`wired receiving mailbox uses the bound owner's resolved DM and unclamped claim (error=${isError})`, async (t) => {
+    const owner = "alice@example.test";
+    const body = `PEER_PREFIX ${"x".repeat(70_000)} TAIL_RAW_CAPTURE`;
+    const claim = JSON.stringify({
+      claimed: [
+        {
+          from: "bob.example.viz",
+          body,
+          conversation: {
+            conversation_id: conversationId,
+            turn: 2,
+            intent: "accept",
+            state: "active",
+            waiting_on: "us",
+            reply_due: true,
+          },
+        },
+      ],
+    });
+    t.mock.method(globalThis, "fetch", async (url: unknown, init: RequestInit) => {
+      assert.equal(String(url), "https://mcp-projection.invalid/mcp");
+      const request = JSON.parse(String(init.body));
+      const result =
+        request.method === "tools/list"
+          ? { tools: [{ name: "zipviz_inbox_claim", inputSchema: { type: "object" } }] }
+          : { isError, content: [{ type: "text", text: claim }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const built = buildApp(
+      testConfig({ dataDir: mkdtempSync(join(tmpdir(), "projection-receiver-")), signingSecret: "projection-fixture" }),
+    );
+    t.after(async () => {
+      built.mcpToolService.close();
+      await built.runtime.stop();
+    });
+    await built.app.upsertDirectory([{ principalId: owner, displayName: "Alice", type: "internal" }]);
+    await built.mcpServers.put({
+      id: "receiver",
+      name: "Receiving mailbox",
+      url: "https://mcp-projection.invalid/mcp",
+      auth: "none",
+      enabled: true,
+      readOnly: false,
+      updatedAt: 0,
+      updatedBy: owner,
+      zipviz: { ...binding, actorPrincipalId: owner },
+    });
+    await built.mcpToolService.refresh();
+    const name = built.mcpToolService.toolDefs()[0]!.name;
+    const result = await built.app.turn({
+      surface: "webhook",
+      actor: { externalId: owner },
+      conversation: { kind: "dm", threadRef: "webhook:receiver" },
+      triggered: true,
+      text: `!mcp ${name} ${JSON.stringify({ mailbox })}`,
+    });
+    const jobs = await built.deliveries.pending("conversation-projection");
+    if (isError) {
+      assert.equal(jobs.length, 0);
+      return;
+    }
+    assert.equal(result.status, "ok", result.reason);
+    assert.equal(jobs.length, 1);
+    assert.match(jobs[0]!.text, /TAIL_RAW_CAPTURE/);
+    assert.ok((result.reply?.length ?? Infinity) < claim.length);
+    await built.conversationProjection.sweep();
+    const queued = await built.deliveries.pending("principal");
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0]!.destination.target, owner);
+    const posts: Array<Record<string, any>> = [];
+    const client = {
+      users: {
+        lookupByEmail: async (args: { email: string }) => {
+          assert.equal(args.email, owner);
+          return { user: { id: "U_RESOLVED_OWNER" } };
+        },
+      },
+      conversations: {
+        open: async (args: { users: string }) => {
+          assert.equal(args.users, "U_RESOLVED_OWNER");
+          return { channel: { id: "D_OWNER" } };
+        },
+      },
+      chat: {
+        postMessage: async (args: Record<string, any>) => {
+          posts.push(args);
+          return { ts: "456.1", channel: args.channel };
+        },
+      },
+    };
+    const core = {
+      claimDeliveries: (type: string, ttl: number) => built.app.pendingDeliveries(type, ttl),
+      authorizeConversationDelivery: (id: string) => built.app.authorizeConversationDelivery(id),
+      ackDelivery: (id: string) => built.app.ackDelivery(id),
+    };
+    const poller = createDeliveryPoller({
+      core: core as never,
+      bridge: { inFlightRuns: new Set() } as never,
+      mirror: { mirrorSelfPost() {} } as never,
+      threads: { mark() {} } as never,
+      clientForIdentity: () => client,
+    });
+    await poller.pollDeliveries(client);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0]!.channel, "D_OWNER");
+    assert.match(posts[0]!.text, /PEER_PREFIX/);
+    assert.match(posts[0]!.text, /truncated/);
   });
 }
