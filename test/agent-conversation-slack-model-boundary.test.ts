@@ -25,8 +25,10 @@ const projection = {
   metadata: { event_type: "qm_delivery", event_payload: { idempotency_key: "zvconv:outbound:link-1:2" } },
 };
 const human = { ts: "100.1", user: "U1", text: ORDINARY };
+const olderHuman = { ts: "50.1", user: "U1", text: `${ORDINARY}_OLDER` };
+const selfReply = { ts: "210.1", thread_ts: "100.1", user: "UBOT", text: `${ORDINARY}_SELF_REPLY` };
 
-function historyClient(calls: Record<string, unknown>[], pages?: any[][]) {
+function historyClient(calls: Record<string, unknown>[], pages?: any[][], replyPages?: any[][]) {
   return {
     conversations: {
       history: async (args: Record<string, unknown>) => {
@@ -36,6 +38,7 @@ function historyClient(calls: Record<string, unknown>[], pages?: any[][]) {
       },
       replies: async (args: Record<string, unknown>) => {
         calls.push(args);
+        if (replyPages) return { messages: replyPages.shift() ?? [], has_more: replyPages.length > 0 };
         return { messages: [human, projection] };
       },
     },
@@ -120,11 +123,63 @@ test("a page of only projections does not hide the older ordinary messages behin
   );
 });
 
+test("a mixed page keeps scanning until the requested context window is filled", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const posted: any[] = [];
+  const fulfiller = createSurfaceContextFulfiller({
+    core: { fulfillContextRequest: async (_id: string, body: unknown) => void posted.push(body) } as never,
+    bridge: {} as never,
+    directory: {
+      classifyUserCached: async () => ({ actor: { displayName: "Alice" } }),
+      getChannelInfo: async () => ({ id: "C1", is_member: true }),
+    } as never,
+    ids: { botUserId: "UBOT", ownBotId: "B_SELF" } as never,
+    serializer: serializer(),
+    botToken: "xoxb-test",
+    clientOptions: {},
+  });
+
+  await fulfiller.fulfillSurfaceContext(historyClient(calls, [[projection, human], [olderHuman]]), {
+    id: "R3",
+    query: { channelId: "C1", count: 2 },
+  } as never);
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.latest, "100.1");
+  const body = JSON.stringify(posted[0]);
+  assert.doesNotMatch(body, /PROJECTED_PEER_BODY/);
+  assert.match(body, /ORDINARY_HUMAN_MESSAGE_OLDER/);
+});
+
+test("a projection-only first thread page does not strand the newer ordinary replies", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const client = historyClient(calls, undefined, [[projection], [selfReply]]);
+  const { view } = await serializer().serializeSlackConversation(
+    client,
+    { kind: "channel", channel: "C1", threadTs: "100.1", ts: "300.1", files: [] },
+    { audience: [{ externalId: "U1", displayName: "Alice" }] as never },
+  );
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.oldest, "200.1");
+  assert.deepEqual(
+    view.messages.map((m) => m.text),
+    [`${ORDINARY}_SELF_REPLY`],
+  );
+});
+
 test("live search drops our own projected posts and keeps ordinary matches", async () => {
   const posted: any[] = [];
   const searched = { ts: "200.1", channel: { id: "C1" }, user: "UBOT", text: PROJECTED };
   const humanMatch = { ts: "100.1", channel: { id: "C1" }, user: "U1", text: ORDINARY };
-  searchMatches = [searched, humanMatch];
+  const selfReplyMatch = {
+    ts: "210.1",
+    channel: { id: "C1" },
+    user: "UBOT",
+    text: `${ORDINARY}_SELF_REPLY`,
+    permalink: "https://x.slack.com/archives/C1/p210100?thread_ts=100.1",
+  };
+  searchMatches = [searched, humanMatch, selfReplyMatch];
   {
     const fulfiller = createSurfaceContextFulfiller({
       core: { fulfillContextRequest: async (_id: string, body: unknown) => void posted.push(body) } as never,
@@ -136,7 +191,7 @@ test("live search drops our own projected posts and keeps ordinary matches", asy
       userToken: "xoxp-test",
       clientOptions: {},
     });
-    await fulfiller.fulfillSurfaceContext(historyClient([]), {
+    await fulfiller.fulfillSurfaceContext(historyClient([], undefined, [[selfReply]]), {
       id: "R2",
       query: { searchAll: "peer", count: 10 },
     } as never);
@@ -146,6 +201,7 @@ test("live search drops our own projected posts and keeps ordinary matches", asy
   const body = JSON.stringify(posted[0]);
   assert.doesNotMatch(body, /PROJECTED_PEER_BODY/);
   assert.match(body, /ORDINARY_HUMAN_MESSAGE/);
+  assert.match(body, /ORDINARY_HUMAN_MESSAGE_SELF_REPLY/);
 });
 
 test("conversation projections are not mirrored into the surface cache", async () => {

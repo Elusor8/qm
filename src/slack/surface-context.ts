@@ -18,6 +18,8 @@ import {
   type ConversationSerializer,
   RECENT_HISTORY_LIMIT,
   RECENT_THREAD_LIMIT,
+  newestTs,
+  oldestTs,
   readWithoutConversationProjections,
   slackFileName,
 } from "./conversation-view.ts";
@@ -44,14 +46,32 @@ export function createSurfaceContextFulfiller(deps: {
     return true;
   }
 
-  async function isProjectionAt(client: any, channel: string, ts: string): Promise<boolean> {
-    const res = await client.conversations.history({
-      channel,
-      latest: ts,
-      inclusive: true,
-      limit: 1,
-      include_all_metadata: true,
-    });
+  function matchThreadTs(m: any): string | undefined {
+    const direct = m?.thread_ts ? String(m.thread_ts) : "";
+    if (direct) return direct;
+    const permalink = typeof m?.permalink === "string" ? m.permalink : "";
+    const fromLink = permalink ? new URL(permalink).searchParams.get("thread_ts") : null;
+    return fromLink ?? undefined;
+  }
+
+  async function isProjectionAt(client: any, channel: string, ts: string, threadTs?: string): Promise<boolean> {
+    const res =
+      threadTs && threadTs !== ts
+        ? await client.conversations.replies({
+            channel,
+            ts: threadTs,
+            latest: ts,
+            inclusive: true,
+            limit: 1,
+            include_all_metadata: true,
+          })
+        : await client.conversations.history({
+            channel,
+            latest: ts,
+            inclusive: true,
+            limit: 1,
+            include_all_metadata: true,
+          });
     const hit = ((res.messages ?? []) as any[]).find((m) => m?.ts === ts);
     return !hit || isProjectedConversationMessage(hit);
   }
@@ -68,7 +88,7 @@ export function createSurfaceContextFulfiller(deps: {
       const ts = String(m?.ts ?? "");
       if (!channel || !ts || lookups >= MAX_SEARCH_PROJECTION_LOOKUPS) continue;
       lookups++;
-      const projected = await isProjectionAt(client, channel, ts).catch(
+      const projected = await isProjectionAt(client, channel, ts, matchThreadTs(m)).catch(
         swallowAs("slack: search projection check", true),
       );
       if (!projected) visible.push(m);
@@ -116,6 +136,7 @@ export function createSurfaceContextFulfiller(deps: {
     channel: string,
     threadTs: string | undefined,
     before: string | undefined,
+    want: number,
   ): Promise<{ raw: any[]; hasMore: boolean }> {
     if (threadTs) {
       return readWithoutConversationProjections(async (cursor) => {
@@ -124,20 +145,25 @@ export function createSurfaceContextFulfiller(deps: {
           ts: threadTs,
           limit: RECENT_THREAD_LIMIT,
           include_all_metadata: true,
-          ...(cursor ? { latest: cursor, inclusive: false } : {}),
+          ...(before ? { latest: before, inclusive: false } : {}),
+          ...(cursor ? { oldest: cursor } : {}),
         });
-        return { messages: (res.messages ?? []) as any[], hasMore: Boolean(res.has_more) };
-      }, before);
+        const messages = (res.messages ?? []) as any[];
+        const next = newestTs(messages);
+        return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+      }, want);
     }
     const scan = await readWithoutConversationProjections(async (cursor) => {
       const res = await client.conversations.history({
         channel,
         limit: RECENT_HISTORY_LIMIT,
         include_all_metadata: true,
-        ...(cursor ? { latest: cursor, inclusive: false } : {}),
+        ...(cursor || before ? { latest: cursor ?? before, inclusive: false } : {}),
       });
-      return { messages: (res.messages ?? []) as any[], hasMore: Boolean(res.has_more) };
-    }, before);
+      const messages = (res.messages ?? []) as any[];
+      const next = oldestTs(messages);
+      return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+    }, want);
     return { raw: scan.raw.slice().reverse(), hasMore: scan.hasMore };
   }
 
@@ -283,9 +309,9 @@ export function createSurfaceContextFulfiller(deps: {
       const count = Math.max(1, Math.min(RECENT_THREAD_LIMIT, Number(q.count) || 100));
       const before = typeof q.before === "string" && q.before ? q.before : undefined;
       const [chanPage, threadPage] = await Promise.all([
-        fetchContextHistory(client, channel, undefined, before),
+        fetchContextHistory(client, channel, undefined, before, count),
         threadTs
-          ? fetchContextHistory(client, channel, threadTs, before)
+          ? fetchContextHistory(client, channel, threadTs, before, count)
           : Promise.resolve({ raw: [] as any[], hasMore: false }),
       ]);
       const byTs = new Map<string, any>();

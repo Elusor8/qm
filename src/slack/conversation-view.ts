@@ -32,23 +32,33 @@ export function withoutConversationProjections(raw: any[]): any[] {
   return raw.filter((m) => !isProjectedConversationMessage(m ?? {}));
 }
 
+export function oldestTs(messages: any[]): string | undefined {
+  return messages.reduce<string | undefined>(
+    (o, m) => (m?.ts && (!o || String(m.ts) < o) ? String(m.ts) : o),
+    undefined,
+  );
+}
+
+export function newestTs(messages: any[]): string | undefined {
+  return messages.reduce<string | undefined>(
+    (n, m) => (m?.ts && (!n || String(m.ts) > n) ? String(m.ts) : n),
+    undefined,
+  );
+}
+
 export async function readWithoutConversationProjections(
-  page: (before: string | undefined) => Promise<{ messages: any[]; hasMore: boolean }>,
-  before: string | undefined,
+  page: (cursor: string | undefined) => Promise<{ messages: any[]; cursor?: string; hasMore: boolean }>,
+  want: number,
 ): Promise<{ raw: any[]; hasMore: boolean }> {
-  let cursor = before;
+  let cursor: string | undefined;
   let hasMore = false;
   const raw: any[] = [];
-  for (let attempt = 0; attempt < MAX_PROJECTION_SKIP_PAGES; attempt++) {
+  for (let reads = 0; reads < MAX_PROJECTION_SKIP_PAGES; reads++) {
     const fetched = await page(cursor);
     hasMore = fetched.hasMore;
     raw.push(...withoutConversationProjections(fetched.messages));
-    const oldest = fetched.messages.reduce<string | undefined>(
-      (o, m) => (m?.ts && (!o || String(m.ts) < o) ? String(m.ts) : o),
-      undefined,
-    );
-    if (raw.length || !hasMore || !oldest) return { raw, hasMore };
-    cursor = oldest;
+    if (raw.length >= want || !hasMore || !fetched.cursor || fetched.cursor === cursor) return { raw, hasMore };
+    cursor = fetched.cursor;
   }
   return { raw, hasMore };
 }
@@ -141,28 +151,32 @@ export function createConversationSerializer(deps: {
     try {
       if (threadTs) {
         return (
-          await readWithoutConversationProjections(async (before) => {
+          await readWithoutConversationProjections(async (cursor) => {
             const res = await client.conversations.replies({
               channel,
               ts: threadTs,
               limit: RECENT_THREAD_LIMIT,
               include_all_metadata: true,
-              ...(before ? { latest: before, inclusive: false } : {}),
+              ...(cursor ? { oldest: cursor } : {}),
             });
-            return { messages: (res.messages ?? []) as any[], hasMore: Boolean(res.has_more) };
-          }, undefined)
+            const messages = (res.messages ?? []) as any[];
+            const next = newestTs(messages);
+            return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+          }, RECENT_MESSAGE_WINDOW)
         ).raw;
       }
       const history = (
-        await readWithoutConversationProjections(async (before) => {
+        await readWithoutConversationProjections(async (cursor) => {
           const res = await client.conversations.history({
             channel,
             limit: RECENT_HISTORY_LIMIT,
             include_all_metadata: true,
-            ...(before ? { latest: before, inclusive: false } : {}),
+            ...(cursor ? { latest: cursor } : {}),
           });
-          return { messages: (res.messages ?? []) as any[], hasMore: Boolean(res.has_more) };
-        }, undefined)
+          const messages = (res.messages ?? []) as any[];
+          const next = oldestTs(messages);
+          return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+        }, RECENT_MESSAGE_WINDOW)
       ).raw
         .slice()
         .reverse();
