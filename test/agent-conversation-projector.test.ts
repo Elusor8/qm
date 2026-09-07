@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createAgentConversationLinkStore } from "../src/conversations/agent-conversation-link-store.ts";
+import {
+  agentConversationLinkId,
+  createAgentConversationLinkStore,
+} from "../src/conversations/agent-conversation-link-store.ts";
 import {
   createAgentConversationProjector,
   type AgentConversationProjectorDeps,
@@ -18,8 +21,9 @@ const THREAD_REF = "web:opener";
 const PEER = "bob.external.viz";
 const MESSAGE = "I can do that.";
 const TURN = 2;
-const MARKER = `zvconv:${CONVERSATION}:${TURN}`;
-const NUDGE_KEY = `zvconv:nudge:${CONVERSATION}:${TURN}`;
+const SIDE = { conversationId: CONVERSATION, mailbox: "alice.example.viz", owner: "U1" };
+const MARKER = `zvconv:${agentConversationLinkId(SIDE)}:${TURN}`;
+const NUDGE_KEY = `zvconv:nudge:${agentConversationLinkId(SIDE)}:${TURN}`;
 
 const TOOLS: McpToolDescriptor[] = ["zipviz_conversation_send", "zipviz_inbox_claim"].map((remoteName) => ({
   name: `zipviz_${remoteName}`,
@@ -35,7 +39,7 @@ function observation(direction: "in" | "out"): ProjectionObservation {
   if (direction === "out") {
     return {
       name: TOOLS[0]!.name,
-      args: { conversation_id: CONVERSATION, expected_turn: TURN - 1, message: MESSAGE },
+      args: { mailbox: SIDE.mailbox, conversation_id: CONVERSATION, expected_turn: TURN - 1, message: MESSAGE },
       resultText: JSON.stringify({
         disposition: "replayed-result",
         snapshot: { conversation_id: CONVERSATION, turns: TURN },
@@ -149,7 +153,7 @@ async function assertProjected(fixture: Awaited<ReturnType<typeof setup>>, direc
   assert.equal(nudges[0]!.idempotencyKey, NUDGE_KEY);
   assert.deepEqual(nudges[0]!.destination, { type: "web", target: THREAD_REF });
   assert.equal(nudges[0]!.text, "");
-  const link = await fixture.links.get(CONVERSATION);
+  const link = await fixture.links.get(SIDE);
   assert.equal(link?.[direction === "in" ? "lastProjectedInTurn" : "lastProjectedOutTurn"], TURN);
 }
 
@@ -175,7 +179,7 @@ for (const direction of ["in", "out"] as const) {
 
       assert.equal((await fixture.sessions.getEntries(fixture.session.id)).length, 1);
       assert.equal((await fixture.deliveries.pending("web")).length, failure === "before enqueue" ? 0 : 1);
-      const beforeReplay = await fixture.links.get(CONVERSATION);
+      const beforeReplay = await fixture.links.get(SIDE);
       assert.equal(beforeReplay?.lastProjectedInTurn, undefined);
       assert.equal(beforeReplay?.lastProjectedOutTurn, undefined);
 
@@ -217,7 +221,7 @@ test("append failure releases the lease, contains the rejection and leaves repla
 
   assert.equal((await fixture.sessions.getEntries(fixture.session.id)).length, 0);
   assert.equal((await fixture.deliveries.pending("web")).length, 0);
-  assert.equal((await fixture.links.get(CONVERSATION))?.lastProjectedOutTurn, undefined);
+  assert.equal((await fixture.links.get(SIDE))?.lastProjectedOutTurn, undefined);
   const { lease } = await fixture.sessions.acquireLease(fixture.session.id);
   assert.ok(lease);
   await fixture.sessions.releaseLease(lease);

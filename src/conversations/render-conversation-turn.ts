@@ -32,11 +32,14 @@ export function extractUntrusted(raw: string): ExtractedUntrusted | null {
 export function sanitiseForDisplay(text: string, max = MAX_RENDERED_CHARS): string {
   const cleaned = text
     .replace(ANSI, "")
+    .replace(/\r\n?/g, "\n")
     .replace(CONTROL, "")
     .replace(LONE_SURROGATE, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/@/g, "@\u200b")
+    .replace(/\]\(/g, "]\u200b(");
   if (cleaned.length <= max) return cleaned;
   return headSlice(cleaned, max) + TRUNCATION_MARKER;
 }

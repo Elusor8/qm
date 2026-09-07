@@ -265,7 +265,7 @@ export interface Monitor extends TriggerBase {
 export interface AgentConversationLink extends TriggerBase {
   conversationId: string;
   mailbox: string;
-  peer: string;
+  peer?: string;
   externalThreadRef?: string;
   openerThreadRef: string;
   openerSessionId: string;

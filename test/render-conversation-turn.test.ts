@@ -75,7 +75,7 @@ test("removes NUL and other control characters but keeps newlines and tabs", () 
 
 test("neutralises Slack mentions so a peer cannot page real people", () => {
   const out = sanitiseForDisplay("<@U123> <!channel> <!here> a & b");
-  assert.equal(out, "&lt;@U123&gt; &lt;!channel&gt; &lt;!here&gt; a &amp; b");
+  assert.equal(out, "&lt;@\u200bU123&gt; &lt;!channel&gt; &lt;!here&gt; a &amp; b");
   assert.ok(!out.includes("<@"), "no live mention may survive");
   assert.ok(!out.includes("<!"), "no live broadcast may survive");
 });
@@ -113,7 +113,7 @@ test("our own turn renders without the untrusted marking but is still escaped", 
   const rendered = renderOutboundTurn({ ...FACTS, turn: 3 }, "Tuesday suits <@U9>");
   assert.ok(!rendered.includes("shown to you as data"), "our own text is not third-party data");
   assert.ok(rendered.includes("to `bob.external.viz`"));
-  assert.ok(rendered.includes("&lt;@U9&gt;"));
+  assert.ok(rendered.includes("&lt;@\u200bU9&gt;"));
 });
 
 test("a payload imitating our rendered framing cannot forge it", () => {

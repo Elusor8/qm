@@ -1,11 +1,18 @@
 import type { AgentConversationLink } from "../types.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import { assertNoEscalation, buildTriggerBase, type CreateTriggerInput } from "../triggers/trigger-store.ts";
+import { personKey } from "../directory/person.ts";
+
+export type AgentConversationIdentity = Pick<AgentConversationLink, "conversationId" | "mailbox" | "owner">;
+
+export function agentConversationLinkId(identity: AgentConversationIdentity): string {
+  return JSON.stringify([identity.mailbox.trim().toLowerCase(), personKey(identity.owner), identity.conversationId]);
+}
 
 export interface CreateAgentConversationLinkInput extends CreateTriggerInput {
   conversationId: string;
   mailbox: string;
-  peer: string;
+  peer?: string;
   externalThreadRef?: string;
   openerThreadRef: string;
   openerSessionId: string;
@@ -15,13 +22,13 @@ export interface CreateAgentConversationLinkInput extends CreateTriggerInput {
 
 export interface AgentConversationLinkStore {
   record(input: CreateAgentConversationLinkInput): Promise<AgentConversationLink>;
-  get(conversationId: string): Promise<AgentConversationLink | null>;
+  get(identity: AgentConversationIdentity): Promise<AgentConversationLink | null>;
   list(): Promise<AgentConversationLink[]>;
   advance(
-    conversationId: string,
+    identity: AgentConversationIdentity,
     fields: { lastProjectedInTurn?: number; lastProjectedOutTurn?: number },
   ): Promise<void>;
-  noteSkip(conversationId: string, note: string, opts?: { notifiedOwner?: boolean }): Promise<void>;
+  noteSkip(identity: AgentConversationIdentity, note: string, opts?: { notifiedOwner?: boolean }): Promise<void>;
 }
 
 export function createAgentConversationLinkStore(
@@ -31,33 +38,34 @@ export function createAgentConversationLinkStore(
     async record(input) {
       assertNoEscalation(input);
       const link: AgentConversationLink = {
-        ...buildTriggerBase(input, input.conversationId, Date.now()),
+        ...buildTriggerBase(input, agentConversationLinkId(input), Date.now()),
         conversationId: input.conversationId,
-        mailbox: input.mailbox,
-        peer: input.peer,
+        mailbox: input.mailbox.trim().toLowerCase(),
+        ...(input.peer !== undefined ? { peer: input.peer } : {}),
         ...(input.externalThreadRef !== undefined ? { externalThreadRef: input.externalThreadRef } : {}),
         openerThreadRef: input.openerThreadRef,
         openerSessionId: input.openerSessionId,
         surface: input.surface,
         ...(input.lastSkipNote !== undefined ? { lastSkipNote: input.lastSkipNote } : {}),
       };
-      return backing.putIfAbsent(link.conversationId, link);
+      return backing.putIfAbsent(link.id, link);
     },
-    get: (conversationId) => backing.get(conversationId),
+    get: (identity) => backing.get(agentConversationLinkId(identity)),
     list: () => backing.all(),
-    async advance(conversationId, fields) {
-      await backing.merge(conversationId, {
+    async advance(identity, fields) {
+      await backing.merge(agentConversationLinkId(identity), {
         ...(fields.lastProjectedInTurn !== undefined ? { lastProjectedInTurn: fields.lastProjectedInTurn } : {}),
         ...(fields.lastProjectedOutTurn !== undefined ? { lastProjectedOutTurn: fields.lastProjectedOutTurn } : {}),
       });
     },
-    async noteSkip(conversationId, note, opts) {
+    async noteSkip(identity, note, opts) {
+      const id = agentConversationLinkId(identity);
       if (!opts?.notifiedOwner) {
-        await backing.merge(conversationId, { lastSkipNote: note });
+        await backing.merge(id, { lastSkipNote: note });
         return;
       }
       if (!backing.update) throw new Error("agent conversation links require atomic update support");
-      await backing.update(conversationId, (link) => ({
+      await backing.update(id, (link) => ({
         ...link,
         lastSkipNote: note,
         ...(link.ownerNotifiedAt === undefined ? { ownerNotifiedAt: Date.now() } : {}),

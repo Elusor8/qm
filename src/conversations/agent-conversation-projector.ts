@@ -1,12 +1,17 @@
 import type { AgentConversationLink, Destination, ScopeId, Session } from "../types.ts";
-import { parseScopeId } from "../types.ts";
+import { scopeId } from "../types.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { principalDestination, reachEnqueue } from "../reach/reach.ts";
-import { actorMayReadScope, destinationVisible, type VisibilityDeps } from "../triggers/trigger-visibility.ts";
+import type { VisibilityDeps } from "../triggers/trigger-visibility.ts";
+import { createCanWriteScope, type ScopeMembershipDeps } from "../resolution/scope-membership.ts";
 import type { Lease, NewEntry } from "../sessions/session-store.ts";
 import { swallow } from "../util/errors.ts";
-import type { AgentConversationLinkStore } from "./agent-conversation-link-store.ts";
+import {
+  agentConversationLinkId,
+  type AgentConversationIdentity,
+  type AgentConversationLinkStore,
+} from "./agent-conversation-link-store.ts";
 import { renderInboundTurn, renderOutboundTurn, type ConversationTurnFacts } from "./render-conversation-turn.ts";
 
 const OPENS = new Set(["zipviz_conversation_open", "zipviz_conversation_adopt"]);
@@ -40,7 +45,8 @@ export interface ProjectionSessions {
   ): Promise<ReadonlyArray<{ type: string; payload: unknown }>>;
 }
 
-export interface AgentConversationProjectorDeps extends VisibilityDeps {
+export interface AgentConversationProjectorDeps
+  extends VisibilityDeps, Pick<ScopeMembershipDeps, "identity" | "managedGroups"> {
   links: AgentConversationLinkStore;
   deliveries: DeliveryStore;
   projectionSessions?: ProjectionSessions;
@@ -74,16 +80,29 @@ function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function projectionMarker(conversationId: string, turn: number): string {
-  return `zvconv:${conversationId}:${turn}`;
+function projectionMarker(identity: AgentConversationIdentity, turn: number): string {
+  return `zvconv:${agentConversationLinkId(identity)}:${turn}`;
 }
 
 export function createAgentConversationProjector(deps: AgentConversationProjectorDeps): AgentConversationProjector {
-  function provenance(conversationId: string, turn: number) {
+  const canWriteScope = createCanWriteScope(deps);
+
+  function side(
+    observation: ProjectionObservation,
+    conversationId: string,
+    result?: Record<string, unknown> | null,
+  ): AgentConversationIdentity | null {
+    const snapshot = result?.snapshot as Record<string, unknown> | undefined;
+    const mailbox = str(observation.args.mailbox) ?? str(result?.mailbox) ?? str(snapshot?.mailbox);
+    if (!mailbox) return null;
+    return { conversationId, mailbox, owner: deps.owner };
+  }
+
+  function provenance(identity: AgentConversationIdentity, turn: number) {
     return {
       trigger: "conversation" as const,
       surface: deps.surface,
-      fireKey: `zvconv:${conversationId}:${turn}`,
+      fireKey: projectionMarker(identity, turn),
       sourceScopeId: deps.ownerScopeId,
       sourceThreadRef: deps.threadRef,
       sourceSessionId: deps.sessionId,
@@ -91,33 +110,38 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
   }
 
   async function deliverable(owner: string, ownerScopeId: ScopeId, destination: Destination): Promise<boolean> {
-    const { kind, ref } = parseScopeId(ownerScopeId);
-    const home = await actorMayReadScope(deps, owner, kind, ref, ownerScopeId, false);
-    if (destination.audienceScopeId === ownerScopeId && home.ok) return true;
-    return destinationVisible(deps, owner, destination);
+    if (!(await canWriteScope(owner, ownerScopeId))) return false;
+    if (destination.audienceScopeId) return canWriteScope(owner, destination.audienceScopeId);
+    if (destination.type === "web") return true;
+    if (destination.type === "principal") return canWriteScope(owner, scopeId("personal", destination.target));
+    if (destination.type === "group") return canWriteScope(owner, scopeId("group", destination.target));
+    if (destination.type === "slack")
+      return canWriteScope(owner, scopeId("channel", destination.target.split(":")[0]!));
+    return false;
   }
 
-  async function noticeOnce(conversationId: string, owner: string, note: string): Promise<void> {
-    const link = await deps.links.get(conversationId);
+  async function noticeOnce(identity: AgentConversationIdentity, note: string): Promise<void> {
+    const link = await deps.links.get(identity);
     if (link?.ownerNotifiedAt !== undefined) {
-      await deps.links.noteSkip(conversationId, note);
+      await deps.links.noteSkip(identity, note);
       return;
     }
-    await deps.links.noteSkip(conversationId, note, { notifiedOwner: true });
+    await deps.links.noteSkip(identity, note);
     await deps.deliveries.enqueue({
-      destination: principalDestination(owner, owner),
+      destination: principalDestination(identity.owner, identity.owner),
       text:
-        `I can no longer show you the signed conversation \`${conversationId}\` where it was opened — ${note}. ` +
+        `I can no longer show you the signed conversation \`${identity.conversationId}\` where it was opened — ${note}. ` +
         `The conversation itself is unaffected and the full record is still in the ledger.`,
-      idempotencyKey: `zvconv:skip:${conversationId}`,
+      idempotencyKey: `zvconv:skip:${agentConversationLinkId(identity)}`,
     });
+    await deps.links.noteSkip(identity, note, { notifiedOwner: true });
   }
 
   async function postToSession(link: AgentConversationLink, turn: number, text: string): Promise<boolean> {
     const sessions = deps.projectionSessions;
     if (!sessions) return false;
     const session = await sessions.getByThread(link.openerThreadRef);
-    if (!session) return false;
+    if (!session || session.id !== link.openerSessionId) return false;
 
     let lease: Lease | null = null;
     for (let attempt = 0; attempt < 5 && !lease; attempt += 1) {
@@ -125,8 +149,14 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       if (!lease) await new Promise((resolve) => setTimeout(resolve, 100));
     }
     if (!lease) return false;
-    const marker = projectionMarker(link.conversationId, turn);
+    const marker = projectionMarker(link, turn);
     try {
+      if (
+        !(await canWriteScope(link.owner, session.scopeId)) ||
+        !link.destination ||
+        !(await deliverable(link.owner, link.ownerScopeId, link.destination))
+      )
+        return false;
       const already = (await sessions.getEntries(session.id)).some(
         (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === marker,
       );
@@ -136,7 +166,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
           payload: {
             overheard: true,
             ts: marker,
-            name: `signed conversation with ${link.peer}`,
+            name: `signed conversation with ${link.peer ?? "the peer"}`,
             text,
           },
           scopeLabel: link.ownerScopeId,
@@ -148,7 +178,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     await deps.deliveries.enqueue({
       destination: { type: "web", target: link.openerThreadRef },
       text: "",
-      idempotencyKey: `zvconv:nudge:${link.conversationId}:${turn}`,
+      idempotencyKey: `zvconv:nudge:${agentConversationLinkId(link)}:${turn}`,
     });
     return true;
   }
@@ -156,53 +186,51 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
   async function post(link: AgentConversationLink, direction: "in" | "out", turn: number, text: string): Promise<void> {
     const destination = link.destination;
     if (!destination) return;
-    const conversationId = link.conversationId;
     const advance = () =>
-      deps.links.advance(
-        conversationId,
-        direction === "in" ? { lastProjectedInTurn: turn } : { lastProjectedOutTurn: turn },
-      );
+      deps.links.advance(link, direction === "in" ? { lastProjectedInTurn: turn } : { lastProjectedOutTurn: turn });
 
-    if (!TEXT_SINKS.has(destination.type)) {
-      if (await deliverable(link.owner, link.ownerScopeId, destination)) {
-        if (await postToSession(link, turn, text)) {
-          await advance();
-          return;
-        }
-      }
-      await deps.links.noteSkip(conversationId, `could not project into the ${destination.type} surface`);
+    if (!(await deliverable(link.owner, link.ownerScopeId, destination))) {
+      await noticeOnce(link, "the destination is no longer visible to you");
       return;
     }
-    if (!(await deliverable(link.owner, link.ownerScopeId, destination))) {
-      await noticeOnce(conversationId, link.owner, "the destination is no longer visible to you");
+    if (!TEXT_SINKS.has(destination.type)) {
+      if (await postToSession(link, turn, text)) {
+        await advance();
+        return;
+      }
+      await deps.links.noteSkip(link, `could not project into the ${destination.type} surface`);
       return;
     }
     await reachEnqueue({
       deliveries: deps.deliveries,
       destination,
       text,
-      idempotencyKey: `zvconv:${direction}:${conversationId}:${turn}`,
-      provenance: provenance(conversationId, turn),
+      idempotencyKey: `zvconv:${direction}:${agentConversationLinkId(link)}:${turn}`,
+      provenance: provenance(link, turn),
     });
     await advance();
   }
 
-  async function register(observation: ProjectionObservation): Promise<void> {
+  async function register(
+    observation: ProjectionObservation,
+    remoteName: string,
+  ): Promise<AgentConversationLink | null> {
     const result = parseJson(observation.resultText);
+    if (!result || result.error) return null;
     const snapshot = result?.snapshot as Record<string, unknown> | undefined;
-    const conversationId = str(snapshot?.conversation_id) ?? str(observation.args.conversation_id);
-    if (!conversationId) return;
-    const mailbox = str(observation.args.mailbox) ?? str(snapshot?.mailbox);
+    const adopted = remoteName === "zipviz_conversation_adopt" && result.binding_role === "ingress-owner";
+    const conversationId = adopted ? str(result.conversation_id) : str(snapshot?.conversation_id);
+    if (!conversationId) return null;
+    if (remoteName === "zipviz_conversation_adopt" && !adopted) return null;
+    const identity = side(observation, conversationId, result);
+    if (!identity) return null;
     const peer = str(snapshot?.peer) ?? str(observation.args.peer);
-    if (!mailbox || !peer) return;
 
-    await deps.links.record({
-      owner: deps.owner,
+    return deps.links.record({
+      ...identity,
       createdBy: deps.owner,
       ownerScopeId: deps.ownerScopeId,
-      conversationId,
-      mailbox,
-      peer,
+      ...(peer ? { peer } : {}),
       ...(str(observation.args.external_thread_ref)
         ? { externalThreadRef: str(observation.args.external_thread_ref)! }
         : {}),
@@ -214,24 +242,50 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     });
   }
 
-  async function projectOutbound(observation: ProjectionObservation): Promise<void> {
+  async function postToOwner(
+    identity: AgentConversationIdentity,
+    direction: "in" | "out",
+    turn: number,
+    text: string,
+  ): Promise<void> {
+    await reachEnqueue({
+      deliveries: deps.deliveries,
+      destination: principalDestination(identity.owner, identity.owner),
+      text,
+      idempotencyKey: `zvconv:${direction}:${agentConversationLinkId(identity)}:${turn}`,
+      provenance: provenance(identity, turn),
+    });
+  }
+
+  async function projectOutbound(observation: ProjectionObservation, remoteName: string): Promise<void> {
     const result = parseJson(observation.resultText);
+    if (result?.error) return;
     const snapshot = result?.snapshot as Record<string, unknown> | undefined;
     const conversationId = str(observation.args.conversation_id) ?? str(snapshot?.conversation_id);
     if (!conversationId) return;
-    const link = await deps.links.get(conversationId);
-    if (!link?.destination) return;
+    const identity = side(observation, conversationId, result);
+    if (!identity) return;
+    const link = await deps.links.get(identity);
 
     const turnRecord = result?.turn as Record<string, unknown> | undefined;
+    const signed = turnRecord?.conversation as Record<string, unknown> | undefined;
     const message = str(observation.args.message) ?? str(turnRecord?.message) ?? "";
-    const turn = num(snapshot?.turns) ?? (num(observation.args.expected_turn) ?? 0) + 1;
+    const turn = num(signed?.turn) ?? num(snapshot?.turns) ?? (num(observation.args.expected_turn) ?? 0) + 1;
+    const defaultIntent =
+      remoteName === "zipviz_conversation_open" ? "propose" : remoteName.slice("zipviz_conversation_".length);
+    const requestedIntent =
+      remoteName === "zipviz_conversation_open" || remoteName === "zipviz_conversation_send"
+        ? str(observation.args.intent)
+        : undefined;
     const facts: ConversationTurnFacts = {
       conversationId,
       turn,
-      intent: str(observation.args.intent) ?? "send",
-      peer: link.peer,
+      intent: str(signed?.intent) ?? requestedIntent ?? defaultIntent,
+      peer: str(snapshot?.peer) ?? str(observation.args.peer) ?? link?.peer ?? "the peer",
     };
-    await post(link, "out", turn, renderOutboundTurn(facts, message));
+    const text = renderOutboundTurn(facts, message);
+    if (link) await post(link, "out", turn, text);
+    else await postToOwner(identity, "out", turn, text);
   }
 
   async function projectInbound(observation: ProjectionObservation): Promise<void> {
@@ -242,6 +296,8 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       const conversationId = str(conversation?.conversation_id);
       const turn = num(conversation?.turn);
       if (!conversationId || turn === undefined) continue;
+      const identity = side(observation, conversationId, result);
+      if (!identity) continue;
 
       const facts: ConversationTurnFacts = {
         conversationId,
@@ -252,18 +308,12 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       };
       const text = renderInboundTurn(facts, str(row.body) ?? "");
 
-      const link = await deps.links.get(conversationId);
-      if (link?.destination) {
+      const link = await deps.links.get(identity);
+      if (link) {
         await post(link, "in", turn, text);
         continue;
       }
-      await reachEnqueue({
-        deliveries: deps.deliveries,
-        destination: principalDestination(deps.owner, deps.owner),
-        text,
-        idempotencyKey: `zvconv:in:${conversationId}:${turn}`,
-        provenance: provenance(conversationId, turn),
-      });
+      await postToOwner(identity, "in", turn, text);
     }
   }
 
@@ -272,8 +322,12 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       try {
         const def = deps.toolDefs().find((d) => d.name === observation.name);
         if (!def?.agentConversations) return;
-        if (OPENS.has(def.remoteName)) return void (await register(observation));
-        if (SENDS.has(def.remoteName)) return void (await projectOutbound(observation));
+        if (OPENS.has(def.remoteName)) {
+          const link = await register(observation, def.remoteName);
+          if (link && def.remoteName === "zipviz_conversation_open") await projectOutbound(observation, def.remoteName);
+          return;
+        }
+        if (SENDS.has(def.remoteName)) return void (await projectOutbound(observation, def.remoteName));
         if (CLAIMS.has(def.remoteName)) return void (await projectInbound(observation));
       } catch (e) {
         swallow("agent conversation projection", e);
