@@ -277,4 +277,42 @@ export async function exerciseDeliveryStore(store: DeliveryStore): Promise<void>
     [2],
   );
   await store.ack(nextTurn[0]!.id, Date.now());
+  for (const [idempotencyKey, expected] of [
+    ["post:ordinary", undefined],
+    ["zvconv:legacy", 1],
+  ] as const) {
+    const row = await store.enqueue({
+      destination: { type: "classification", target: "U1" },
+      text: "classification",
+      idempotencyKey,
+      provenance: {
+        trigger: "conversation",
+        sourceScopeId: "personal:U1",
+        sourceThreadRef: "dm:U1",
+        surface: "slack",
+        fireKey: idempotencyKey,
+      },
+    });
+    const claimed = (await store.claimPending("classification", 1000)).find((d) => d.id === row.id);
+    assert.equal(claimed?.claimAttempts, expected);
+    await store.ack(row.id, Date.now());
+  }
+  const queued = [];
+  for (let i = 0; i < 40; i++)
+    queued.push(
+      await store.enqueue({
+        destination: { type: "bounded-test", target: String(i) },
+        text: "bounded",
+        idempotencyKey: `bounded:${i}`,
+      }),
+    );
+  const batch = await store.pending("bounded-test", { limit: 7, readyAt: Date.now() });
+  assert.equal(batch.length, 7);
+  const retryAt = Date.now() + 60_000;
+  for (const row of batch) await store.defer(row.id, retryAt);
+  const next = await store.pending("bounded-test", { limit: 7, readyAt: Date.now() });
+  assert.equal(next.length, 7);
+  assert.ok(next.every((row) => !batch.some((prior) => prior.id === row.id)));
+  assert.equal((await store.pending("bounded-test")).length, 40);
+  for (const row of queued) await store.ack(row.id, Date.now());
 }

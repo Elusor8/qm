@@ -1,3 +1,4 @@
+import { exerciseProjectionFairness } from "./projection-fairness-contract.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -77,6 +78,7 @@ test("held opener lease is retried by a new durable worker without repeating the
   t.mock.method(f.sessions, "getEntries", async () => {
     throw new Error("full history scan forbidden");
   });
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
   await f.restart().sweep();
   const entries = await getEntries(f.session.id);
   assert.equal(entries.length, 1);
@@ -94,6 +96,7 @@ test("queued turns retain protocol order across a gap, restart, concurrent sweep
   assert.equal((await f.sessions.getEntries(f.session.id)).length, 1);
   assert.match((await f.progress.get(key))!.lastSkipNote!, /waiting for turn 2/);
   await f.restart().capture(f.context, observation(2));
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
   await f.restart().sweep();
   const entries = await f.sessions.getEntries(f.session.id);
   assert.deepEqual(
@@ -101,6 +104,7 @@ test("queued turns retain protocol order across a gap, restart, concurrent sweep
     ["1", "2", "3"],
   );
   await f.restart().capture(f.context, observation(1, "zipviz_conversation_open"));
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
   await f.restart().sweep();
   assert.equal((await f.sessions.getEntries(f.session.id)).length, 3);
   assert.equal((await f.progress.get(key))!.lastTurn, 3);
@@ -118,6 +122,7 @@ test("lost web nudge persistence retries after restart with one transcript entry
   assert.equal((await f.sessions.getEntries(f.session.id)).length, 1);
   assert.equal((await f.progress.get(key))!.lastTurn, 0);
   t.mock.restoreAll();
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
   await f.restart().sweep();
   assert.equal((await f.sessions.getEntries(f.session.id)).length, 1);
   assert.equal((await f.deliveries.pending("web")).length, 1);
@@ -208,8 +213,14 @@ test("adoption registers the actual response without a peer or fabricated histor
 test("an explicit no-destination opening stays silent through durable retry", async () => {
   const f = await fixture();
   await f.service.capture({ ...f.context, destination: undefined }, observation(1, "zipviz_conversation_open"));
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
   await f.restart().sweep();
   assert.equal((await f.sessions.getEntries(f.session.id)).length, 0);
   assert.equal((await f.deliveries.pending("principal")).length, 0);
   assert.equal((await f.links.get(side))?.destination, undefined);
+});
+
+test("blocked web conversations do not starve unrelated ready work", async () => {
+  const f = await fixture();
+  await exerciseProjectionFairness(f);
 });

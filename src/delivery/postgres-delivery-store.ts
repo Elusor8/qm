@@ -43,6 +43,8 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS slack_api_ms INT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_expires_at BIGINT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_attempts INT NOT NULL DEFAULT 0`,
+    `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS available_at BIGINT NOT NULL DEFAULT 0`,
+    `CREATE INDEX IF NOT EXISTS idx_deliveries_ready ON deliveries ((destination->>'type'), available_at, created_at, id) WHERE delivered_at IS NULL AND NOT shadow`,
     `CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_thread
         ON deliveries (recipient_thread_ref, created_at) WHERE recipient_thread_ref IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_deliveries_shadow
@@ -81,17 +83,27 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
       if (!existing[0]) throw new Error(`delivery enqueue lost a race for key ${input.idempotencyKey}`);
       return rowToDelivery(existing[0]);
     },
-    async pending(type) {
+    async pending(type, opts) {
+      if (opts) {
+        const rows = await q(
+          "SELECT * FROM deliveries WHERE delivered_at IS NULL AND NOT shadow AND destination->>'type' = $1 AND available_at <= $2 ORDER BY available_at, created_at, id LIMIT $3",
+          [type, opts.readyAt, Math.max(1, Math.min(100, opts.limit))],
+        );
+        return rows.map(rowToDelivery);
+      }
       const rows = await q(
         "SELECT * FROM deliveries WHERE delivered_at IS NULL AND NOT shadow AND destination->>'type' = $1 ORDER BY created_at",
         [type],
       );
       return rows.map(rowToDelivery);
     },
+    async defer(id, until) {
+      await query("UPDATE deliveries SET available_at = $2 WHERE id = $1 AND delivered_at IS NULL", [id, until]);
+    },
     async claimPending(type, ttlMs) {
       const rows = await q(
         `UPDATE deliveries
-            SET claim_attempts = CASE WHEN provenance->>'trigger' = 'conversation' OR idempotency_key LIKE 'zvconv:%'
+            SET claim_attempts = CASE WHEN provenance->'conversation' IS NOT NULL OR idempotency_key LIKE 'zvconv:%'
                   THEN CASE WHEN claim_attempts = 0 AND claim_expires_at IS NOT NULL THEN 2 ELSE claim_attempts + 1 END
                   ELSE claim_attempts END,
                 claim_expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT + $2

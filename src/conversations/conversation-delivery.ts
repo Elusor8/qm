@@ -6,7 +6,7 @@ import { agentConversationLinkId, type AgentConversationIdentity } from "./agent
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 
 export function isConversationDelivery(delivery: Pick<Delivery, "idempotencyKey" | "provenance">): boolean {
-  return delivery.provenance?.trigger === "conversation" || delivery.idempotencyKey?.startsWith("zvconv:") === true;
+  return delivery.provenance?.conversation !== undefined || delivery.idempotencyKey?.startsWith("zvconv:") === true;
 }
 
 export async function conversationDestinationVisible(

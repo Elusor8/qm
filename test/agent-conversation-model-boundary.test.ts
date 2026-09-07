@@ -272,6 +272,13 @@ test("owner-DM projection is visible in delivery history but absent from next-tu
       destination: { type: "principal", target: "U1" },
       idempotencyKey: key!,
       text: text!,
+      provenance: {
+        trigger: "conversation",
+        sourceScopeId: "personal:U1",
+        sourceThreadRef: "dm:U1",
+        surface: "slack",
+        fireKey: key!,
+      },
     });
     await deliveries.recordRecipientThread(delivery.id, "dm:U1", Date.now());
   }

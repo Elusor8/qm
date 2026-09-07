@@ -85,3 +85,18 @@ test("pg conversation delivery attempts survive an expired lease and a new store
     false,
   );
 });
+
+test("pg retry eligibility survives a fresh store", { skip }, async () => {
+  const writer = createPostgresDeliveryStore(URL!);
+  const row = await writer.enqueue({
+    destination: { type: "retry-test", target: "U1" },
+    text: "retry",
+    idempotencyKey: "retry-persist",
+  });
+  const until = Date.now() + 60_000;
+  await writer.defer(row.id, until);
+  const reader = createPostgresDeliveryStore(URL!);
+  assert.deepEqual(await reader.pending("retry-test", { limit: 32, readyAt: until - 1 }), []);
+  assert.equal((await reader.pending("retry-test", { limit: 32, readyAt: until }))[0]?.id, row.id);
+  await reader.ack(row.id, Date.now());
+});

@@ -12,7 +12,8 @@ export interface DeliveryStore {
     idempotencyKey: string;
     shadow?: boolean;
   }): Promise<Delivery>;
-  pending(type: string): Promise<Delivery[]>;
+  pending(type: string, opts?: { limit: number; readyAt: number }): Promise<Delivery[]>;
+  defer(id: string, until: number): Promise<void>;
   claimPending(type: string, ttlMs: number): Promise<Delivery[]>;
   listShadow(opts?: { limit?: number }): Promise<Delivery[]>;
   ack(id: string, at: number, slackApiMs?: number): Promise<void>;
@@ -31,6 +32,7 @@ export function createDeliveryStore(): DeliveryStore {
   const deliveries = new Map<string, Delivery>();
   const byKey = new Map<string, string>();
   const claimedUntil = new Map<string, number>();
+  const availableAt = new Map<string, number>();
   const enqueueListeners = new Set<() => void>();
 
   return {
@@ -53,8 +55,32 @@ export function createDeliveryStore(): DeliveryStore {
       if (!delivery.shadow) for (const l of enqueueListeners) l();
       return delivery;
     },
-    async pending(type) {
-      return [...deliveries.values()].filter((d) => d.deliveredAt === null && !d.shadow && d.destination.type === type);
+    async pending(type, opts) {
+      const rows: Delivery[] = [];
+      const limit = opts ? Math.max(1, Math.min(100, opts.limit)) : Infinity;
+      for (const d of deliveries.values()) {
+        if (
+          d.deliveredAt !== null ||
+          d.shadow ||
+          d.destination.type !== type ||
+          (opts && (availableAt.get(d.id) ?? 0) > opts.readyAt)
+        )
+          continue;
+        rows.push(d);
+        if (opts) {
+          rows.sort(
+            (a, b) =>
+              (availableAt.get(a.id) ?? 0) - (availableAt.get(b.id) ?? 0) ||
+              a.createdAt - b.createdAt ||
+              a.id.localeCompare(b.id),
+          );
+          if (rows.length > limit) rows.pop();
+        }
+      }
+      return rows;
+    },
+    async defer(id, until) {
+      availableAt.set(id, until);
     },
     async claimPending(type, ttlMs) {
       const now = Date.now();

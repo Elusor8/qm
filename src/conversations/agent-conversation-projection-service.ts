@@ -164,14 +164,22 @@ export function createAgentConversationProjectionService(
         void lost.then(() => {
           lostLease = true;
         });
-        const rows = (await deps.deliveries.pending(QUEUE_TYPE)).map((delivery) => ({
-          delivery,
-          job: JSON.parse(delivery.text) as ProjectionJob,
-        }));
-        rows.sort((a, b) => a.job.turn - b.job.turn || a.delivery.createdAt - b.delivery.createdAt);
         const started = Date.now();
-        for (const { delivery, job } of rows) {
+        const rows = (await deps.deliveries.pending(QUEUE_TYPE, { limit: 32, readyAt: started })).map((delivery) => {
+          try {
+            return { delivery, job: JSON.parse(delivery.text) as ProjectionJob };
+          } catch (error) {
+            return { delivery, error };
+          }
+        });
+        rows.sort((a, b) => (a.job?.turn ?? 0) - (b.job?.turn ?? 0));
+        for (const { delivery, job, error } of rows) {
           if (stopping || lostLease || Date.now() - started > 1_000) break;
+          await deps.deliveries.defer(delivery.id, Date.now() + 1_000);
+          if (!job) {
+            swallow("invalid conversation projection job", error);
+            continue;
+          }
           const key = delivery.destination.target;
           const progress = await deps.progress.get(key);
           if (job.turn > 0 && (!progress || job.turn > progress.lastTurn + 1)) {

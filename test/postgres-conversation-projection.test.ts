@@ -1,3 +1,4 @@
+import { exerciseProjectionFairness } from "./projection-fairness-contract.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
@@ -74,6 +75,7 @@ test(
     assert.equal((await writer.sessions.getEntries(session.id)).length, 0);
     await writer.service.stop();
     await writer.sessions.releaseLease(lease);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     const reader = make();
     const competitor = make();
     t.mock.method(reader.sessions, "getEntries", async () => {
@@ -97,5 +99,21 @@ test(
       competitor.links.advance(side, { lastProjectedOutTurn: 2 }),
     ]);
     assert.equal((await writer.links.get(side))!.lastProjectedOutTurn, 4);
+  },
+);
+
+test(
+  "Postgres bounded retries remain fair across workers",
+  { skip: url ? false : "requires isolated DATABASE_URL" },
+  async (t) => {
+    const maps = createPostgresMapFactory(url!);
+    t.after(() => maps.pool.close());
+    await exerciseProjectionFairness({
+      links: createAgentConversationLinkStore(maps.map<AgentConversationLink>("agent_conversation_links")),
+      deliveries: createPostgresDeliveryStore(url!),
+      projectionSessions: createPostgresSessionStore(url!),
+      progress: maps.map<ProjectionProgress>("agent_conversation_projection_progress"),
+      leaderLease: createPostgresLeaderLease(maps.pool),
+    });
   },
 );
