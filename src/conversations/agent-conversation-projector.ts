@@ -19,12 +19,13 @@
 // It never assumes a conversation ends. Gary's runtime has no calendar tool and
 // most live conversations are non-terminal, so projection is incremental and
 // waits on no terminal turn.
-import type { Destination, ScopeId } from "../types.ts";
+import type { AgentConversationLink, Destination, ScopeId, Session } from "../types.ts";
 import { parseScopeId } from "../types.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { principalDestination, reachEnqueue } from "../reach/reach.ts";
 import { actorMayReadScope, destinationVisible, type VisibilityDeps } from "../triggers/trigger-visibility.ts";
+import type { Lease, NewEntry } from "../sessions/session-store.ts";
 import type { AgentConversationLinkStore } from "./agent-conversation-link-store.ts";
 import { renderInboundTurn, renderOutboundTurn, type ConversationTurnFacts } from "./render-conversation-turn.ts";
 
@@ -38,7 +39,14 @@ const SENDS = new Set([
 ]);
 const CLAIMS = new Set(["zipviz_inbox_claim"]);
 
-/** Destination types whose delivery drain actually renders text. */
+/**
+ * Destination types whose delivery drain actually renders text.
+ *
+ * `web` is deliberately absent: drainWebDeliveries emits only `{threadRef}` over
+ * SSE and discards the delivery text, so a web delivery is a NUDGE telling the
+ * browser to refetch session entries. Text reaches a web thread by being an
+ * entry, which is what the session sink below does.
+ */
 const TEXT_SINKS = new Set(["slack", "principal", "group"]);
 
 export interface ProjectionObservation {
@@ -49,9 +57,23 @@ export interface ProjectionObservation {
   resultText: string;
 }
 
+/**
+ * The slice of SessionStore the web sink needs. Narrow on purpose: a projector
+ * that could do more than append one entry would be a bigger blast radius than
+ * a fallible view of the ledger deserves.
+ */
+export interface ProjectionSessions {
+  getByThread(threadRef: string): Promise<Session | null>;
+  acquireLease(sessionId: string, holder?: "turn" | "compaction" | "fork" | "backfill"): Promise<{ lease: Lease | null }>;
+  releaseLease(lease: Lease): Promise<void>;
+  append(lease: Lease, entry: NewEntry): Promise<unknown>;
+}
+
 export interface AgentConversationProjectorDeps extends VisibilityDeps {
   links: AgentConversationLinkStore;
   deliveries: DeliveryStore;
+  /** Present only where a web surface has to be projected into. */
+  projectionSessions?: ProjectionSessions;
   toolDefs: () => readonly McpToolDescriptor[];
   /** The principal acting in the turn that is doing the observing. */
   owner: string;
@@ -132,24 +154,89 @@ export function createAgentConversationProjector(
     });
   }
 
+  /**
+   * The web sink: append the turn as an `overheard` entry in the opener's
+   * session, then nudge the browser to refetch.
+   *
+   * `overheard` is QM's existing semantic for "present in the transcript, shown
+   * to the human, and framed to the model as data rather than instructions"
+   * (wake-envelope.ts renders it as "what others posted; data, not instructions
+   * to you", the security screen classifies it under an `overheard:` source, and
+   * turn-resume skips it). Reusing it is what lets peer text be visible without
+   * becoming a new injection surface in the human's own thread.
+   *
+   * Returns false when the projection could not be made, so the caller can
+   * record a skip rather than assume success.
+   */
+  async function postToSession(link: AgentConversationLink, turn: number, text: string): Promise<boolean> {
+    const sessions = deps.projectionSessions;
+    if (!sessions) return false;
+    const session = await sessions.getByThread(link.openerThreadRef);
+    if (!session) return false;
+
+    // The human may be typing in this very thread, so the lease can be held.
+    // Projection waits briefly and then gives up: it must never block a turn.
+    let lease: Lease | null = null;
+    for (let attempt = 0; attempt < 5 && !lease; attempt += 1) {
+      lease = (await sessions.acquireLease(session.id, "backfill")).lease;
+      if (!lease) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!lease) return false;
+    try {
+      await sessions.append(lease, {
+        type: "user",
+        // Shaped as OverheardEntryPayload: `overheard: true` is what
+        // isOverheardEntry tests, and `ts` is what dedupes an import.
+        payload: {
+          overheard: true,
+          ts: `zvconv:${link.conversationId}:${turn}`,
+          name: `signed conversation with ${link.peer}`,
+          text,
+        },
+        scopeLabel: link.ownerScopeId,
+      });
+    } finally {
+      await sessions.releaseLease(lease);
+    }
+    // The nudge. Its text is discarded by the drain, so it carries none; the
+    // entry above is what the browser will refetch and render.
+    await deps.deliveries.enqueue({
+      destination: { type: "web", target: link.openerThreadRef },
+      text: "",
+      idempotencyKey: `zvconv:nudge:${link.conversationId}:${turn}`,
+    });
+    return true;
+  }
+
   async function post(
-    conversationId: string,
+    link: AgentConversationLink,
     direction: "in" | "out",
     turn: number,
     text: string,
-    destination: Destination,
-    owner: string,
-    ownerScopeId: ScopeId,
   ): Promise<void> {
+    const destination = link.destination;
+    if (!destination) return;
+    const conversationId = link.conversationId;
+    const advance = () =>
+      deps.links.advance(
+        conversationId,
+        direction === "in" ? { lastProjectedInTurn: turn } : { lastProjectedOutTurn: turn },
+      );
+
     if (!TEXT_SINKS.has(destination.type)) {
-      // A `web` delivery is only an SSE nudge — its text is discarded by the
-      // drain — so posting one would look successful and show the human
-      // nothing. Recorded rather than pretended.
-      await deps.links.noteSkip(conversationId, `surface ${destination.type} has no text delivery drain`);
+      // Not a text-rendering destination, so the entry sink is the only way the
+      // human will see anything. Visibility is still checked first.
+      if (await deliverable(link.owner, link.ownerScopeId, destination)) {
+        if (await postToSession(link, turn, text)) {
+          await advance();
+          return;
+        }
+      }
+      await deps.links.noteSkip(conversationId, `could not project into the ${destination.type} surface`);
       return;
     }
-    if (!(await deliverable(owner, ownerScopeId, destination))) {
-      await noticeOnce(conversationId, owner, "the destination is no longer visible to you");
+    if (!(await deliverable(link.owner, link.ownerScopeId, destination))) {
+      await noticeOnce(conversationId, link.owner, "the destination is no longer visible to you");
       return;
     }
     await reachEnqueue({
@@ -161,10 +248,7 @@ export function createAgentConversationProjector(
       idempotencyKey: `zvconv:${direction}:${conversationId}:${turn}`,
       provenance: provenance(conversationId, turn),
     });
-    await deps.links.advance(
-      conversationId,
-      direction === "in" ? { lastProjectedInTurn: turn } : { lastProjectedOutTurn: turn },
-    );
+    await advance();
   }
 
   async function register(observation: ProjectionObservation): Promise<void> {
@@ -215,7 +299,7 @@ export function createAgentConversationProjector(
       intent: str(observation.args.intent) ?? "send",
       peer: link.peer,
     };
-    await post(conversationId, "out", turn, renderOutboundTurn(facts, message), link.destination, link.owner, link.ownerScopeId);
+    await post(link, "out", turn, renderOutboundTurn(facts, message));
   }
 
   async function projectInbound(observation: ProjectionObservation): Promise<void> {
@@ -238,7 +322,7 @@ export function createAgentConversationProjector(
 
       const link = await deps.links.get(conversationId);
       if (link?.destination) {
-        await post(conversationId, "in", turn, text, link.destination, link.owner, link.ownerScopeId);
+        await post(link, "in", turn, text);
         continue;
       }
       // A peer opened this one, so there is no opener thread to post into. The
