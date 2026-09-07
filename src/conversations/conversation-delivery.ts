@@ -5,7 +5,7 @@ import { principalDestination } from "../reach/reach.ts";
 import { agentConversationLinkId, type AgentConversationIdentity } from "./agent-conversation-link-store.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 
-export function isConversationProjectionKey(idempotencyKey: unknown): boolean {
+function isConversationProjectionKey(idempotencyKey: unknown): boolean {
   return typeof idempotencyKey === "string" && idempotencyKey.startsWith("zvconv:");
 }
 

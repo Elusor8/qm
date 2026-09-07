@@ -28,7 +28,7 @@ const MAX_PROJECTION_SKIP_PAGES = 5;
 
 export const slackFileName = (f: SlackFile): string => f.name || f.title || f.id || "file";
 
-export function withoutConversationProjections(raw: any[]): any[] {
+function withoutConversationProjections(raw: any[]): any[] {
   return raw.filter((m) => !isProjectedConversationMessage(m ?? {}));
 }
 
