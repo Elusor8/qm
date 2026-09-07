@@ -27,11 +27,17 @@ export interface McpToolDescriptor {
   agentConversations: boolean;
 }
 
+export interface McpRawResult {
+  text: string;
+  structuredContent?: unknown;
+  conversationBinding?: { owner: string; mailbox: string; remoteName: string };
+}
+
 export interface McpToolCallOptions {
   principalId?: string;
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
-  onRawResult?: (raw: { text: string; structuredContent?: unknown }) => void | Promise<void>;
+  onRawResult?: (raw: McpRawResult) => void | Promise<void>;
 }
 
 export class McpReadOnlyError extends Error {}
@@ -150,13 +156,19 @@ export function createMcpToolService(opts: {
         const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
         if (options.onRawResult) {
           try {
-            const observed = options.onRawResult({
+            await options.onRawResult({
               text,
+              ...(server.zipviz
+                ? {
+                    conversationBinding: {
+                      owner: server.zipviz.actorPrincipalId,
+                      mailbox: server.zipviz.mailbox,
+                      remoteName: def.remoteName,
+                    },
+                  }
+                : {}),
               ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
             });
-            if (observed && typeof (observed as Promise<void>).catch === "function") {
-              void (observed as Promise<void>).catch((e) => swallow("MCP raw result observer", e));
-            }
           } catch (e) {
             swallow("MCP raw result observer", e);
           }

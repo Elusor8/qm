@@ -241,3 +241,63 @@ test("an observer that throws cannot fail the tool call", async () => {
   );
   assert.equal(out, "ran query");
 });
+
+test("raw capture finishes before the bounded result returns and carries the actual signed server binding", async (t) => {
+  const { createToolContext } = await import("../src/tools/primitives.ts");
+  const binding = {
+    mailbox: "alice.example.viz",
+    actorPrincipalId: "U1",
+    actorExternalId: "alice",
+    adapterKind: "https://example.invalid/adapter",
+    adapterInstance: "fixture",
+  };
+  const store = createMcpServerStore(createMemoryMap());
+  await store.put(server({ readOnly: false, zipviz: binding }));
+  const rawText = JSON.stringify({ committed: true, body: "x".repeat(70_000) });
+  const service = createMcpToolService({
+    servers: store,
+    signingSecret: "local-fixture",
+    fetchImpl: async (_url, init) => {
+      const request = JSON.parse(init.body);
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: request.id,
+        result: request.method === "tools/list" ? { tools: TOOLS } : { content: [{ type: "text", text: rawText }] },
+      });
+    },
+  });
+  t.after(() => service.close());
+  await service.refresh();
+  let stored = false;
+  const ctx = createToolContext({
+    sandbox: {} as never,
+    provision: async () => {
+      throw new Error("no sandbox");
+    },
+    layers: [],
+    commandPolicy: () => ({ mode: "denylist", rules: [] }),
+    authorizeCommand: () => false,
+    grantedHandles: [],
+    workspace: {} as never,
+    deploy: {} as never,
+    acl: {} as never,
+    createdBy: "U1",
+    threadRef: "opener",
+    runId: "run",
+    mcp: service,
+    onMcpRawResult: async (observation) => {
+      assert.equal(observation.raw.text, rawText);
+      assert.deepEqual(observation.raw.conversationBinding, {
+        owner: "U1",
+        mailbox: binding.mailbox,
+        remoteName: "query",
+      });
+      assert.deepEqual(observation.args, { mailbox: binding.mailbox });
+      await new Promise((resolve) => setImmediate(resolve));
+      stored = true;
+    },
+  });
+  const output = await ctx.callMcpTool("crm_query", { mailbox: binding.mailbox });
+  assert.equal(stored, true);
+  assert.ok(output.endsWith("[truncated]"));
+});
