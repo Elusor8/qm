@@ -1,3 +1,4 @@
+import { createConversationDeliveryAuthorizer } from "../conversations/conversation-delivery.ts";
 import type { ScopeId } from "../types.ts";
 import { orgId as orgIdOf } from "../config.ts";
 import { parseScopeId, scopeId } from "../types.ts";
@@ -44,6 +45,7 @@ export function createMessagingMethods(
   | "listWebhooks"
   | "setWebhookEnabled"
   | "setWebhookRecipientConsent"
+  | "authorizeConversationDelivery"
   | "pendingDeliveries"
   | "enqueueDelivery"
   | "ingestSurfaceEvents"
@@ -234,6 +236,7 @@ export function createMessagingMethods(
     setWebhookRecipientConsent(id, recipientConsent) {
       return deps.webhooks.setRecipientConsent(id, recipientConsent);
     },
+    authorizeConversationDelivery: createConversationDeliveryAuthorizer({ ...deps, managedGroups: deps.projects }),
     pendingDeliveries(type, claimMs) {
       return claimMs && claimMs > 0 ? deps.deliveries.claimPending(type, claimMs) : deps.deliveries.pending(type);
     },

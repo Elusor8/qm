@@ -1,5 +1,5 @@
+import { conversationDestinationVisible, conversationNotice } from "./conversation-delivery.ts";
 import type { AgentConversationLink, Destination, ScopeId, Session } from "../types.ts";
-import { scopeId } from "../types.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { principalDestination, reachEnqueue } from "../reach/reach.ts";
@@ -98,9 +98,10 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     return { conversationId, mailbox, owner: deps.owner };
   }
 
-  function provenance(identity: AgentConversationIdentity, turn: number) {
+  function provenance(identity: AgentConversationIdentity, turn: number, ownerScopeId = deps.ownerScopeId) {
     return {
       trigger: "conversation" as const,
+      conversation: { ...identity, ownerScopeId },
       surface: deps.surface,
       fireKey: projectionMarker(identity, turn),
       sourceScopeId: deps.ownerScopeId,
@@ -110,14 +111,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
   }
 
   async function deliverable(owner: string, ownerScopeId: ScopeId, destination: Destination): Promise<boolean> {
-    if (!(await canWriteScope(owner, ownerScopeId))) return false;
-    if (destination.audienceScopeId) return canWriteScope(owner, destination.audienceScopeId);
-    if (destination.type === "web") return true;
-    if (destination.type === "principal") return canWriteScope(owner, scopeId("personal", destination.target));
-    if (destination.type === "group") return canWriteScope(owner, scopeId("group", destination.target));
-    if (destination.type === "slack")
-      return canWriteScope(owner, scopeId("channel", destination.target.split(":")[0]!));
-    return false;
+    return conversationDestinationVisible(deps, owner, ownerScopeId, destination);
   }
 
   async function noticeOnce(identity: AgentConversationIdentity, note: string): Promise<void> {
@@ -127,13 +121,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       return;
     }
     await deps.links.noteSkip(identity, note);
-    await deps.deliveries.enqueue({
-      destination: principalDestination(identity.owner, identity.owner),
-      text:
-        `I can no longer show you the signed conversation \`${identity.conversationId}\` where it was opened — ${note}. ` +
-        `The conversation itself is unaffected and the full record is still in the ledger.`,
-      idempotencyKey: `zvconv:skip:${agentConversationLinkId(identity)}`,
-    });
+    await deps.deliveries.enqueue(conversationNotice(identity, provenance(identity, 0)));
     await deps.links.noteSkip(identity, note, { notifiedOwner: true });
   }
 
@@ -207,7 +195,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       destination,
       text,
       idempotencyKey: `zvconv:${direction}:${agentConversationLinkId(link)}:${turn}`,
-      provenance: provenance(link, turn),
+      provenance: provenance(link, turn, link.ownerScopeId),
     });
     await advance();
   }

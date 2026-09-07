@@ -418,10 +418,13 @@ async function findPostedByKey(
   args: PostMessageArgs,
   idempotencyKey: string,
   oldest: string,
+  maxPages = Number.POSITIVE_INFINITY,
 ): Promise<{ ts: string; channel: string } | undefined> {
   const channel = args.channel;
   let cursor: string | undefined;
+  let pages = 0;
   do {
+    if (pages++ >= maxPages) throw new Error("delivery recovery exceeded the verification page budget");
     const paging = {
       channel,
       limit: 100,
@@ -453,17 +456,24 @@ export async function postWithVerify(
   client: PostVerifyClient,
   args: PostMessageArgs,
   idempotencyKey: string,
-  opts?: { attempts?: number; verifyFirst?: boolean; verifyOldest?: string },
+  opts?: {
+    attempts?: number;
+    verifyFirst?: boolean;
+    verifyOldest?: string;
+    maxVerifyPages?: number;
+    beforePost?: () => Promise<void>;
+  },
 ): Promise<{ ts: string; channel: string }> {
   const maxAttempts = opts?.attempts ?? 3;
   const verifyOldest = opts?.verifyOldest ?? String((Date.now() - 5_000) / 1000);
   args.metadata = { event_type: "qm_delivery", event_payload: { idempotency_key: idempotencyKey } };
   if (opts?.verifyFirst) {
-    const found = await findPostedByKey(client, args, idempotencyKey, verifyOldest);
+    const found = await findPostedByKey(client, args, idempotencyKey, verifyOldest, opts?.maxVerifyPages);
     if (found) return found;
   }
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await opts?.beforePost?.();
     try {
       const res = (await client.chat.postMessage(args)) as { ts?: string; channel?: string };
       return { ts: String(res.ts), channel: String(res.channel ?? args.channel) };
@@ -478,7 +488,7 @@ export async function postWithVerify(
       }
       let found: { ts: string; channel: string } | undefined;
       try {
-        found = await findPostedByKey(client, args, idempotencyKey, verifyOldest);
+        found = await findPostedByKey(client, args, idempotencyKey, verifyOldest, opts?.maxVerifyPages);
       } catch {
         throw err;
       }

@@ -188,6 +188,7 @@ export interface CandidateDestination extends Destination {
 export type BackgroundWakeTrigger = "cron" | "webhook" | "monitor" | (string & {});
 
 export interface DeliveryProvenance {
+  conversation?: { conversationId: string; mailbox: string; owner: string; ownerScopeId: ScopeId; notice?: boolean };
   trigger: BackgroundWakeTrigger;
   surface: string;
   fireKey: string;
@@ -289,6 +290,7 @@ export interface Delivery {
   recipientThreadRef?: string;
   deliverLatencyMs?: number;
   slackApiMs?: number;
+  claimAttempts?: number;
 }
 
 export interface SurfaceContextQuery {

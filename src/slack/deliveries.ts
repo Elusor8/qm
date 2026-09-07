@@ -1,3 +1,4 @@
+import { isConversationDelivery } from "../conversations/conversation-delivery.ts";
 import { errMessage, swallow, swallowAs } from "../util/errors.ts";
 import { performance } from "node:perf_hooks";
 import {
@@ -68,6 +69,19 @@ export function createDeliveryPoller(deps: {
       );
     };
 
+  function conversationPostOptions(delivery: Delivery) {
+    if (!isConversationDelivery(delivery)) return undefined;
+    return {
+      verifyFirst: (delivery.claimAttempts ?? 2) > 1,
+      verifyOldest: String((delivery.createdAt - 5_000) / 1000),
+      maxVerifyPages: 5,
+      beforePost: async () => {
+        if (!(await core.authorizeConversationDelivery(delivery.id)))
+          throw new Error("conversation delivery is no longer authorized");
+      },
+    };
+  }
+
   async function deliverToConversations(client: any): Promise<void> {
     for (const d of [...(await fetchDeliveries("slack")), ...(await fetchDeliveries("group"))]) {
       const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
@@ -80,6 +94,11 @@ export function createDeliveryPoller(deps: {
         post: async () => {
           const tPost = performance.now();
           try {
+            if (
+              isConversationDelivery(d) &&
+              (d.destination.react || d.destination.delete || d.destination.editRef || d.attachments?.length)
+            )
+              throw new Error("conversation projections require a plain message delivery");
             const postClient = d.destination.identity ? clientForIdentity(d.destination.identity) : client;
             const { channel, threadTs } = parseDeliveryTarget(d.destination.target);
             if (d.destination.react) {
@@ -233,7 +252,7 @@ export function createDeliveryPoller(deps: {
                     verifyFirst: true,
                     ...(typeof d.createdAt === "number" ? { verifyOldest: String((d.createdAt - 5_000) / 1000) } : {}),
                   }
-                : undefined,
+                : conversationPostOptions(d),
             );
             const root = threadTs ?? (res?.ts ? String(res.ts) : undefined);
             if (root) threads.mark(channel, root, true);
@@ -265,6 +284,11 @@ export function createDeliveryPoller(deps: {
         post: async () => {
           const tPost = performance.now();
           try {
+            if (
+              isConversationDelivery(d) &&
+              (d.destination.react || d.destination.delete || d.destination.editRef || d.attachments?.length)
+            )
+              throw new Error("conversation projections require a plain message delivery");
             const text = toSlackMrkdwn(stripReactionDirectives(d.text));
             if (!text.trim() && !d.attachments?.length) return undefined;
             const channel = await openConversationFor(client, [d.destination.target]);
@@ -293,9 +317,10 @@ export function createDeliveryPoller(deps: {
             }
             if (!composedUpload) {
               if (text.trim()) {
-                const posted = await client.chat.postMessage(
-                  slackReplyArgs(channel, text, threadTs, { unfurlLinks: d.destination.unfurlLinks }),
-                );
+                const args = slackReplyArgs(channel, text, threadTs, { unfurlLinks: d.destination.unfurlLinks });
+                const posted = isConversationDelivery(d)
+                  ? await postWithVerify(client, { ...args }, d.idempotencyKey, conversationPostOptions(d))
+                  : await client.chat.postMessage(args);
                 mirrorSelfPost(channel, posted?.ts, text, { kind: "dm", sub: threadTs });
               }
               if (d.attachments?.length && !uploadError) {

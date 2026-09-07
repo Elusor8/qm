@@ -1,3 +1,4 @@
+import { createConversationDeliveryAuthorizer } from "../src/conversations/conversation-delivery.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { marked } from "marked";
@@ -501,6 +502,7 @@ for (const destination of ["slack", "principal"] as const) {
     };
     const poller = createDeliveryPoller({
       core: {
+        authorizeConversationDelivery: createConversationDeliveryAuthorizer(f.deps),
         claimDeliveries: (type: string, ttl: number) => f.deliveries.claimPending(type, ttl),
         ackDelivery: (id: string) => f.deliveries.ack(id, Date.now()),
       } as never,

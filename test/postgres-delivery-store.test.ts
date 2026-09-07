@@ -66,3 +66,22 @@ test(
     await oldTask.ack(queued.id, 111);
   },
 );
+
+test("pg conversation delivery attempts survive an expired lease and a new store", { skip }, async () => {
+  const writer = createPostgresDeliveryStore(URL!);
+  const queued = await writer.enqueue({
+    destination: { type: "principal", target: "U1" },
+    text: "conversation",
+    idempotencyKey: "zvconv:pg-recovery:2",
+  });
+  const first = await writer.claimPending("principal", 0);
+  assert.equal(first.find((d) => d.id === queued.id)?.claimAttempts, 1);
+  const reader = createPostgresDeliveryStore(URL!);
+  const replay = await reader.claimPending("principal", 15_000);
+  assert.equal(replay.find((d) => d.id === queued.id)?.claimAttempts, 2);
+  await reader.ack(queued.id, Date.now());
+  assert.equal(
+    (await writer.pending("principal")).some((d) => d.id === queued.id),
+    false,
+  );
+});

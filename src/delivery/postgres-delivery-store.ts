@@ -12,6 +12,7 @@ function rowToDelivery(r: Record<string, unknown>): Delivery {
     ...(r.attachments != null ? { attachments: r.attachments as OutgoingAttachment[] } : {}),
     ...(r.provenance != null ? { provenance: r.provenance as DeliveryProvenance } : {}),
     idempotencyKey: r.idempotency_key as string,
+    ...(Number(r.claim_attempts) > 0 ? { claimAttempts: Number(r.claim_attempts) } : {}),
     createdAt: Number(r.created_at),
     deliveredAt: r.delivered_at === null ? null : Number(r.delivered_at),
     ...(r.shadow === true ? { shadow: true } : {}),
@@ -40,6 +41,7 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS deliver_latency_ms INT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS slack_api_ms INT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_expires_at BIGINT`,
+    `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_attempts INT NOT NULL DEFAULT 0`,
     `CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_thread
         ON deliveries (recipient_thread_ref, created_at) WHERE recipient_thread_ref IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_deliveries_shadow
@@ -88,7 +90,10 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
     async claimPending(type, ttlMs) {
       const rows = await q(
         `UPDATE deliveries
-            SET claim_expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT + $2
+            SET claim_attempts = CASE WHEN provenance->>'trigger' = 'conversation' OR idempotency_key LIKE 'zvconv:%'
+                  THEN CASE WHEN claim_attempts = 0 AND claim_expires_at IS NOT NULL THEN 2 ELSE claim_attempts + 1 END
+                  ELSE claim_attempts END,
+                claim_expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT + $2
           WHERE id IN (
             SELECT id FROM deliveries
              WHERE delivered_at IS NULL AND NOT shadow AND destination->>'type' = $1

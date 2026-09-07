@@ -1,3 +1,4 @@
+import { isConversationDelivery } from "../conversations/conversation-delivery.ts";
 import { randomUUID } from "node:crypto";
 import type { Delivery, DeliveryProvenance, Destination, OutgoingAttachment } from "../types.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
@@ -61,7 +62,10 @@ export function createDeliveryStore(): DeliveryStore {
         (d) =>
           d.deliveredAt === null && !d.shadow && d.destination.type === type && (claimedUntil.get(d.id) ?? 0) <= now,
       );
-      for (const d of rows) claimedUntil.set(d.id, now + ttlMs);
+      for (const d of rows) {
+        claimedUntil.set(d.id, now + ttlMs);
+        if (isConversationDelivery(d)) d.claimAttempts = (d.claimAttempts ?? 0) + 1;
+      }
       return rows;
     },
     async listShadow(opts) {

@@ -78,6 +78,7 @@ export interface SlackCoreClient {
   reportRunEditRef(runId: string, editRef: string): Promise<void>;
   getApproval(requestId: string): Promise<StoredApprovalView | null>;
   pushDirectory(body: DirectoryPush): Promise<void>;
+  authorizeConversationDelivery(id: string): Promise<boolean>;
   claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
   ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   onDeliveryEnqueued(listener: () => void): () => void;
@@ -321,6 +322,10 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
         );
       if (body.groupMembers)
         await deps.app.upsertGroups(body.groupMembers, body.groupsSyncedAt, body.groupIds, body.groupRosterIds);
+    },
+
+    authorizeConversationDelivery(id) {
+      return deps.app.authorizeConversationDelivery(id);
     },
 
     claimDeliveries(type, claimMs) {
