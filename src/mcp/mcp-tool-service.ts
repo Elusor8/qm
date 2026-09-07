@@ -7,7 +7,7 @@
 // other or with built-in tools.
 
 import type { AuditLog } from "../audit/audit-log.ts";
-import { errMessage } from "../util/errors.ts";
+import { errMessage, swallow } from "../util/errors.ts";
 import { createMcpClient, mcpResultText, type McpAuth, type McpClient, type McpFetch } from "./mcp-client.ts";
 import type { McpServer, McpServerStore } from "./mcp-server-store.ts";
 import type { McpRuntimeContext, ZipvizSigning } from "./zipviz-runtime-context.ts";
@@ -24,12 +24,20 @@ export interface McpToolDescriptor {
   description: string;
   inputSchema: Record<string, unknown>;
   readOnly: boolean;
+  agentConversations: boolean;
+}
+
+export interface McpRawResult {
+  text: string;
+  structuredContent?: unknown;
+  conversationBinding?: { owner: string; mailbox: string; remoteName: string };
 }
 
 export interface McpToolCallOptions {
   principalId?: string;
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
+  onRawResult?: (raw: McpRawResult) => void | Promise<void>;
 }
 
 export class McpReadOnlyError extends Error {}
@@ -111,6 +119,7 @@ export function createMcpToolService(opts: {
             description: tool.description || `${tool.name} on ${server.name}`,
             inputSchema: tool.inputSchema,
             readOnly: server.readOnly,
+            agentConversations: server.zipviz !== undefined,
           });
         }
         record("list", server.id, `ok tools=${tools.length}`);
@@ -145,6 +154,25 @@ export function createMcpToolService(opts: {
         const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
         record("call", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
         const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
+        if (options.onRawResult) {
+          try {
+            await options.onRawResult({
+              text,
+              ...(server.zipviz
+                ? {
+                    conversationBinding: {
+                      owner: server.zipviz.actorPrincipalId,
+                      mailbox: server.zipviz.mailbox,
+                      remoteName: def.remoteName,
+                    },
+                  }
+                : {}),
+              ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
+            });
+          } catch (e) {
+            swallow("MCP raw result observer", e);
+          }
+        }
         return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
       } catch (e) {
         record("call", `${def.serverId}/${def.remoteName}`, `error: ${errMessage(e)}`, options.principalId);
