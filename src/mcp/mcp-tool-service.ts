@@ -33,7 +33,7 @@ export interface McpRawResult {
   conversationBinding?: { owner: string; mailbox: string; remoteName: string };
 }
 
-export interface McpToolCallOptions {
+interface McpToolCallOptions {
   principalId?: string;
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
