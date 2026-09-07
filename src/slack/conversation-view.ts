@@ -24,11 +24,33 @@ const EXPANDED_THREAD_REPLY_LIMIT = RECENT_THREAD_LIMIT;
 export const MAX_NAME_LOOKUPS = 10;
 const RECENT_KEEP_SUBTYPES = new Set(["file_share", "bot_message", "thread_broadcast"]);
 const MEMBERS_SHOW_MAX = 40;
+const MAX_PROJECTION_SKIP_PAGES = 5;
 
 export const slackFileName = (f: SlackFile): string => f.name || f.title || f.id || "file";
 
 export function withoutConversationProjections(raw: any[]): any[] {
   return raw.filter((m) => !isProjectedConversationMessage(m ?? {}));
+}
+
+export async function readWithoutConversationProjections(
+  page: (before: string | undefined) => Promise<{ messages: any[]; hasMore: boolean }>,
+  before: string | undefined,
+): Promise<{ raw: any[]; hasMore: boolean }> {
+  let cursor = before;
+  let hasMore = false;
+  const raw: any[] = [];
+  for (let attempt = 0; attempt < MAX_PROJECTION_SKIP_PAGES; attempt++) {
+    const fetched = await page(cursor);
+    hasMore = fetched.hasMore;
+    raw.push(...withoutConversationProjections(fetched.messages));
+    const oldest = fetched.messages.reduce<string | undefined>(
+      (o, m) => (m?.ts && (!o || String(m.ts) < o) ? String(m.ts) : o),
+      undefined,
+    );
+    if (raw.length || !hasMore || !oldest) return { raw, hasMore };
+    cursor = oldest;
+  }
+  return { raw, hasMore };
 }
 
 export function reactionTallies(raw: unknown): ReactionTally[] {
@@ -118,21 +140,30 @@ export function createConversationSerializer(deps: {
   async function fetchRawConversation(client: any, channel: string, threadTs: string | undefined): Promise<any[]> {
     try {
       if (threadTs) {
-        return withoutConversationProjections(
-          (
-            await client.conversations.replies({
+        return (
+          await readWithoutConversationProjections(async (before) => {
+            const res = await client.conversations.replies({
               channel,
               ts: threadTs,
               limit: RECENT_THREAD_LIMIT,
               include_all_metadata: true,
-            })
-          ).messages ?? [],
-        );
+              ...(before ? { latest: before, inclusive: false } : {}),
+            });
+            return { messages: (res.messages ?? []) as any[], hasMore: Boolean(res.has_more) };
+          }, undefined)
+        ).raw;
       }
-      const history = withoutConversationProjections(
-        (await client.conversations.history({ channel, limit: RECENT_HISTORY_LIMIT, include_all_metadata: true }))
-          .messages ?? [],
-      )
+      const history = (
+        await readWithoutConversationProjections(async (before) => {
+          const res = await client.conversations.history({
+            channel,
+            limit: RECENT_HISTORY_LIMIT,
+            include_all_metadata: true,
+            ...(before ? { latest: before, inclusive: false } : {}),
+          });
+          return { messages: (res.messages ?? []) as any[], hasMore: Boolean(res.has_more) };
+        }, undefined)
+      ).raw
         .slice()
         .reverse();
       const threadParents = history.filter((m: any) => m.ts && Number(m.reply_count) > 0).slice(-MAX_EXPANDED_THREADS);
