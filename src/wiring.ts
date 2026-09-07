@@ -1,3 +1,13 @@
+import {
+  createAgentConversationLinkStore,
+  type AgentConversationLinkStore,
+} from "./conversations/agent-conversation-link-store.ts";
+import {
+  createAgentConversationProjectionService,
+  type AgentConversationProjectionService,
+  type ProjectionProgress,
+} from "./conversations/agent-conversation-projection-service.ts";
+import type { AgentConversationLink } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -351,6 +361,8 @@ export interface BuiltApp {
   refreshCustomProviders: () => Promise<void>;
   mcpServers: McpServerStore;
   mcpToolService: McpToolService;
+  conversationLinks: AgentConversationLinkStore;
+  conversationProjection: AgentConversationProjectionService;
   acl: AclStore;
   skills: SkillStore;
   skillBundles: SkillBundleStore;
@@ -1087,6 +1099,19 @@ export function buildApp(
       shadow: config.securityScreenProxy!.shadow,
     });
   }
+  const conversationLinks = createAgentConversationLinkStore(
+    artifactMap<AgentConversationLink>("agent_conversation_links"),
+  );
+  const conversationProjection = createAgentConversationProjectionService({
+    links: conversationLinks,
+    deliveries,
+    projectionSessions: sessions,
+    progress: artifactMap<ProjectionProgress>("agent_conversation_projection_progress"),
+    leaderLease,
+    directory,
+    identity,
+    managedGroups: projects,
+  });
   const orchestratorDeps: OrchestratorDeps = {
     identity,
     resolution,
@@ -1110,6 +1135,7 @@ export function buildApp(
     acl,
     admin,
     mcp: mcpToolService,
+    conversationProjection,
     ...(config.maxContextEntries !== undefined ? { maxContextEntries: config.maxContextEntries } : {}),
     ...(config.maxContextTokens !== undefined ? { maxContextTokens: config.maxContextTokens } : {}),
     execTimeoutMs: config.execTimeoutDefaultMs,
@@ -1559,6 +1585,7 @@ export function buildApp(
     start() {
       if (!config.backgroundWorkEnabled) return;
       for (const w of workers) w.start();
+      conversationProjection.start();
       reaper.start();
       processReaper?.start();
       monitorPoller?.start(config.monitorPollMs);
@@ -1589,6 +1616,7 @@ export function buildApp(
         swallowAs("wiring: worker drain failed", undefined),
       );
       await Promise.all(workers.map((w) => w.releaseInFlight()));
+      await conversationProjection.stop();
       drain.stop();
       runs.close?.();
       void runSignals.close?.();
@@ -1625,6 +1653,8 @@ export function buildApp(
     refreshCustomProviders,
     mcpServers,
     mcpToolService,
+    conversationLinks,
+    conversationProjection,
     acl,
     skills,
     skillBundles,
