@@ -41,7 +41,8 @@ export function createSurfaceContextFulfiller(deps: {
   const { core, bridge, directory, ids, serializer, botToken, trustedFileHost, userToken, clientOptions } = deps;
 
   function isSelfMatch(m: any): boolean {
-    if (m?.user) return m.user === ids.botUserId;
+    const author = m?.user_id || m?.user;
+    if (author) return author === ids.botUserId;
     if (m?.bot_id) return m.bot_id === ids.ownBotId;
     return true;
   }
@@ -60,13 +61,15 @@ export function createSurfaceContextFulfiller(deps: {
         ? await client.conversations.replies({
             channel,
             ts: threadTs,
+            oldest: ts,
             latest: ts,
             inclusive: true,
-            limit: 1,
+            limit: 2,
             include_all_metadata: true,
           })
         : await client.conversations.history({
             channel,
+            oldest: ts,
             latest: ts,
             inclusive: true,
             limit: 1,

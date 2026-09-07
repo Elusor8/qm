@@ -170,8 +170,9 @@ test("a projection-only first thread page does not strand the newer ordinary rep
 
 test("live search drops our own projected posts and keeps ordinary matches", async () => {
   const posted: any[] = [];
+  const lookups: Record<string, unknown>[] = [];
   const searched = { ts: "200.1", channel: { id: "C1" }, user: "UBOT", text: PROJECTED };
-  const humanMatch = { ts: "100.1", channel: { id: "C1" }, user: "U1", text: ORDINARY };
+  const humanMatch = { ts: "100.1", channel: { id: "C1" }, user_id: "U1", username: "alice", text: ORDINARY };
   const selfReplyMatch = {
     ts: "210.1",
     channel: { id: "C1" },
@@ -191,12 +192,13 @@ test("live search drops our own projected posts and keeps ordinary matches", asy
       userToken: "xoxp-test",
       clientOptions: {},
     });
-    await fulfiller.fulfillSurfaceContext(historyClient([], undefined, [[selfReply]]), {
+    await fulfiller.fulfillSurfaceContext(historyClient(lookups, undefined, [[human, selfReply]]), {
       id: "R2",
       query: { searchAll: "peer", count: 10 },
     } as never);
   }
 
+  assert.equal(lookups.length, 2);
   assert.equal(posted.length, 1);
   const body = JSON.stringify(posted[0]);
   assert.doesNotMatch(body, /PROJECTED_PEER_BODY/);
