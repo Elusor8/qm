@@ -24,12 +24,28 @@ export interface McpToolDescriptor {
   description: string;
   inputSchema: Record<string, unknown>;
   readOnly: boolean;
+  /**
+   * This tool belongs to a ZipViz-bound server, so its results may carry signed
+   * conversation turns worth projecting to a human (ELU-514). Derived from the
+   * server's existing `zipviz` binding rather than by matching tool names, so a
+   * renamed tool does not silently stop being observed.
+   */
+  agentConversations: boolean;
 }
 
 export interface McpToolCallOptions {
   principalId?: string;
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
+  /**
+   * Observes the result BEFORE it is clamped for the model. A claim result
+   * carrying a long peer message would otherwise be truncated mid-JSON exactly
+   * when it matters most, leaving the projector nothing to parse. The model's
+   * view stays bounded; only this observer sees the whole thing.
+   *
+   * Must not throw: it is called inside the successful-call path.
+   */
+  onRawResult?: (raw: { text: string; structuredContent?: unknown }) => void;
 }
 
 export class McpReadOnlyError extends Error {}
@@ -111,6 +127,7 @@ export function createMcpToolService(opts: {
             description: tool.description || `${tool.name} on ${server.name}`,
             inputSchema: tool.inputSchema,
             readOnly: server.readOnly,
+            agentConversations: server.zipviz !== undefined,
           });
         }
         record("list", server.id, `ok tools=${tools.length}`);
@@ -145,6 +162,18 @@ export function createMcpToolService(opts: {
         const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
         record("call", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
         const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
+        if (options.onRawResult) {
+          // Before the clamp, and never allowed to affect the call: an observer
+          // that throws must not turn a successful tool call into a failure.
+          try {
+            options.onRawResult({
+              text,
+              ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
+            });
+          } catch {
+            /* observation is best-effort by construction */
+          }
+        }
         return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
       } catch (e) {
         record("call", `${def.serverId}/${def.remoteName}`, `error: ${errMessage(e)}`, options.principalId);

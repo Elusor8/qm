@@ -148,3 +148,66 @@ test("unknown tool call rejects", async () => {
   await assert.rejects(() => service.call("nope_tool", {}), /unknown MCP tool/);
   service.close();
 });
+
+// ELU-514. The projector observes a claim result to learn which conversation a
+// turn belongs to. Two properties make that possible.
+test("marks ZipViz-bound tools as observable, and only those", async () => {
+  const { fetch } = fakeServerFetch();
+  const store = createMcpServerStore(createMemoryMap());
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
+  await store.put(server({ id: "crm" }));
+  await store.put(
+    server({
+      id: "zipviz",
+      name: "ZipViz",
+      zipviz: { mailbox: "alice.example.viz", adapterKind: "k", adapterInstance: "i", principalRef: "p" },
+    } as never),
+  );
+  await service.refresh();
+
+  const defs = service.toolDefs();
+  assert.equal(defs.find((d) => d.name === "zipviz_query")?.agentConversations, true);
+  assert.equal(defs.find((d) => d.name === "crm_query")?.agentConversations, false);
+});
+
+test("onRawResult sees the untruncated result while the model's view stays clamped", async () => {
+  // A claim result carrying a long peer message would otherwise be cut
+  // mid-JSON exactly when the projector needs to parse it.
+  const long = "x".repeat(70_000);
+  const fetch: McpFetch = async (_url, init) => {
+    const req = JSON.parse(init.body) as { id: number; method: string };
+    return jsonResponse({
+      jsonrpc: "2.0",
+      id: req.id,
+      result: req.method === "tools/list" ? { tools: TOOLS } : { content: [{ type: "text", text: long }] },
+    });
+  };
+  const store = createMcpServerStore(createMemoryMap());
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
+  await store.put(server());
+  await service.refresh();
+
+  let raw: { text: string } | undefined;
+  const out = await service.call("crm_query", {}, { onRawResult: (r) => (raw = r) });
+
+  assert.equal(raw?.text.length, 70_000, "the observer must see the whole result");
+  assert.ok(out.length < 70_000, "the model's view is still bounded");
+  assert.ok(out.endsWith("[truncated]"));
+});
+
+test("an observer that throws cannot fail the tool call", async () => {
+  // Projection is best-effort by construction; it must never turn a successful
+  // MCP call into an error the agent has to handle.
+  const { fetch } = fakeServerFetch();
+  const store = createMcpServerStore(createMemoryMap());
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
+  await store.put(server());
+  await service.refresh();
+
+  const out = await service.call("crm_query", {}, {
+    onRawResult: () => {
+      throw new Error("projector exploded");
+    },
+  });
+  assert.equal(out, "ran query");
+});
