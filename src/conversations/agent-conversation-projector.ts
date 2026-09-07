@@ -5,6 +5,7 @@ import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { principalDestination, reachEnqueue } from "../reach/reach.ts";
 import { actorMayReadScope, destinationVisible, type VisibilityDeps } from "../triggers/trigger-visibility.ts";
 import type { Lease, NewEntry } from "../sessions/session-store.ts";
+import { swallow } from "../util/errors.ts";
 import type { AgentConversationLinkStore } from "./agent-conversation-link-store.ts";
 import { renderInboundTurn, renderOutboundTurn, type ConversationTurnFacts } from "./render-conversation-turn.ts";
 
@@ -129,17 +130,18 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       const already = (await sessions.getEntries(session.id)).some(
         (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === marker,
       );
-      if (already) return true;
-      await sessions.append(lease, {
-        type: "user",
-        payload: {
-          overheard: true,
-          ts: marker,
-          name: `signed conversation with ${link.peer}`,
-          text,
-        },
-        scopeLabel: link.ownerScopeId,
-      });
+      if (!already) {
+        await sessions.append(lease, {
+          type: "user",
+          payload: {
+            overheard: true,
+            ts: marker,
+            name: `signed conversation with ${link.peer}`,
+            text,
+          },
+          scopeLabel: link.ownerScopeId,
+        });
+      }
     } finally {
       await sessions.releaseLease(lease);
     }
@@ -273,7 +275,9 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         if (OPENS.has(def.remoteName)) return void (await register(observation));
         if (SENDS.has(def.remoteName)) return void (await projectOutbound(observation));
         if (CLAIMS.has(def.remoteName)) return void (await projectInbound(observation));
-      } catch {}
+      } catch (e) {
+        swallow("agent conversation projection", e);
+      }
     },
   };
 }

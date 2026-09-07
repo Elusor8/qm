@@ -46,22 +46,22 @@ export function createAgentConversationLinkStore(
     get: (conversationId) => backing.get(conversationId),
     list: () => backing.all(),
     async advance(conversationId, fields) {
-      const link = await backing.get(conversationId);
-      if (!link) return;
-      await backing.put(conversationId, {
-        ...link,
+      await backing.merge(conversationId, {
         ...(fields.lastProjectedInTurn !== undefined ? { lastProjectedInTurn: fields.lastProjectedInTurn } : {}),
         ...(fields.lastProjectedOutTurn !== undefined ? { lastProjectedOutTurn: fields.lastProjectedOutTurn } : {}),
       });
     },
     async noteSkip(conversationId, note, opts) {
-      const link = await backing.get(conversationId);
-      if (!link) return;
-      await backing.put(conversationId, {
+      if (!opts?.notifiedOwner) {
+        await backing.merge(conversationId, { lastSkipNote: note });
+        return;
+      }
+      if (!backing.update) throw new Error("agent conversation links require atomic update support");
+      await backing.update(conversationId, (link) => ({
         ...link,
         lastSkipNote: note,
-        ...(opts?.notifiedOwner && link.ownerNotifiedAt === undefined ? { ownerNotifiedAt: Date.now() } : {}),
-      });
+        ...(link.ownerNotifiedAt === undefined ? { ownerNotifiedAt: Date.now() } : {}),
+      }));
     },
   };
 }

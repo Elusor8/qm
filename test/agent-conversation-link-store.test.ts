@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAgentConversationLinkStore } from "../src/conversations/agent-conversation-link-store.ts";
-import { scopeId } from "../src/types.ts";
+import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { scopeId, type AgentConversationLink } from "../src/types.ts";
 
 const CONVERSATION = "conv-0001";
 
@@ -81,10 +82,85 @@ test("stamps the owner notice once and never again", async () => {
   assert.equal((await store.get(CONVERSATION))?.lastSkipNote, "still not visible");
 });
 
+test("concurrent registrations retain the first opener and destination", async () => {
+  const backing = createMemoryMap<AgentConversationLink>();
+  const first = createAgentConversationLinkStore(backing);
+  const second = createAgentConversationLinkStore(backing);
+  const [original, replay] = await Promise.all([
+    first.record(input()),
+    second.record(input({ openerSessionId: "sess-2", destination: { type: "slack", target: "C-OTHER" } })),
+  ]);
+
+  assert.deepEqual(replay, original);
+  assert.deepEqual(await first.get(CONVERSATION), original);
+  assert.equal(original.openerSessionId, "sess-1");
+  assert.deepEqual(original.destination, input().destination);
+});
+
+test("concurrent inbound and outbound advances preserve both fields", async () => {
+  const backing = createMemoryMap<AgentConversationLink>();
+  const first = createAgentConversationLinkStore(backing);
+  const second = createAgentConversationLinkStore(backing);
+  const original = await first.record(input());
+
+  await Promise.all([
+    first.advance(CONVERSATION, { lastProjectedInTurn: 2 }),
+    second.advance(CONVERSATION, { lastProjectedOutTurn: 3 }),
+  ]);
+
+  assert.deepEqual(await first.get(CONVERSATION), {
+    ...original,
+    lastProjectedInTurn: 2,
+    lastProjectedOutTurn: 3,
+  });
+});
+
+for (const notifiedOwner of [false, true]) {
+  test(`concurrent progress and skip preserve both mutations (notifiedOwner=${notifiedOwner})`, async () => {
+    const backing = createMemoryMap<AgentConversationLink>();
+    const first = createAgentConversationLinkStore(backing);
+    const second = createAgentConversationLinkStore(backing);
+    const original = await first.record(input());
+
+    await Promise.all([
+      first.advance(CONVERSATION, { lastProjectedInTurn: 2 }),
+      second.noteSkip(CONVERSATION, "not visible", { notifiedOwner }),
+    ]);
+
+    const link = await first.get(CONVERSATION);
+    assert.equal(typeof link?.ownerNotifiedAt, notifiedOwner ? "number" : "undefined");
+    assert.deepEqual(link, {
+      ...original,
+      lastProjectedInTurn: 2,
+      lastSkipNote: "not visible",
+      ...(notifiedOwner ? { ownerNotifiedAt: link?.ownerNotifiedAt } : {}),
+    });
+  });
+}
+
+test("concurrent owner notices retain the first timestamp", async (t) => {
+  const backing = createMemoryMap<AgentConversationLink>();
+  const first = createAgentConversationLinkStore(backing);
+  const second = createAgentConversationLinkStore(backing);
+  await first.record(input());
+  let now = 100;
+  t.mock.method(Date, "now", () => ++now);
+
+  await Promise.all([
+    first.noteSkip(CONVERSATION, "not visible", { notifiedOwner: true }),
+    second.noteSkip(CONVERSATION, "still not visible", { notifiedOwner: true }),
+  ]);
+
+  const link = await first.get(CONVERSATION);
+  assert.equal(link?.ownerNotifiedAt, 101);
+  assert.equal(link?.lastSkipNote, "still not visible");
+});
+
 test("advance and noteSkip are no-ops for an unknown conversation", async () => {
   const store = createAgentConversationLinkStore();
   await store.advance("conv-missing", { lastProjectedInTurn: 1 });
   await store.noteSkip("conv-missing", "gone");
+  await store.noteSkip("conv-missing", "gone", { notifiedOwner: true });
   assert.equal((await store.list()).length, 0);
 });
 

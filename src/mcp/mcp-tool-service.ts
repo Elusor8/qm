@@ -7,7 +7,7 @@
 // other or with built-in tools.
 
 import type { AuditLog } from "../audit/audit-log.ts";
-import { errMessage } from "../util/errors.ts";
+import { errMessage, swallow } from "../util/errors.ts";
 import { createMcpClient, mcpResultText, type McpAuth, type McpClient, type McpFetch } from "./mcp-client.ts";
 import type { McpServer, McpServerStore } from "./mcp-server-store.ts";
 import type { McpRuntimeContext, ZipvizSigning } from "./zipviz-runtime-context.ts";
@@ -155,9 +155,11 @@ export function createMcpToolService(opts: {
               ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
             });
             if (observed && typeof (observed as Promise<void>).catch === "function") {
-              void (observed as Promise<void>).catch(() => {});
+              void (observed as Promise<void>).catch((e) => swallow("MCP raw result observer", e));
             }
-          } catch {}
+          } catch (e) {
+            swallow("MCP raw result observer", e);
+          }
         }
         return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
       } catch (e) {
