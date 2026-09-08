@@ -218,6 +218,7 @@ export async function startSlackPlugin(
     core,
     bridge,
     directory,
+    ids,
     serializer,
     botToken: BOT_TOKEN,
     ...(TRUSTED_FILE_HOST ? { trustedFileHost: TRUSTED_FILE_HOST } : {}),

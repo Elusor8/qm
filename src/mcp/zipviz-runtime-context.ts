@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 
-export const ZIPVIZ_RUNTIME_CONTEXT_VERSION = "v1";
+const ZIPVIZ_RUNTIME_CONTEXT_VERSION = "v1";
 
 export const ZIPVIZ_RUNTIME_CONTEXT_HEADERS = Object.freeze({
   threadRef: "x-zipviz-runtime-thread-ref",
@@ -9,7 +9,7 @@ export const ZIPVIZ_RUNTIME_CONTEXT_HEADERS = Object.freeze({
   signature: "x-zipviz-runtime-context-signature",
 });
 
-export const ZIPVIZ_RESERVED_ARG_KEYS = Object.freeze(["thread_ref", "native_event_id", "runtime_context"]);
+const ZIPVIZ_RESERVED_ARG_KEYS = Object.freeze(["thread_ref", "native_event_id", "runtime_context"]);
 
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,255}$/;
 

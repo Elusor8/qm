@@ -5,8 +5,21 @@ import { principalDestination } from "../reach/reach.ts";
 import { agentConversationLinkId, type AgentConversationIdentity } from "./agent-conversation-link-store.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 
+function isConversationProjectionKey(idempotencyKey: unknown): boolean {
+  return typeof idempotencyKey === "string" && idempotencyKey.startsWith("zvconv:");
+}
+
 export function isConversationDelivery(delivery: Pick<Delivery, "idempotencyKey" | "provenance">): boolean {
-  return delivery.provenance?.conversation !== undefined || delivery.idempotencyKey?.startsWith("zvconv:") === true;
+  return delivery.provenance?.conversation !== undefined || isConversationProjectionKey(delivery.idempotencyKey);
+}
+
+export function isProjectedConversationMessage(message: {
+  metadata?: { event_type?: string; event_payload?: { idempotency_key?: string } };
+}): boolean {
+  return (
+    message.metadata?.event_type === "qm_delivery" &&
+    isConversationProjectionKey(message.metadata.event_payload?.idempotency_key)
+  );
 }
 
 export async function conversationDestinationVisible(

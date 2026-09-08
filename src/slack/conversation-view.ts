@@ -1,3 +1,4 @@
+import { isProjectedConversationMessage } from "../conversations/conversation-delivery.ts";
 import { swallow } from "../util/errors.ts";
 import {
   type ActorAssertion,
@@ -23,8 +24,44 @@ const EXPANDED_THREAD_REPLY_LIMIT = RECENT_THREAD_LIMIT;
 export const MAX_NAME_LOOKUPS = 10;
 const RECENT_KEEP_SUBTYPES = new Set(["file_share", "bot_message", "thread_broadcast"]);
 const MEMBERS_SHOW_MAX = 40;
+const MAX_PROJECTION_SKIP_PAGES = 5;
 
 export const slackFileName = (f: SlackFile): string => f.name || f.title || f.id || "file";
+
+function withoutConversationProjections(raw: any[]): any[] {
+  return raw.filter((m) => !isProjectedConversationMessage(m ?? {}));
+}
+
+export function oldestTs(messages: any[]): string | undefined {
+  return messages.reduce<string | undefined>(
+    (o, m) => (m?.ts && (!o || String(m.ts) < o) ? String(m.ts) : o),
+    undefined,
+  );
+}
+
+export function newestTs(messages: any[]): string | undefined {
+  return messages.reduce<string | undefined>(
+    (n, m) => (m?.ts && (!n || String(m.ts) > n) ? String(m.ts) : n),
+    undefined,
+  );
+}
+
+export async function readWithoutConversationProjections(
+  page: (cursor: string | undefined) => Promise<{ messages: any[]; cursor?: string; hasMore: boolean }>,
+  want: number,
+): Promise<{ raw: any[]; hasMore: boolean }> {
+  let cursor: string | undefined;
+  let hasMore = false;
+  const raw: any[] = [];
+  for (let reads = 0; reads < MAX_PROJECTION_SKIP_PAGES; reads++) {
+    const fetched = await page(cursor);
+    hasMore = fetched.hasMore;
+    raw.push(...withoutConversationProjections(fetched.messages));
+    if (raw.length >= want || !hasMore || !fetched.cursor || fetched.cursor === cursor) return { raw, hasMore };
+    cursor = fetched.cursor;
+  }
+  return { raw, hasMore };
+}
 
 export function reactionTallies(raw: unknown): ReactionTally[] {
   if (!Array.isArray(raw)) return [];
@@ -114,19 +151,48 @@ export function createConversationSerializer(deps: {
     try {
       if (threadTs) {
         return (
-          (await client.conversations.replies({ channel, ts: threadTs, limit: RECENT_THREAD_LIMIT })).messages ?? []
-        );
+          await readWithoutConversationProjections(async (cursor) => {
+            const res = await client.conversations.replies({
+              channel,
+              ts: threadTs,
+              limit: RECENT_THREAD_LIMIT,
+              include_all_metadata: true,
+              ...(cursor ? { oldest: cursor } : {}),
+            });
+            const messages = (res.messages ?? []) as any[];
+            const next = newestTs(messages);
+            return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+          }, RECENT_MESSAGE_WINDOW)
+        ).raw;
       }
-      const history = ((await client.conversations.history({ channel, limit: RECENT_HISTORY_LIMIT })).messages ?? [])
+      const history = (
+        await readWithoutConversationProjections(async (cursor) => {
+          const res = await client.conversations.history({
+            channel,
+            limit: RECENT_HISTORY_LIMIT,
+            include_all_metadata: true,
+            ...(cursor ? { latest: cursor } : {}),
+          });
+          const messages = (res.messages ?? []) as any[];
+          const next = oldestTs(messages);
+          return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+        }, RECENT_MESSAGE_WINDOW)
+      ).raw
         .slice()
         .reverse();
       const threadParents = history.filter((m: any) => m.ts && Number(m.reply_count) > 0).slice(-MAX_EXPANDED_THREADS);
       const expanded = await Promise.all(
         threadParents.map(async (p: any) => {
           try {
-            return (
-              (await client.conversations.replies({ channel, ts: p.ts, limit: EXPANDED_THREAD_REPLY_LIMIT }))
-                .messages ?? []
+            return withoutConversationProjections(
+              (
+                await client.conversations.replies({
+                  channel,
+                  ts: p.ts,
+                  limit: EXPANDED_THREAD_REPLY_LIMIT,
+                  include_all_metadata: true,
+                })
+              ).messages ?? [],
             );
           } catch {
             return [];

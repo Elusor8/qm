@@ -13,27 +13,94 @@ import {
 } from "./lib.ts";
 import type { SlackCoreClient, SurfaceContextRequest } from "../api/slack-core-client.ts";
 import type { CoreBridge } from "./core-bridge.ts";
-import type { Directory } from "./directory.ts";
+import type { BotIdentity, Directory } from "./directory.ts";
 import {
   type ConversationSerializer,
   RECENT_HISTORY_LIMIT,
   RECENT_THREAD_LIMIT,
+  newestTs,
+  oldestTs,
+  readWithoutConversationProjections,
   slackFileName,
 } from "./conversation-view.ts";
+import { isProjectedConversationMessage } from "../conversations/conversation-delivery.ts";
+
+const MAX_SEARCH_PROJECTION_LOOKUPS = 20;
 
 export function createSurfaceContextFulfiller(deps: {
   core: SlackCoreClient;
   bridge: CoreBridge;
   directory: Directory;
+  ids: BotIdentity;
   serializer: ConversationSerializer;
   botToken: string;
   trustedFileHost?: string;
   userToken?: string;
   clientOptions: Record<string, unknown>;
 }): { fulfillSurfaceContext(client: any, r: SurfaceContextRequest): Promise<void> } {
-  const { core, bridge, directory, serializer, botToken, trustedFileHost, userToken, clientOptions } = deps;
+  const { core, bridge, directory, ids, serializer, botToken, trustedFileHost, userToken, clientOptions } = deps;
+
+  function isSelfMatch(m: any): boolean {
+    const author = m?.user_id || m?.user;
+    if (author) return author === ids.botUserId;
+    if (m?.bot_id) return m.bot_id === ids.ownBotId;
+    return true;
+  }
+
+  function matchThreadTs(m: any): string | undefined {
+    const direct = m?.thread_ts ? String(m.thread_ts) : "";
+    if (direct) return direct;
+    const permalink = typeof m?.permalink === "string" ? m.permalink : "";
+    const fromLink = permalink ? new URL(permalink).searchParams.get("thread_ts") : null;
+    return fromLink ?? undefined;
+  }
+
+  async function isProjectionAt(client: any, channel: string, ts: string, threadTs?: string): Promise<boolean> {
+    const res =
+      threadTs && threadTs !== ts
+        ? await client.conversations.replies({
+            channel,
+            ts: threadTs,
+            oldest: ts,
+            latest: ts,
+            inclusive: true,
+            limit: 2,
+            include_all_metadata: true,
+          })
+        : await client.conversations.history({
+            channel,
+            oldest: ts,
+            latest: ts,
+            inclusive: true,
+            limit: 1,
+            include_all_metadata: true,
+          });
+    const hit = ((res.messages ?? []) as any[]).find((m) => m?.ts === ts);
+    return !hit || isProjectedConversationMessage(hit);
+  }
+
+  async function withoutProjectedMatches(client: any, matches: any[]): Promise<any[]> {
+    const visible: any[] = [];
+    let lookups = 0;
+    for (const m of matches) {
+      if (!isSelfMatch(m)) {
+        visible.push(m);
+        continue;
+      }
+      const channel = String(m?.channel?.id ?? "");
+      const ts = String(m?.ts ?? "");
+      if (!channel || !ts || lookups >= MAX_SEARCH_PROJECTION_LOOKUPS) continue;
+      lookups++;
+      const projected = await isProjectionAt(client, channel, ts, matchThreadTs(m)).catch(
+        swallowAs("slack: search projection check", true),
+      );
+      if (!projected) visible.push(m);
+    }
+    return visible;
+  }
 
   async function fulfillLiveSearch(
+    client: any,
     query: string,
     count: number,
     post: (body: unknown) => Promise<void>,
@@ -47,7 +114,7 @@ export function createSurfaceContextFulfiller(deps: {
     try {
       const userClient = new WebClient(token, { ...clientOptions });
       const res = (await userClient.search.messages({ query, count: Math.min(count, 100) })) as any;
-      const matches: any[] = res?.messages?.matches ?? [];
+      const matches: any[] = await withoutProjectedMatches(client, res?.messages?.matches ?? []);
       const shaped: RecentMessage[] = matches
         .map((m) => ({
           ts: String(m?.ts ?? ""),
@@ -72,14 +139,35 @@ export function createSurfaceContextFulfiller(deps: {
     channel: string,
     threadTs: string | undefined,
     before: string | undefined,
+    want: number,
   ): Promise<{ raw: any[]; hasMore: boolean }> {
-    const page = before ? { latest: before, inclusive: false } : {};
     if (threadTs) {
-      const res = await client.conversations.replies({ channel, ts: threadTs, limit: RECENT_THREAD_LIMIT, ...page });
-      return { raw: res.messages ?? [], hasMore: Boolean(res.has_more) };
+      return readWithoutConversationProjections(async (cursor) => {
+        const res = await client.conversations.replies({
+          channel,
+          ts: threadTs,
+          limit: RECENT_THREAD_LIMIT,
+          include_all_metadata: true,
+          ...(before ? { latest: before, inclusive: false } : {}),
+          ...(cursor ? { oldest: cursor } : {}),
+        });
+        const messages = (res.messages ?? []) as any[];
+        const next = newestTs(messages);
+        return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+      }, want);
     }
-    const res = await client.conversations.history({ channel, limit: RECENT_HISTORY_LIMIT, ...page });
-    return { raw: ((res.messages ?? []) as any[]).slice().reverse(), hasMore: Boolean(res.has_more) };
+    const scan = await readWithoutConversationProjections(async (cursor) => {
+      const res = await client.conversations.history({
+        channel,
+        limit: RECENT_HISTORY_LIMIT,
+        include_all_metadata: true,
+        ...(cursor || before ? { latest: cursor ?? before, inclusive: false } : {}),
+      });
+      const messages = (res.messages ?? []) as any[];
+      const next = oldestTs(messages);
+      return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+    }, want);
+    return { raw: scan.raw.slice().reverse(), hasMore: scan.hasMore };
   }
 
   async function findMessageAt(
@@ -197,6 +285,7 @@ export function createSurfaceContextFulfiller(deps: {
       if (q.openGroup) return await post(await openGroupDm(client, q.openGroup.participants ?? []));
       if (typeof q.searchAll === "string" && q.searchAll) {
         return fulfillLiveSearch(
+          client,
           q.searchAll,
           Math.max(1, Math.min(RECENT_THREAD_LIMIT, Number(q.count) || 100)),
           post,
@@ -223,9 +312,9 @@ export function createSurfaceContextFulfiller(deps: {
       const count = Math.max(1, Math.min(RECENT_THREAD_LIMIT, Number(q.count) || 100));
       const before = typeof q.before === "string" && q.before ? q.before : undefined;
       const [chanPage, threadPage] = await Promise.all([
-        fetchContextHistory(client, channel, undefined, before),
+        fetchContextHistory(client, channel, undefined, before, count),
         threadTs
-          ? fetchContextHistory(client, channel, threadTs, before)
+          ? fetchContextHistory(client, channel, threadTs, before, count)
           : Promise.resolve({ raw: [] as any[], hasMore: false }),
       ]);
       const byTs = new Map<string, any>();
