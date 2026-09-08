@@ -188,6 +188,15 @@ export interface CandidateDestination extends Destination {
 export type BackgroundWakeTrigger = "cron" | "webhook" | "monitor" | (string & {});
 
 export interface DeliveryProvenance {
+  conversation?: {
+    conversationId: string;
+    mailbox: string;
+    owner: string;
+    ownerScopeId: ScopeId;
+    notice?: boolean;
+    sideKey?: string;
+    turn?: number;
+  };
   trigger: BackgroundWakeTrigger;
   surface: string;
   fireKey: string;
@@ -262,6 +271,20 @@ export interface Monitor extends TriggerBase {
   lastError?: string;
 }
 
+export interface AgentConversationLink extends TriggerBase {
+  conversationId: string;
+  mailbox: string;
+  peer?: string;
+  externalThreadRef?: string;
+  openerThreadRef: string;
+  openerSessionId: string;
+  surface: string;
+  lastProjectedInTurn?: number;
+  lastProjectedOutTurn?: number;
+  lastSkipNote?: string;
+  ownerNotifiedAt?: number;
+}
+
 export interface Delivery {
   id: string;
   destination: Destination;
@@ -275,6 +298,7 @@ export interface Delivery {
   recipientThreadRef?: string;
   deliverLatencyMs?: number;
   slackApiMs?: number;
+  claimAttempts?: number;
 }
 
 export interface SurfaceContextQuery {
