@@ -301,3 +301,47 @@ test("raw capture finishes before the bounded result returns and carries the act
   assert.equal(stored, true);
   assert.ok(output.endsWith("[truncated]"));
 });
+
+test("durable capture preparation fails before remote dispatch, but post-commit persistence failure preserves success", async (t) => {
+  const { fetch, calls } = fakeServerFetch();
+  const store = createMcpServerStore(createMemoryMap());
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch });
+  t.after(() => service.close());
+  await store.put(server());
+  await service.refresh();
+  const count = calls.length;
+  await assert.rejects(
+    service.call(
+      "crm_query",
+      {},
+      {
+        onCallStart: async () => {
+          throw new Error("journal unavailable");
+        },
+      },
+    ),
+    /journal unavailable/,
+  );
+  assert.equal(calls.length, count);
+  let failureCalled = false;
+  assert.equal(
+    await service.call(
+      "crm_query",
+      {},
+      {
+        onCallStart: async () => ({
+          async result(raw) {
+            assert.equal(raw.text, "ran query");
+            throw new Error("result persistence unavailable");
+          },
+          async failed() {
+            failureCalled = true;
+          },
+        }),
+      },
+    ),
+    "ran query",
+  );
+  assert.equal(failureCalled, false);
+  assert.equal(calls.length, count + 1);
+});

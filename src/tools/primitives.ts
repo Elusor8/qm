@@ -409,6 +409,7 @@ export interface ToolContextDeps {
   memoryScopeId?: ScopeId;
   memoryAccess?: { write?: ScopeId; read: ScopeId[] };
   mcp?: McpToolService;
+  onMcpCallStart?: NonNullable<Parameters<McpToolService["call"]>[2]>["onCallStart"];
   onMcpRawResult?: (observation: {
     name: string;
     args: Record<string, unknown>;
@@ -915,6 +916,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       return deps.mcp.call(name, args, {
         principalId: deps.createdBy,
         readOnly: deps.readOnly === true,
+        ...(deps.onMcpCallStart ? { onCallStart: deps.onMcpCallStart } : {}),
         ...(deps.onMcpRawResult
           ? { onRawResult: (raw: McpRawResult) => deps.onMcpRawResult!({ name, args: structuredClone(args), raw }) }
           : {}),

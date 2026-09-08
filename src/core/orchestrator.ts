@@ -1997,8 +1997,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(deps.mcp ? { mcp: deps.mcp } : {}),
           ...(deps.conversationProjection
             ? {
-                onMcpRawResult: (observation) =>
-                  deps.conversationProjection!.capture(
+                onMcpCallStart: (observation) =>
+                  deps.conversationProjection!.begin(
                     {
                       owner: actor.id,
                       ownerScopeId: scopeId,

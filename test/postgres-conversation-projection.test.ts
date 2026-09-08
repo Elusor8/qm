@@ -1,3 +1,4 @@
+import { exerciseProjectionCapture } from "./projection-capture-contract.ts";
 import { exerciseProjectionFairness } from "./projection-fairness-contract.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -10,6 +11,8 @@ import { createAgentConversationLinkStore } from "../src/conversations/agent-con
 import {
   createAgentConversationProjectionService,
   type ProjectionProgress,
+  type ProjectionCapture,
+  type ProjectionCaptureMailbox,
 } from "../src/conversations/agent-conversation-projection-service.ts";
 import type { AgentConversationLink } from "../src/types.ts";
 
@@ -33,6 +36,8 @@ test(
         deliveries,
         projectionSessions: sessions,
         progress: maps.map<ProjectionProgress>("agent_conversation_projection_progress"),
+        captures: maps.map<ProjectionCapture>("agent_conversation_captures"),
+        captureMailboxes: maps.map<ProjectionCaptureMailbox>("agent_conversation_capture_mailboxes"),
         leaderLease: createPostgresLeaderLease(maps.pool),
       });
       t.after(async () => {
@@ -113,6 +118,25 @@ test(
       deliveries: createPostgresDeliveryStore(url!),
       projectionSessions: createPostgresSessionStore(url!),
       progress: maps.map<ProjectionProgress>("agent_conversation_projection_progress"),
+      leaderLease: createPostgresLeaderLease(maps.pool),
+    });
+  },
+);
+
+test(
+  "Postgres capture and quarantine contract",
+  { skip: url ? false : "requires isolated DATABASE_URL" },
+  async (t) => {
+    const maps = createPostgresMapFactory(url!);
+    t.after(() => maps.pool.close());
+    const otherMaps = createPostgresMapFactory(url!);
+    t.after(() => otherMaps.pool.close());
+    await exerciseProjectionCapture(t, {
+      links: createAgentConversationLinkStore(maps.map<AgentConversationLink>("agent_conversation_links")),
+      deliveries: createPostgresDeliveryStore(url!),
+      progress: maps.map<ProjectionProgress>("agent_conversation_projection_progress"),
+      captures: otherMaps.map<ProjectionCapture>("agent_conversation_captures"),
+      captureMailboxes: otherMaps.map<ProjectionCaptureMailbox>("agent_conversation_capture_mailboxes"),
       leaderLease: createPostgresLeaderLease(maps.pool),
     });
   },

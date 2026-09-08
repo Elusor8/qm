@@ -6,6 +6,8 @@ import {
   createAgentConversationProjectionService,
   type AgentConversationProjectionService,
   type ProjectionProgress,
+  type ProjectionCapture,
+  type ProjectionCaptureMailbox,
 } from "./conversations/agent-conversation-projection-service.ts";
 import type { AgentConversationLink } from "./types.ts";
 import { mkdirSync } from "node:fs";
@@ -1107,6 +1109,8 @@ export function buildApp(
     deliveries,
     projectionSessions: sessions,
     progress: artifactMap<ProjectionProgress>("agent_conversation_projection_progress"),
+    captures: artifactMap<ProjectionCapture>("agent_conversation_captures"),
+    captureMailboxes: artifactMap<ProjectionCaptureMailbox>("agent_conversation_capture_mailboxes"),
     leaderLease,
     directory,
     identity,
@@ -1728,6 +1732,7 @@ export function serverDeps(
     refreshCustomProviders: built.refreshCustomProviders,
     mcpServers: built.mcpServers,
     mcpToolService: built.mcpToolService,
+    conversationProjection: built.conversationProjection,
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     harnessId: config.harness,
     connectorTokens: built.connectorTokens,

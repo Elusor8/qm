@@ -1,9 +1,12 @@
+import { exerciseProjectionCapture } from "./projection-capture-contract.ts";
 import { exerciseProjectionFairness } from "./projection-fairness-contract.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createAgentConversationProjectionService,
   type ProjectionProgress,
+  type ProjectionCapture,
+  type ProjectionCaptureMailbox,
 } from "../src/conversations/agent-conversation-projection-service.ts";
 import {
   createAgentConversationLinkStore,
@@ -44,7 +47,15 @@ async function fixture() {
   const sessions = createMemorySessionStore();
   const session = await sessions.getOrCreateByThread("web:opener", "dm", "personal:U1", undefined, "web");
   const progress = createMemoryMap<ProjectionProgress>();
-  const deps = { links, deliveries, projectionSessions: sessions, progress, leaderLease: createNoopLeaderLease() };
+  const deps = {
+    links,
+    deliveries,
+    projectionSessions: sessions,
+    progress,
+    captures: createMemoryMap<ProjectionCapture>(),
+    captureMailboxes: createMemoryMap<ProjectionCaptureMailbox>(),
+    leaderLease: createNoopLeaderLease(),
+  };
   const context = {
     owner: side.owner,
     ownerScopeId: "personal:U1",
@@ -223,4 +234,18 @@ test("an explicit no-destination opening stays silent through durable retry", as
 test("blocked web conversations do not starve unrelated ready work", async () => {
   const f = await fixture();
   await exerciseProjectionFairness(f);
+});
+
+test("durable capture and quarantine contract", async (t) => {
+  await exerciseProjectionCapture(t, await fixture());
+});
+
+test("malformed captured claim rows are rejected and quarantined rather than retried forever", async () => {
+  const f = await fixture();
+  const obs = observation(1, "zipviz_inbox_claim");
+  obs.raw.text = JSON.stringify({ claimed: [null] });
+  await assert.rejects(f.service.capture(f.context, obs), /invalid turn row/);
+  await f.restart().sweep();
+  assert.equal((await f.deliveries.pending("conversation-capture")).length, 0);
+  assert.equal((await f.deliveries.pending("conversation-projection-quarantine")).length, 1);
 });

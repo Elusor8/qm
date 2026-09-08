@@ -1,3 +1,8 @@
+import {
+  getProjectionCapture,
+  recoverProjectionCapture,
+  listProjectionCaptures,
+} from "./admin/conversation-projections.ts";
 import { type ApiCtx, type Route } from "./route.ts";
 import {
   getAdminResources,
@@ -60,6 +65,14 @@ const timed =
   };
 
 const routes: ReadonlyArray<Route<ApiCtx>> = [
+  { method: "GET", path: "/v1/admin/conversation-captures", auth: "either", handle: listProjectionCaptures },
+  { method: "GET", path: "/v1/admin/conversation-captures/:id", auth: "either", handle: getProjectionCapture },
+  {
+    method: "POST",
+    path: "/v1/admin/conversation-captures/:id/recover",
+    auth: "either",
+    handle: recoverProjectionCapture,
+  },
   { method: "GET", path: "/v1/admin/slack-installation", auth: "either", handle: getSlackInstallation },
   { method: "GET", path: "/v1/admin/slack-emoji", auth: "either", handle: getSlackEmojiList },
   { method: "PUT", path: "/v1/admin/slack-installation", auth: "either", handle: putSlackInstallation },
