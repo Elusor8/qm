@@ -160,6 +160,7 @@ export async function exerciseProjectionCapture(
     assert.equal((await service().inspect(journal.destination.target))!.state, "uncertain");
     await assert.rejects(service().recover(journal.destination.target), /no retained authoritative result/);
     assert.equal((await deps.progress.get(key))!.lastTurn, 10);
+    await call!.result(observation(11).raw);
   });
   await t.test("concurrent first captures and independent participants keep separate baselines", async () => {
     const cid = `conv-${randomUUID()}`;
@@ -201,7 +202,7 @@ export async function exerciseProjectionCapture(
       conversationId: side.conversationId,
     });
     assert.equal((await deps.progress.get(otherKey))!.lastTurn, 4);
-    await pending!.failed(new Error("no response"));
+    await pending!.result(observation(11).raw);
   });
 
   await t.test("a later historical capture cannot extend the initial baseline backwards", async () => {
@@ -224,6 +225,47 @@ export async function exerciseProjectionCapture(
       [8],
     );
   });
+
+  await t.test(
+    "lost initial response holds its cohort across restart while an independent side progresses",
+    async () => {
+      const lostOwner = `${owner}-lost`;
+      const lostMailbox = `lost.${mailbox}`;
+      const lostContext = { ...context, owner: lostOwner, ownerScopeId: `personal:${lostOwner}` };
+      const input = (turn: number) => {
+        const value = observation(turn);
+        value.args.mailbox = lostMailbox;
+        value.raw.conversationBinding.owner = lostOwner;
+        value.raw.conversationBinding.mailbox = lostMailbox;
+        return value;
+      };
+      const first = input(1);
+      const opener = await service().begin(lostContext, {
+        ...first,
+        conversationBinding: first.raw.conversationBinding,
+      });
+      const journal = (await deps.deliveries.pending("conversation-capture")).at(-1)!;
+      await service().capture(lostContext, input(2));
+      await opener!.failed(new Error("committed response lost"));
+      const lostKey = agentConversationLinkId({ ...side, owner: lostOwner, mailbox: lostMailbox });
+      for (let i = 0; i < 2; i++) {
+        await later();
+        await service().sweep();
+        assert.equal((await deps.progress.get(lostKey))!.initializing, true);
+        assert.equal(
+          (await deps.deliveries.pending("principal")).filter((d) => d.provenance?.conversation?.sideKey === lostKey)
+            .length,
+          0,
+        );
+        assert.equal((await service().inspect(journal.destination.target))!.state, "uncertain");
+        await assert.rejects(service().recover(journal.destination.target), /no retained authoritative result/);
+      }
+      await service().capture(context, observation(12));
+      await service().sweep();
+      assert.equal((await deps.progress.get(key))!.lastTurn, 12);
+    },
+  );
+
   await t.test("lost quarantine acknowledgement retries idempotently after restart", async () => {
     const poisoned = await deps.deliveries.enqueue({
       destination: { type: "conversation-projection", target: key },

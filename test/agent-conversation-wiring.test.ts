@@ -268,113 +268,128 @@ for (const isError of [false, true]) {
   });
 }
 
-test("a peer claim can return before the committed open response without losing the opening projection", async (t) => {
-  let releaseOpen!: () => void;
-  let committed!: () => void;
-  const remoteCommitted = new Promise<void>((resolve) => {
-    committed = resolve;
-  });
-  const delayedResponse = new Promise<void>((resolve) => {
-    releaseOpen = resolve;
-  });
-  const built = buildApp(
-    testConfig({ dataDir: mkdtempSync(join(tmpdir(), "capture-race-")), signingSecret: "projection-fixture" }),
-  );
-  t.after(() => built.mcpToolService.close());
-  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
-    const request = JSON.parse(String(init.body));
-    let result;
-    if (request.method === "tools/list")
-      result = {
-        tools: ["zipviz_conversation_open", "zipviz_inbox_claim"].map((name) => ({
-          name,
-          inputSchema: { type: "object" },
-        })),
-      };
-    else {
-      if (request.params.name === "zipviz_conversation_open") {
-        committed();
-        await delayedResponse;
-        result = {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                disposition: "new",
-                snapshot: { conversation_id: conversationId, turns: 1, peer: "bob.example.viz" },
-                turn: { message: "signed open", conversation: { id: conversationId, turn: 1, intent: "propose" } },
-              }),
-            },
-          ],
-        };
-      } else
-        result = {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                claimed: [
-                  {
-                    from: "bob.example.viz",
-                    body: "signed peer response",
-                    conversation: { conversation_id: conversationId, turn: 2, intent: "accept" },
-                  },
-                ],
-              }),
-            },
-          ],
-        };
-    }
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
-      headers: { "content-type": "application/json" },
+for (const outcome of ["delayed", "lost"] as const) {
+  test(`a peer claim before a ${outcome} open response preserves the opening projection boundary`, async (t) => {
+    let releaseOpen!: () => void;
+    let committed!: () => void;
+    const remoteCommitted = new Promise<void>((resolve) => {
+      committed = resolve;
     });
-  });
-  await built.mcpServers.put({
-    id: "zipviz",
-    name: "ZipViz",
-    url: "https://mcp-projection.invalid/mcp",
-    auth: "none",
-    enabled: true,
-    readOnly: false,
-    updatedAt: 0,
-    updatedBy: "U1",
-    zipviz: binding,
-  });
-  await built.mcpToolService.refresh();
-  const call = (remoteName: string, threadRef: string) =>
-    built.mcpToolService.call(
-      `zipviz_${remoteName}`,
-      { mailbox, peer: "bob.example.viz", message: "argument" },
-      {
-        runtimeContext: { actorId: "U1", threadRef, nativeEventId: threadRef },
-        onCallStart: (input) =>
-          built.conversationProjection.begin(
-            {
-              owner: "U1",
-              ownerScopeId: "personal:U1",
-              threadRef,
-              sessionId: threadRef,
-              surface: "slack",
-              destination: { type: "principal", target: "U1", onBehalfOf: "U1" },
-            },
-            input,
-          ),
-      },
+    const delayedResponse = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+    const built = buildApp(
+      testConfig({ dataDir: mkdtempSync(join(tmpdir(), "capture-race-")), signingSecret: "projection-fixture" }),
     );
-  const opening = call("zipviz_conversation_open", "opening-session");
-  await remoteCommitted;
-  await call("zipviz_inbox_claim", "webhook-session");
-  await built.conversationProjection.sweep();
-  assert.equal((await built.deliveries.pending("principal")).length, 0);
-  releaseOpen();
-  await opening;
-  await new Promise((resolve) => setTimeout(resolve, 1_100));
-  await built.conversationProjection.sweep();
-  const posts = await built.deliveries.pending("principal");
-  assert.deepEqual(
-    posts.map((d) => d.provenance?.conversation?.turn),
-    [1, 2],
-  );
-  assert.match(posts[0]!.text, /signed open/);
-  assert.match(posts[1]!.text, /signed peer response/);
-});
+    t.after(() => built.mcpToolService.close());
+    t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      let result;
+      if (request.method === "tools/list")
+        result = {
+          tools: ["zipviz_conversation_open", "zipviz_inbox_claim"].map((name) => ({
+            name,
+            inputSchema: { type: "object" },
+          })),
+        };
+      else {
+        if (request.params.name === "zipviz_conversation_open") {
+          committed();
+          await delayedResponse;
+          if (outcome === "lost") throw new Error("committed open response lost");
+          result = {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  disposition: "new",
+                  snapshot: { conversation_id: conversationId, turns: 1, peer: "bob.example.viz" },
+                  turn: { message: "signed open", conversation: { id: conversationId, turn: 1, intent: "propose" } },
+                }),
+              },
+            ],
+          };
+        } else
+          result = {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  claimed: [
+                    {
+                      from: "bob.example.viz",
+                      body: "signed peer response",
+                      conversation: { conversation_id: conversationId, turn: 2, intent: "accept" },
+                    },
+                  ],
+                }),
+              },
+            ],
+          };
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+    await built.mcpServers.put({
+      id: "zipviz",
+      name: "ZipViz",
+      url: "https://mcp-projection.invalid/mcp",
+      auth: "none",
+      enabled: true,
+      readOnly: false,
+      updatedAt: 0,
+      updatedBy: "U1",
+      zipviz: binding,
+    });
+    await built.mcpToolService.refresh();
+    const call = (remoteName: string, threadRef: string) =>
+      built.mcpToolService.call(
+        `zipviz_${remoteName}`,
+        { mailbox, peer: "bob.example.viz", message: "argument" },
+        {
+          runtimeContext: { actorId: "U1", threadRef, nativeEventId: threadRef },
+          onCallStart: (input) =>
+            built.conversationProjection.begin(
+              {
+                owner: "U1",
+                ownerScopeId: "personal:U1",
+                threadRef,
+                sessionId: threadRef,
+                surface: "slack",
+                destination: { type: "principal", target: "U1", onBehalfOf: "U1" },
+              },
+              input,
+            ),
+        },
+      );
+    const opening = call("zipviz_conversation_open", "opening-session");
+    await remoteCommitted;
+    await call("zipviz_inbox_claim", "webhook-session");
+    await built.conversationProjection.sweep();
+    assert.equal((await built.deliveries.pending("principal")).length, 0);
+    releaseOpen();
+    if (outcome === "lost") {
+      await assert.rejects(opening, /committed open response lost/);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await built.conversationProjection.sweep();
+      assert.equal((await built.deliveries.pending("principal")).length, 0);
+      const journals = await built.deliveries.pending("conversation-capture");
+      const records = await Promise.all(
+        journals.map((job) => built.conversationProjection.inspect(job.destination.target)),
+      );
+      assert.ok(records.some((record) => record?.state === "uncertain" && !record.raw));
+      return;
+    }
+    await opening;
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await built.conversationProjection.sweep();
+    const posts = await built.deliveries.pending("principal");
+    assert.deepEqual(
+      posts.map((d) => d.provenance?.conversation?.turn),
+      [1, 2],
+    );
+    assert.match(posts[0]!.text, /signed open/);
+    assert.match(posts[1]!.text, /signed peer response/);
+  });
+}

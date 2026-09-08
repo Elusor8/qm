@@ -208,7 +208,6 @@ export function createAgentConversationProjectionService(
       },
       async failed(error) {
         await captures.merge(id, { state: "uncertain", error: errMessage(error) });
-        await releaseCapture(id, record);
       },
     };
   }
