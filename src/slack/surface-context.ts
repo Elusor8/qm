@@ -25,8 +25,6 @@ import {
 } from "./conversation-view.ts";
 import { isProjectedConversationMessage } from "../conversations/conversation-delivery.ts";
 
-const MAX_SEARCH_PROJECTION_LOOKUPS = 20;
-
 export function createSurfaceContextFulfiller(deps: {
   core: SlackCoreClient;
   bridge: CoreBridge;
@@ -81,7 +79,6 @@ export function createSurfaceContextFulfiller(deps: {
 
   async function withoutProjectedMatches(client: any, matches: any[]): Promise<any[]> {
     const visible: any[] = [];
-    let lookups = 0;
     for (const m of matches) {
       if (!isSelfMatch(m)) {
         visible.push(m);
@@ -89,8 +86,7 @@ export function createSurfaceContextFulfiller(deps: {
       }
       const channel = String(m?.channel?.id ?? "");
       const ts = String(m?.ts ?? "");
-      if (!channel || !ts || lookups >= MAX_SEARCH_PROJECTION_LOOKUPS) continue;
-      lookups++;
+      if (!channel || !ts) continue;
       const projected = await isProjectionAt(client, channel, ts, matchThreadTs(m)).catch(
         swallowAs("slack: search projection check", true),
       );

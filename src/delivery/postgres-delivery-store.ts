@@ -19,6 +19,8 @@ function rowToDelivery(r: Record<string, unknown>): Delivery {
     ...(r.recipient_thread_ref != null ? { recipientThreadRef: r.recipient_thread_ref as string } : {}),
     ...(r.deliver_latency_ms != null ? { deliverLatencyMs: Number(r.deliver_latency_ms) } : {}),
     ...(r.slack_api_ms != null ? { slackApiMs: Number(r.slack_api_ms) } : {}),
+    ...(r.external_message_ref != null ? { externalMessageRef: r.external_message_ref as string } : {}),
+    ...(r.external_channel_ref != null ? { externalChannelRef: r.external_channel_ref as string } : {}),
   };
 }
 
@@ -44,6 +46,8 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_expires_at BIGINT`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_attempts INT NOT NULL DEFAULT 0`,
     `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS available_at BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS external_message_ref TEXT`,
+    `ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS external_channel_ref TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_deliveries_ready ON deliveries ((destination->>'type'), available_at, created_at, id) WHERE delivered_at IS NULL AND NOT shadow`,
     `CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_thread
         ON deliveries (recipient_thread_ref, created_at) WHERE recipient_thread_ref IS NOT NULL`,
@@ -81,6 +85,38 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
       }
       const existing = await q("SELECT * FROM deliveries WHERE idempotency_key = $1", [input.idempotencyKey]);
       if (!existing[0]) throw new Error(`delivery enqueue lost a race for key ${input.idempotencyKey}`);
+      return rowToDelivery(existing[0]);
+    },
+    async enqueueProjection(input) {
+      const rows = await q(
+        `INSERT INTO deliveries (id, idempotency_key, destination, text, provenance, created_at, shadow)
+         VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+         ON CONFLICT (idempotency_key) DO UPDATE
+           SET text = EXCLUDED.text,
+               provenance = EXCLUDED.provenance,
+               destination = CASE WHEN deliveries.external_message_ref IS NULL THEN EXCLUDED.destination
+                 ELSE jsonb_set(EXCLUDED.destination, '{editRef}', to_jsonb(deliveries.external_message_ref)) END,
+               delivered_at = NULL,
+               claim_expires_at = NULL,
+               available_at = 0
+         WHERE COALESCE((deliveries.provenance->'conversation'->>'projectionRevision')::BIGINT, 0) < $7
+         RETURNING *`,
+        [
+          randomUUID(),
+          input.idempotencyKey,
+          JSON.stringify(input.destination),
+          input.text,
+          JSON.stringify(input.provenance),
+          Date.now(),
+          input.projectionRevision,
+        ],
+      );
+      if (rows[0]) {
+        for (const listener of enqueueListeners) listener();
+        return rowToDelivery(rows[0]);
+      }
+      const existing = await q("SELECT * FROM deliveries WHERE idempotency_key = $1", [input.idempotencyKey]);
+      if (!existing[0]) throw new Error(`projection delivery enqueue lost a race for key ${input.idempotencyKey}`);
       return rowToDelivery(existing[0]);
     },
     async pending(type, opts) {
@@ -134,14 +170,18 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
       );
       return rows.map(rowToDelivery);
     },
-    async ack(id, at, slackApiMs) {
+    async ack(id, at, slackApiMs, external) {
       await query(
         `UPDATE deliveries
             SET delivered_at = $2,
                 deliver_latency_ms = GREATEST(0, $2 - created_at),
-                slack_api_ms = COALESCE($3, slack_api_ms)
+                slack_api_ms = COALESCE($3, slack_api_ms),
+                external_message_ref = COALESCE($4, external_message_ref),
+                external_channel_ref = COALESCE($5, external_channel_ref),
+                destination = CASE WHEN $4::text IS NULL THEN destination
+                  ELSE jsonb_set(destination, '{editRef}', to_jsonb($4::text)) END
           WHERE id = $1 AND delivered_at IS NULL`,
-        [id, at, slackApiMs ?? null],
+        [id, at, slackApiMs ?? null, external?.messageRef ?? null, external?.channelRef ?? null],
       );
     },
     async ackByKey(idempotencyKey, at) {
@@ -162,6 +202,10 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
     },
     async get(id) {
       const rows = await q("SELECT * FROM deliveries WHERE id = $1", [id]);
+      return rows[0] ? rowToDelivery(rows[0]) : null;
+    },
+    async getByKey(idempotencyKey) {
+      const rows = await q("SELECT * FROM deliveries WHERE idempotency_key = $1", [idempotencyKey]);
       return rows[0] ? rowToDelivery(rows[0]) : null;
     },
     async recordRecipientThread(id, recipientThreadRef, at) {

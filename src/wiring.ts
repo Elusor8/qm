@@ -5,10 +5,12 @@ import {
 import {
   createAgentConversationProjectionService,
   type AgentConversationProjectionService,
-  type ProjectionProgress,
-  type ProjectionCapture,
-  type ProjectionCaptureMailbox,
+  type ProjectionPendingBinding,
 } from "./conversations/agent-conversation-projection-service.ts";
+import {
+  createMemoryProjectionReaderStore,
+  createPostgresProjectionReaderStore,
+} from "./conversations/conversation-projection-reader-store.ts";
 import type { AgentConversationLink } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -1108,10 +1110,13 @@ export function buildApp(
     links: conversationLinks,
     deliveries,
     projectionSessions: sessions,
-    progress: artifactMap<ProjectionProgress>("agent_conversation_projection_progress"),
-    captures: artifactMap<ProjectionCapture>("agent_conversation_captures"),
-    captureMailboxes: artifactMap<ProjectionCaptureMailbox>("agent_conversation_capture_mailboxes"),
+    readers: config.databaseUrl
+      ? createPostgresProjectionReaderStore(config.databaseUrl)
+      : createMemoryProjectionReaderStore(),
+    pendingBindings: artifactMap<ProjectionPendingBinding>("agent_conversation_projection_pending_bindings"),
     leaderLease,
+    mcpServers,
+    mcp: mcpToolService,
     directory,
     identity,
     managedGroups: projects,

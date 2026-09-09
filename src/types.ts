@@ -196,6 +196,9 @@ export interface DeliveryProvenance {
     notice?: boolean;
     sideKey?: string;
     turn?: number;
+    eventId?: string;
+    projectionRevision?: number;
+    destinationRevision?: number;
   };
   trigger: BackgroundWakeTrigger;
   surface: string;
@@ -299,6 +302,8 @@ export interface Delivery {
   deliverLatencyMs?: number;
   slackApiMs?: number;
   claimAttempts?: number;
+  externalMessageRef?: string;
+  externalChannelRef?: string;
 }
 
 export interface SurfaceContextQuery {

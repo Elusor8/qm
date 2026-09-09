@@ -131,8 +131,20 @@ async function ackDelivery(ctx: ApiCtx): Promise<void> {
     isObj(body) && typeof body.slackApiMs === "number" && Number.isFinite(body.slackApiMs) && body.slackApiMs >= 0
       ? body.slackApiMs
       : undefined;
-  if (recipientThreadRef) await app.recordPrincipalDelivery(id, recipientThreadRef);
-  await app.ackDelivery(id, slackApiMs);
+  const failure = isObj(body) && typeof body.failure === "string" ? body.failure : undefined;
+  const externalMessageRef =
+    isObj(body) && typeof body.externalMessageRef === "string" ? body.externalMessageRef : undefined;
+  const externalChannelRef =
+    isObj(body) && typeof body.externalChannelRef === "string" ? body.externalChannelRef : undefined;
+  await app.ackDelivery(
+    id,
+    slackApiMs,
+    failure,
+    externalMessageRef && externalChannelRef
+      ? { messageRef: externalMessageRef, channelRef: externalChannelRef }
+      : undefined,
+  );
+  if (recipientThreadRef && !failure) await app.recordPrincipalDelivery(id, recipientThreadRef);
   return sendJson(res, 200, { ok: true });
 }
 

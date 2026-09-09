@@ -13,6 +13,7 @@ import {
   type AgentConversationLinkStore,
 } from "./agent-conversation-link-store.ts";
 import { renderInboundTurn, renderOutboundTurn, type ConversationTurnFacts } from "./render-conversation-turn.ts";
+import type { ConversationProjectionEvent } from "./conversation-projection-event.ts";
 
 const OPENS = new Set(["zipviz_conversation_open", "zipviz_conversation_adopt"]);
 const SENDS = new Set([
@@ -64,6 +65,11 @@ export interface AgentConversationProjector {
   observe(observation: ProjectionObservation): Promise<void>;
   project(observation: ProjectionObservation): Promise<void>;
   register(observation: ProjectionObservation, remoteName: string): Promise<AgentConversationLink | null>;
+  projectEvent(
+    event: ConversationProjectionEvent,
+    link: AgentConversationLink,
+    destinationRevision: number,
+  ): Promise<void>;
 }
 
 function parseJson(text: string): Record<string, unknown> | null {
@@ -333,6 +339,57 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
   return {
     project,
     register,
+    async projectEvent(event, link, destinationRevision) {
+      const facts: ConversationTurnFacts = {
+        conversationId: event.conversation_id,
+        turn: event.turn,
+        intent: event.signed.intent,
+        peer: event.side === "us" ? event.to : event.from,
+        ...(event.signed.human_summary ? { humanSummary: event.signed.human_summary } : {}),
+      };
+      const receipt = event.receipt.present
+        ? `\nReceipt: ${event.receipt.status ?? "present"}${event.receipt.received_at ? ` at ${event.receipt.received_at}` : ""}.`
+        : "";
+      const rendered =
+        (event.side === "us" ? renderOutboundTurn(facts, event.body) : renderInboundTurn(facts, event.body)) + receipt;
+      const direction = event.side === "us" ? "out" : "in";
+      const destination = link.destination;
+      if (!destination) return;
+      if (!(await deliverable(link.owner, link.ownerScopeId, destination))) {
+        await noticeOnce(link, "the destination is no longer visible to you");
+        return;
+      }
+      if (!TEXT_SINKS.has(destination.type)) {
+        if (!(await postToSession(link, event.turn, rendered)))
+          throw new Error(`could not project into the ${destination.type} surface`);
+        return;
+      }
+      await deps.deliveries.enqueueProjection({
+        destination,
+        text: rendered,
+        idempotencyKey: `zvconv:event:${event.event_id}:destination:${destinationRevision}`,
+        projectionRevision: event.projection_revision,
+        provenance: {
+          ...provenance(link, event.turn, link.ownerScopeId),
+          fireKey: event.event_id,
+          conversation: {
+            conversationId: link.conversationId,
+            mailbox: link.mailbox,
+            owner: link.owner,
+            ownerScopeId: link.ownerScopeId,
+            sideKey: agentConversationLinkId(link),
+            turn: event.turn,
+            eventId: event.event_id,
+            projectionRevision: event.projection_revision,
+            destinationRevision,
+          },
+        },
+      });
+      await deps.links.advance(
+        link,
+        direction === "in" ? { lastProjectedInTurn: event.turn } : { lastProjectedOutTurn: event.turn },
+      );
+    },
     async observe(observation) {
       try {
         await project(observation);

@@ -341,8 +341,19 @@ export function createMessagingMethods(
       );
       return merged != null;
     },
-    async ackDelivery(id, slackApiMs) {
-      await deps.deliveries.ack(id, Date.now(), slackApiMs);
+    async ackDelivery(id, slackApiMs, failure, external) {
+      if (failure) {
+        const delivery = await deps.deliveries.get(id);
+        if (!delivery || delivery.deliveredAt !== null) return;
+        await deps.deliveries.enqueue({
+          destination: delivery.destination,
+          provenance: delivery.provenance,
+          text: JSON.stringify({ failure, delivery }),
+          idempotencyKey: `delivery-failure:${id}`,
+          shadow: true,
+        });
+      }
+      await deps.deliveries.ack(id, Date.now(), slackApiMs, external);
     },
     async ackDeliveryByKey(idempotencyKey) {
       await deps.deliveries.ackByKey(idempotencyKey, Date.now());

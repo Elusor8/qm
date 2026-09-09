@@ -80,7 +80,16 @@ export interface SlackCoreClient {
   pushDirectory(body: DirectoryPush): Promise<void>;
   authorizeConversationDelivery(id: string): Promise<boolean>;
   claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
-  ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
+  ackDelivery(
+    id: string,
+    body?: {
+      recipientThreadRef?: string;
+      slackApiMs?: number;
+      failure?: string;
+      externalMessageRef?: string;
+      externalChannelRef?: string;
+    },
+  ): Promise<void>;
   onDeliveryEnqueued(listener: () => void): () => void;
   pendingContextRequests(): Promise<SurfaceContextRequest[]>;
   onContextRequest(listener: (request: SurfaceContextRequest) => void): () => void;
@@ -333,8 +342,13 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
     },
 
     async ackDelivery(id, body) {
-      if (body?.recipientThreadRef) await deps.app.recordPrincipalDelivery(id, body.recipientThreadRef);
-      await deps.app.ackDelivery(id, body?.slackApiMs);
+      const external =
+        body?.externalMessageRef && body.externalChannelRef
+          ? { messageRef: body.externalMessageRef, channelRef: body.externalChannelRef }
+          : undefined;
+      await deps.app.ackDelivery(id, body?.slackApiMs, body?.failure, external);
+      if (body?.recipientThreadRef && !body.failure)
+        await deps.app.recordPrincipalDelivery(id, body.recipientThreadRef);
     },
 
     onDeliveryEnqueued(listener) {

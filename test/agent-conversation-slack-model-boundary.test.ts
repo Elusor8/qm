@@ -245,3 +245,44 @@ test("conversation projections are not mirrored into the surface cache", async (
     [ORDINARY],
   );
 });
+
+for (const threaded of [false, true]) {
+  test(`live search verifies ordinary self matches beyond twenty (threaded=${threaded})`, async () => {
+    const posted: any[] = [];
+    const lookups: Record<string, unknown>[] = [];
+    searchMatches = Array.from({ length: 100 }, (_, index) => ({
+      ts: `${300 + index}.1`,
+      channel: { id: "C1" },
+      user: "UBOT",
+      text: index === 98 ? PROJECTED : `ordinary-${index}`,
+      ...(threaded ? { thread_ts: "100.1" } : {}),
+    }));
+    const read = async (args: Record<string, unknown>) => {
+      lookups.push(args);
+      const match = searchMatches.find((m) => m.ts === args.oldest)!;
+      if (match === searchMatches[96]) throw new Error("unavailable");
+      if (match === searchMatches[97]) return { messages: [] };
+      return { messages: [{ ...match, ...(match === searchMatches[98] ? { metadata: projection.metadata } : {}) }] };
+    };
+    const fulfiller = createSurfaceContextFulfiller({
+      core: { fulfillContextRequest: async (_id: string, body: unknown) => void posted.push(body) } as never,
+      bridge: {} as never,
+      directory: {} as never,
+      ids: { botUserId: "UBOT", ownBotId: "B_SELF" } as never,
+      serializer: serializer(),
+      botToken: "xoxb-test",
+      userToken: "xoxp-test",
+      clientOptions: {},
+    });
+    await fulfiller.fulfillSurfaceContext({ conversations: { history: read, replies: read } }, {
+      id: "R-budget",
+      query: { searchAll: "ordinary", count: 100 },
+    } as never);
+    assert.equal(lookups.length, 100);
+    assert.ok(lookups.every((args) => args.include_all_metadata === true));
+    assert.equal(posted[0].result.messages.length, 97);
+    const body = JSON.stringify(posted[0]);
+    assert.match(body, /ordinary-99/);
+    assert.doesNotMatch(body, /PROJECTED_PEER_BODY|ordinary-96|ordinary-97/);
+  });
+}

@@ -1,21 +1,29 @@
-import { randomUUID } from "node:crypto";
 import type { Destination, ScopeId } from "../types.ts";
-import type { McpRawResult, McpCallObservation, McpCallObserver } from "../mcp/mcp-tool-service.ts";
+import type { McpCallObservation, McpToolService } from "../mcp/mcp-tool-service.ts";
+import type { McpServer, McpServerStore } from "../mcp/mcp-server-store.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import type { LeaderLease } from "../persistence/leader-lease.ts";
 import { createSweeper } from "../util/sweeper.ts";
 import { errMessage, swallow } from "../util/errors.ts";
-import { agentConversationLinkId } from "./agent-conversation-link-store.ts";
 import {
   createAgentConversationProjector,
   type AgentConversationProjectorDeps,
-  type ProjectionObservation,
 } from "./agent-conversation-projector.ts";
+import type { ConversationProjectionEvent } from "./conversation-projection-event.ts";
+import {
+  createMemoryProjectionReaderStore,
+  projectionReaderAudienceKey,
+  type ProjectionOutboxJob,
+  type ProjectionReaderAudience,
+  type ProjectionReaderStore,
+  type ProjectionSkipMarker,
+} from "./conversation-projection-reader-store.ts";
 
-const CAPTURE_TYPE = "conversation-capture";
-const QUARANTINE_TYPE = "conversation-projection-quarantine";
-const QUEUE_TYPE = "conversation-projection";
-const TOOLS = new Set([
+const PAGE_SIZE = 50;
+const MAX_PAGES_PER_SWEEP = 4;
+const PENDING_BINDING_LIMIT = 64;
+const RECONCILE_INTERVAL_MS = 5_000;
+const PROJECTION_TOOLS = new Set([
   "zipviz_conversation_open",
   "zipviz_conversation_adopt",
   "zipviz_conversation_send",
@@ -34,54 +42,148 @@ interface ProjectionContext {
   destination?: Destination;
 }
 
-export interface ProjectionProgress {
-  lastTurn: number;
-  baselineTurn: number;
-  lastSkipNote?: string;
-  initializing?: boolean;
-  initialCaptures?: string[];
-}
-
-export interface ProjectionCapture {
-  context: ProjectionContext;
-  call: McpCallObservation;
-  raw?: McpRawResult;
-  state: "awaiting-result" | "captured" | "queued" | "rejected" | "uncertain";
-  createdAt: number;
-  error?: string;
-}
-
-export interface ProjectionCaptureMailbox {
-  pending: string[];
-}
-
-class InvalidCapture extends Error {}
-
-interface ProjectionJob {
-  context: ProjectionContext;
-  observation: ProjectionObservation;
-  remoteName: string;
+export interface ProjectionPendingBinding extends ProjectionContext {
+  id: string;
+  serverId: string;
   mailbox: string;
-  conversationId: string;
-  turn: number;
+  externalThreadRef: string;
+  createdAt: number;
+}
+
+interface ProjectionJobPayload {
+  event: ConversationProjectionEvent;
+  context: ProjectionContext;
+  destinationRevision: number;
+}
+
+interface ProjectionEventsPage {
+  events: unknown[];
+  skipped: unknown[];
+  next_cursor: string | null;
+  high_water_cursor: string | null;
+  has_more: boolean;
 }
 
 export interface AgentConversationProjectionService {
-  begin(context: ProjectionContext, call: McpCallObservation): Promise<McpCallObserver | undefined>;
-  recover(captureId: string): Promise<void>;
-  inspect(captureId: string): Promise<ProjectionCapture | null>;
-  diagnostics(): Promise<{
-    captures: Array<{ id: string; state: string; error?: string }>;
-    quarantined: Array<{ id: string; sourceId: string; error: string }>;
-  }>;
-
-  capture(
-    context: ProjectionContext,
-    observation: { name: string; args: Record<string, unknown>; raw: McpRawResult },
-  ): Promise<void>;
+  hint(context: ProjectionContext, call: McpCallObservation): Promise<void>;
   sweep(): Promise<void>;
+  diagnostics(): Promise<{
+    readers: Array<{
+      audience: ProjectionReaderAudience;
+      afterCursor: string | null;
+      version: number;
+      recoveryCode?: string;
+      skips: ProjectionSkipMarker[];
+    }>;
+    pendingBindings: ProjectionPendingBinding[];
+    outbox: ProjectionOutboxJob[];
+  }>;
   start(): void;
   stop(): Promise<void>;
+}
+
+function object(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function string(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function unwrapUntrusted(value: string): string {
+  const firstEnd = value.indexOf("\n");
+  const secondEnd = value.indexOf("\n", firstEnd + 1);
+  if (firstEnd < 1 || secondEnd < firstEnd) throw new Error("untrusted projection wrapper is malformed");
+  const boundary = /^\[UNTRUSTED AGENT RESPONSE boundary=([0-9a-f-]{36})\]$/.exec(value.slice(0, firstEnd))?.[1];
+  const policy = value.slice(firstEnd + 1, secondEnd);
+  if (!boundary || !policy.startsWith("[source=") || !policy.endsWith("]"))
+    throw new Error("untrusted projection wrapper is malformed");
+  const suffix = `\n[END UNTRUSTED AGENT RESPONSE boundary=${boundary}]`;
+  if (!value.endsWith(suffix)) throw new Error("untrusted projection wrapper boundary does not close");
+  return value.slice(secondEnd + 1, -suffix.length);
+}
+
+function projectionEvent(value: unknown, audience: ProjectionReaderAudience): ConversationProjectionEvent {
+  const row = object(value);
+  const signed = object(row?.signed);
+  const receipt = object(row?.receipt);
+  const correlation = object(row?.correlation);
+  const timing = object(row?.timing);
+  if (
+    !row ||
+    row.source !== "zipviz-signed-v3" ||
+    row.authoritative !== true ||
+    row.mailbox !== audience.mailbox ||
+    !string(row.event_id) ||
+    !Number.isSafeInteger(row.projection_revision) ||
+    !string(row.conversation_id) ||
+    !Number.isSafeInteger(row.turn) ||
+    (row.side !== "us" && row.side !== "them") ||
+    !string(row.from) ||
+    !string(row.to) ||
+    !string(row.msg_id) ||
+    typeof row.body !== "string" ||
+    !string(row.ledger_status) ||
+    !signed ||
+    signed.envelope_v !== 3 ||
+    !receipt ||
+    !correlation ||
+    !timing ||
+    correlation.adapter_kind !== audience.adapterKind ||
+    correlation.adapter_instance !== audience.adapterInstance ||
+    correlation.external_scope !== audience.externalScope ||
+    !string(correlation.external_conversation_ref)
+  )
+    throw new Error("projection event does not match its authorized reader audience");
+  const side = row.side as "us" | "them";
+  const body = side === "them" ? unwrapUntrusted(row.body) : row.body;
+  const humanSummary =
+    side === "them" && typeof signed.human_summary === "string"
+      ? unwrapUntrusted(signed.human_summary)
+      : (signed.human_summary as string | null);
+  return {
+    ...(row as unknown as ConversationProjectionEvent),
+    body,
+    signed: { ...(signed as ConversationProjectionEvent["signed"]), human_summary: humanSummary },
+  };
+}
+
+function skipMarker(value: unknown): ProjectionSkipMarker {
+  const row = object(value);
+  if (
+    !row ||
+    !Number.isSafeInteger(row.projection_revision) ||
+    !string(row.msg_id) ||
+    !["E_RETAINED_EVENT_GAP", "E_PROOF_UNAVAILABLE"].includes(String(row.code))
+  )
+    throw new Error("projection skip marker is malformed");
+  return { projectionRevision: Number(row.projection_revision), msgId: String(row.msg_id), code: String(row.code) };
+}
+
+function page(value: string): ProjectionEventsPage {
+  const parsed = object(JSON.parse(value));
+  if (parsed?.error) throw Object.assign(new Error(String(parsed.error)), { code: parsed.code });
+  if (
+    !parsed ||
+    !Array.isArray(parsed.events) ||
+    !Array.isArray(parsed.skipped) ||
+    typeof parsed.has_more !== "boolean" ||
+    (parsed.next_cursor !== null && typeof parsed.next_cursor !== "string") ||
+    (parsed.high_water_cursor !== null && typeof parsed.high_water_cursor !== "string")
+  )
+    throw new Error("projection feed page is malformed");
+  return parsed as unknown as ProjectionEventsPage;
+}
+
+function audienceFor(server: McpServer): ProjectionReaderAudience | null {
+  if (!server.enabled || !server.zipviz) return null;
+  return {
+    mailbox: server.zipviz.mailbox.trim().toLowerCase(),
+    adapterKind: server.zipviz.adapterKind,
+    adapterInstance: server.zipviz.adapterInstance,
+    externalScope: "thread",
+    externalPrincipalRef: server.zipviz.actorExternalId,
+  };
 }
 
 export function createAgentConversationProjectionService(
@@ -89,401 +191,271 @@ export function createAgentConversationProjectionService(
     AgentConversationProjectorDeps,
     "links" | "deliveries" | "projectionSessions" | "directory" | "identity" | "managedGroups"
   > & {
-    progress: DurableMap<ProjectionProgress>;
     leaderLease: LeaderLease;
-    captures?: DurableMap<ProjectionCapture>;
-    captureMailboxes?: DurableMap<ProjectionCaptureMailbox>;
+    mcpServers: McpServerStore;
+    mcp: McpToolService;
+    readers?: ProjectionReaderStore;
+    pendingBindings?: DurableMap<ProjectionPendingBinding>;
   },
 ): AgentConversationProjectionService {
-  const captures = deps.captures ?? createMemoryMap<ProjectionCapture>();
-  const captureMailboxes = deps.captureMailboxes ?? createMemoryMap<ProjectionCaptureMailbox>();
+  const readers = deps.readers ?? createMemoryProjectionReaderStore();
+  const pendingBindings = deps.pendingBindings ?? createMemoryMap<ProjectionPendingBinding>();
   let stopping = false;
   let inFlight: Promise<void> | undefined;
 
-  function projectorFor(job: ProjectionJob) {
-    return createAgentConversationProjector({
-      ...deps,
-      ...job.context,
-      toolDefs: () => [
-        {
-          name: job.observation.name,
-          remoteName: job.remoteName,
-          serverId: "captured",
-          description: "",
-          inputSchema: {},
-          readOnly: false,
-          agentConversations: true,
-        },
-      ],
-    });
+  async function trimPending(): Promise<void> {
+    const entries = (await pendingBindings.entries()).sort((a, b) => a[1].createdAt - b[1].createdAt);
+    for (const [id] of entries.slice(0, Math.max(0, entries.length - PENDING_BINDING_LIMIT)))
+      await pendingBindings.delete(id);
   }
 
-  function mailboxKey(call: McpCallObservation): string {
-    const binding = call.conversationBinding!;
-    return JSON.stringify([binding.mailbox.trim().toLowerCase(), binding.owner]);
-  }
-
-  async function releaseCapture(id: string, record: ProjectionCapture): Promise<void> {
-    if (!captureMailboxes.update) throw new Error("capture mailboxes require atomic update support");
-    await captureMailboxes.update(mailboxKey(record.call), (value) => ({
-      pending: value.pending.filter((v) => v !== id),
-    }));
-  }
-
-  async function quarantine(delivery: { id: string; text: string }, error: unknown): Promise<void> {
-    await deps.deliveries.enqueue({
-      destination: { type: QUARANTINE_TYPE, target: delivery.id },
-      idempotencyKey: `zvconv:quarantine:${delivery.id}`,
-      text: JSON.stringify({ sourceId: delivery.id, sourceText: delivery.text, error: errMessage(error) }),
-    });
-    await deps.deliveries.ack(delivery.id, Date.now());
-  }
-
-  async function processCapture(id: string, record: ProjectionCapture, recovery = false): Promise<void> {
-    if (!record.raw) throw new Error("capture has no retained authoritative result; ledger reconciliation required");
-    try {
-      const binding = record.call.conversationBinding;
-      const observed = record.raw.conversationBinding;
-      if (
-        !binding ||
-        !observed ||
-        binding.owner !== observed.owner ||
-        binding.mailbox !== observed.mailbox ||
-        binding.remoteName !== observed.remoteName
-      )
-        throw new InvalidCapture("capture result binding differs from the invoked server binding");
-      await enqueueCapture(
-        record.context,
-        { name: record.call.name, args: record.call.args, raw: record.raw },
-        id,
-        recovery,
-      );
-      await captures.merge(id, { state: "queued", error: undefined });
-      await releaseCapture(id, record);
-    } catch (error) {
-      await captures.merge(id, {
-        state: error instanceof InvalidCapture ? "rejected" : "captured",
-        error: errMessage(error),
-      });
-      if (error instanceof InvalidCapture) await releaseCapture(id, record);
-      throw error;
-    }
-  }
-
-  async function begin(context: ProjectionContext, call: McpCallObservation): Promise<McpCallObserver | undefined> {
+  async function hint(context: ProjectionContext, call: McpCallObservation): Promise<void> {
     const binding = call.conversationBinding;
-    if (!binding || !TOOLS.has(binding.remoteName)) return undefined;
-    const id = randomUUID();
-    const record: ProjectionCapture = {
-      context: structuredClone(context),
-      call: structuredClone(call),
-      state: "awaiting-result",
-      createdAt: Date.now(),
-    };
-    await captures.putIfAbsent(id, record);
-    const key = mailboxKey(call);
-    await captureMailboxes.putIfAbsent(key, { pending: [] });
-    if (!captureMailboxes.update) throw new Error("capture mailboxes require atomic update support");
-    await captureMailboxes.update(key, (value) => {
-      if (value.pending.length >= 64)
-        throw new Error("too many unresolved conversation captures; reconcile before new calls");
-      return { pending: [...value.pending, id] };
-    });
-    try {
-      await deps.deliveries.enqueue({
-        destination: { type: CAPTURE_TYPE, target: id },
-        text: id,
-        idempotencyKey: `zvconv:capture:${id}`,
+    if (!binding || !call.serverId || !call.runtimeContext || !PROJECTION_TOOLS.has(binding.remoteName)) return;
+    if (["zipviz_conversation_open", "zipviz_conversation_adopt"].includes(binding.remoteName)) {
+      const id = JSON.stringify([call.serverId, binding.mailbox, context.owner, call.runtimeContext.threadRef]);
+      await pendingBindings.put(id, {
+        ...structuredClone(context),
+        id,
+        serverId: call.serverId,
+        mailbox: binding.mailbox.trim().toLowerCase(),
+        externalThreadRef: call.runtimeContext.threadRef,
+        createdAt: Date.now(),
       });
-    } catch (error) {
-      await captures.merge(id, { state: "rejected", error: errMessage(error) });
-      await releaseCapture(id, record);
-      throw error;
+      await trimPending();
     }
-    return {
-      async result(raw) {
-        const captured = { ...record, raw: structuredClone(raw), state: "captured" as const };
-        await captures.put(id, captured);
-        await processCapture(id, captured);
-      },
-      async failed(error) {
-        await captures.merge(id, { state: "uncertain", error: errMessage(error) });
-      },
+    void sweep().catch((error) => swallow("conversation projection hint", error));
+  }
+
+  async function contexts(server: McpServer): Promise<ProjectionPendingBinding[]> {
+    const pending = (await pendingBindings.all()).filter((row) => row.serverId === server.id);
+    const links = (await deps.links.list())
+      .filter((link) => link.owner === server.zipviz?.actorPrincipalId && link.mailbox === server.zipviz.mailbox)
+      .map((link) => ({
+        id: `link:${link.id}`,
+        serverId: server.id,
+        mailbox: link.mailbox,
+        owner: link.owner,
+        ownerScopeId: link.ownerScopeId,
+        threadRef: link.openerThreadRef,
+        externalThreadRef: link.externalThreadRef ?? link.openerThreadRef,
+        sessionId: link.openerSessionId,
+        surface: link.surface,
+        ...(link.destination ? { destination: link.destination } : {}),
+        createdAt: link.createdAt,
+      }));
+    return [...pending, ...links];
+  }
+
+  async function linkFor(
+    server: McpServer,
+    event: ConversationProjectionEvent,
+    candidates: ProjectionPendingBinding[],
+  ) {
+    const identity = {
+      mailbox: event.mailbox,
+      owner: server.zipviz!.actorPrincipalId,
+      conversationId: event.conversation_id,
     };
-  }
-
-  async function capture(
-    context: ProjectionContext,
-    input: Parameters<AgentConversationProjectionService["capture"]>[1],
-  ): Promise<void> {
-    const observer = await begin(context, {
-      name: input.name,
-      args: input.args,
-      conversationBinding: input.raw.conversationBinding,
+    const existing = await deps.links.get(identity);
+    if (existing) return existing;
+    const context = candidates.find(
+      (row) => row.externalThreadRef === event.correlation.external_conversation_ref && row.owner === identity.owner,
+    );
+    if (!context) return null;
+    const link = await deps.links.record({
+      ...identity,
+      createdBy: context.owner,
+      ownerScopeId: context.ownerScopeId,
+      peer: event.side === "us" ? event.to : event.from,
+      externalThreadRef: event.correlation.external_conversation_ref,
+      openerThreadRef: context.threadRef,
+      openerSessionId: context.sessionId,
+      surface: context.surface,
+      ...(context.destination ? { destination: context.destination } : {}),
     });
-    await observer?.result(input.raw);
+    await pendingBindings.delete(context.id);
+    return link;
   }
 
-  async function enqueueCapture(
-    context: ProjectionContext,
-    input: Parameters<AgentConversationProjectionService["capture"]>[1],
-    captureId: string,
-    recovery = false,
-  ): Promise<void> {
-    const binding = input.raw.conversationBinding;
-    if (!binding || !TOOLS.has(binding.remoteName)) return;
-    if (binding.owner !== context.owner)
-      throw new InvalidCapture("conversation capture principal does not match signed binding");
-    const mailbox = binding.mailbox.trim().toLowerCase();
-    if (!mailbox || (typeof input.args.mailbox === "string" && input.args.mailbox.trim().toLowerCase() !== mailbox))
-      throw new InvalidCapture("conversation capture mailbox does not match signed binding");
-    let result: Record<string, any>;
-    try {
-      result = JSON.parse(input.raw.text);
-    } catch {
-      throw new InvalidCapture("conversation result is not valid JSON");
-    }
-    if (!result || typeof result !== "object" || Array.isArray(result))
-      throw new InvalidCapture("conversation result is not an object");
-    if (result.error) return;
-    const claimed = binding.remoteName === "zipviz_inbox_claim";
-    const adopted = binding.remoteName === "zipviz_conversation_adopt";
-    if (adopted && result.binding_role !== "ingress-owner") return;
-    const claimedRows = Array.isArray(result.claimed) ? result.claimed : [];
-    const rows = claimed ? claimedRows : [result];
-    for (const row of rows) {
-      if (!row || typeof row !== "object" || Array.isArray(row))
-        throw new InvalidCapture("conversation result contains an invalid turn row");
-      let conversationId = row.turn?.conversation?.id ?? row.snapshot?.conversation_id;
-      let turn = row.turn?.conversation?.turn ?? row.snapshot?.turns;
-      if (claimed) {
-        conversationId = row.conversation?.conversation_id;
-        turn = row.conversation?.turn;
-      } else if (adopted) {
-        conversationId = row.conversation_id;
-        turn = 0;
-      }
-      if (
-        typeof conversationId !== "string" ||
-        !conversationId ||
-        !Number.isSafeInteger(turn) ||
-        turn < (adopted ? 0 : 1)
-      )
-        throw new InvalidCapture("successful conversation result lacks authoritative turn identity");
-      const side = { mailbox, owner: binding.owner, conversationId };
-      const key = agentConversationLinkId(side);
-      const job: ProjectionJob = {
-        context: structuredClone(context),
-        observation: {
-          name: input.name,
-          args: {
-            ...structuredClone(input.args),
-            mailbox,
-            ...(claimed || adopted ? {} : { conversation_id: conversationId }),
-          },
-          resultText: claimed ? JSON.stringify({ ...result, claimed: [row] }) : input.raw.text,
-        },
-        remoteName: binding.remoteName,
-        mailbox,
-        conversationId,
-        turn,
-      };
-      if (context.destination) {
-        const { type, target, audienceScopeId, onBehalfOf, identity, threadTs, unfurlLinks } = context.destination;
-        job.context.destination = { type, target, audienceScopeId, onBehalfOf, identity, threadTs, unfurlLinks };
-      }
-      if (adopted || binding.remoteName === "zipviz_conversation_open")
-        await projectorFor(job).register(job.observation, job.remoteName);
-      if (adopted) continue;
-      if (turn > 0) {
-        const pending =
-          (await captureMailboxes.get(mailboxKey({ name: input.name, args: input.args, conversationBinding: binding })))
-            ?.pending ?? [];
-        await deps.progress.putIfAbsent(key, {
-          baselineTurn: turn - 1,
-          lastTurn: turn - 1,
-          initializing: true,
-          initialCaptures: pending,
-        });
-        if (!deps.progress.update) throw new Error("projection progress requires atomic update support");
-        await deps.progress.update(key, (value) =>
-          value.initializing && value.initialCaptures?.includes(captureId)
-            ? {
-                ...value,
-                baselineTurn: Math.min(value.baselineTurn, turn - 1),
-                lastTurn: Math.min(value.lastTurn, turn - 1),
-              }
-            : value,
+  async function readAudience(server: McpServer, candidates: ProjectionPendingBinding[]): Promise<void> {
+    const audience = audienceFor(server);
+    const context = candidates[0];
+    if (!audience || !context || !server.zipviz) return;
+    for (let pages = 0; pages < MAX_PAGES_PER_SWEEP && !stopping; pages += 1) {
+      const checkpoint = await readers.get(audience);
+      let result: ProjectionEventsPage;
+      try {
+        result = page(
+          await deps.mcp.call(
+            `${server.id}_zipviz_conversation_projection_events`,
+            {
+              mailbox: audience.mailbox,
+              limit: PAGE_SIZE,
+              ...(checkpoint.afterCursor ? { after_cursor: checkpoint.afterCursor } : {}),
+            },
+            {
+              principalId: server.zipviz.actorPrincipalId,
+              runtimeContext: {
+                actorId: server.zipviz.actorPrincipalId,
+                threadRef: context.externalThreadRef,
+                nativeEventId: "projection-ledger-reconcile",
+              },
+            },
+          ),
         );
+      } catch (error) {
+        const code = String((error as { code?: unknown }).code ?? "");
+        if (code === "E_STALE_CURSOR" || code === "E_BAD_CURSOR") {
+          await readers.reset(audience, checkpoint.version, code, errMessage(error));
+          return;
+        }
+        throw error;
       }
-      await deps.deliveries.enqueue({
-        destination: { type: QUEUE_TYPE, target: key },
-        text: JSON.stringify(job),
-        idempotencyKey: `zvconv:observe:${key}:${turn}${recovery ? `:recovery:${captureId}` : ""}`,
+      const jobs: ProjectionOutboxJob[] = [];
+      const quarantined: ProjectionSkipMarker[] = [];
+      for (const candidate of result.events) {
+        try {
+          const event = projectionEvent(candidate, audience);
+          const link = await linkFor(server, event, candidates);
+          if (!link) continue;
+          const destinationRevision = link.createdAt;
+          const payload: ProjectionJobPayload = {
+            event,
+            context: {
+              owner: link.owner,
+              ownerScopeId: link.ownerScopeId,
+              threadRef: link.openerThreadRef,
+              sessionId: link.openerSessionId,
+              surface: link.surface,
+              ...(link.destination ? { destination: link.destination } : {}),
+            },
+            destinationRevision,
+          };
+          jobs.push({
+            id: JSON.stringify([projectionReaderAudienceKey(audience), event.event_id, destinationRevision]),
+            audienceKey: projectionReaderAudienceKey(audience),
+            eventId: event.event_id,
+            projectionRevision: event.projection_revision,
+            destinationRevision,
+            payload,
+            createdAt: Date.now(),
+            availableAt: 0,
+            attempts: 0,
+          });
+        } catch (error) {
+          const row = object(candidate);
+          quarantined.push({
+            projectionRevision: Number(row?.projection_revision ?? 0),
+            msgId: String(row?.msg_id ?? "unknown"),
+            code: `E_INVALID_PROJECTION_EVENT:${errMessage(error)}`.slice(0, 512),
+          });
+        }
+      }
+      const skips = [...result.skipped.map(skipMarker), ...quarantined];
+      const replacement = result.has_more ? result.next_cursor : result.high_water_cursor;
+      const afterCursor =
+        replacement ?? (result.events.length || result.skipped.length ? checkpoint.afterCursor : undefined);
+      const accepted = await readers.acceptPage({
+        audience,
+        expectedVersion: checkpoint.version,
+        jobs,
+        skips,
+        afterCursor,
       });
+      if (!accepted || !result.has_more) return;
+    }
+  }
+
+  async function dispatchOutbox(): Promise<void> {
+    for (const job of await readers.pending(32, Date.now())) {
+      try {
+        const payload = job.payload as ProjectionJobPayload;
+        const event = payload.event;
+        const link = await deps.links.get({
+          owner: payload.context.owner,
+          mailbox: event.mailbox,
+          conversationId: event.conversation_id,
+        });
+        if (!link) throw new Error("projection binding no longer exists");
+        const stableDeliveryKey = `zvconv:event:${event.event_id}:destination:${payload.destinationRevision}`;
+        const existingDelivery = await deps.deliveries.getByKey(stableDeliveryKey);
+        const lastTurn = Math.max(link.lastProjectedInTurn ?? 0, link.lastProjectedOutTurn ?? 0);
+        if (!existingDelivery && event.turn !== lastTurn + 1) {
+          await readers.defer(
+            job.id,
+            job.projectionRevision,
+            Date.now() + RECONCILE_INTERVAL_MS,
+            event.turn < lastTurn
+              ? `refusing reverse-order turn ${event.turn} after ${lastTurn}`
+              : `waiting for turn ${lastTurn + 1} before ${event.turn}`,
+          );
+          continue;
+        }
+        const projector = createAgentConversationProjector({ ...deps, ...payload.context, toolDefs: () => [] });
+        await projector.projectEvent(event, link, payload.destinationRevision);
+        await readers.ack(job.id, job.projectionRevision);
+      } catch (error) {
+        await readers.defer(job.id, job.projectionRevision, Date.now() + 1_000, errMessage(error));
+        swallow("conversation projection outbox", error);
+      }
     }
   }
 
   function sweep(): Promise<void> {
     if (inFlight) return inFlight;
     if (stopping) return Promise.resolve();
-    const work = async () => {
-      await deps.leaderLease.hold("conversation-projection", async (lost) => {
-        let lostLease = false;
+    const work = deps.leaderLease
+      .hold("conversation-projection-ledger", async (lost) => {
+        let leaseLost = false;
         void lost.then(() => {
-          lostLease = true;
+          leaseLost = true;
         });
-        const started = Date.now();
-        for (const delivery of await deps.deliveries.pending(CAPTURE_TYPE, { limit: 32, readyAt: started })) {
-          if (stopping || lostLease || Date.now() - started > 250) break;
-          await deps.deliveries.defer(delivery.id, Date.now() + 1_000);
-          const record = await captures.get(delivery.destination.target);
-          if (!record) {
-            await quarantine(delivery, new Error("capture record missing"));
-            continue;
-          }
-          if (record.state === "awaiting-result" || record.state === "uncertain") continue;
-          if (record.state === "rejected") {
-            await quarantine(delivery, new Error(record.error));
-            continue;
-          }
-          try {
-            await processCapture(delivery.destination.target, record);
-            await deps.deliveries.ack(delivery.id, Date.now());
-          } catch (error) {
-            if (error instanceof InvalidCapture) await quarantine(delivery, error);
-          }
+        for (const server of await deps.mcpServers.list()) {
+          if (leaseLost || stopping) break;
+          const candidates = await contexts(server);
+          if (candidates.length)
+            await readAudience(server, candidates).catch((error) =>
+              swallow(`conversation projection reader ${server.id}`, error),
+            );
         }
-        const rows = (await deps.deliveries.pending(QUEUE_TYPE, { limit: 32, readyAt: started })).map((delivery) => {
-          try {
-            const job = JSON.parse(delivery.text) as ProjectionJob;
-            if (
-              !job ||
-              !Number.isSafeInteger(job.turn) ||
-              job.turn < 1 ||
-              !job.context?.owner ||
-              !job.mailbox ||
-              !job.conversationId ||
-              !job.observation ||
-              !TOOLS.has(job.remoteName) ||
-              delivery.destination.target !==
-                agentConversationLinkId({
-                  owner: job.context.owner,
-                  mailbox: job.mailbox,
-                  conversationId: job.conversationId,
-                })
-            )
-              throw new Error("invalid conversation projection job shape");
-            if (
-              typeof job.observation.name !== "string" ||
-              typeof job.observation.resultText !== "string" ||
-              !job.observation.args ||
-              typeof job.observation.args !== "object"
-            )
-              throw new Error("invalid captured observation");
-            const result = JSON.parse(job.observation.resultText);
-            const claim = job.remoteName === "zipviz_inbox_claim" ? result.claimed?.[0]?.conversation : undefined;
-            const id = claim?.conversation_id ?? result.turn?.conversation?.id ?? result.snapshot?.conversation_id;
-            const turn = claim?.turn ?? result.turn?.conversation?.turn ?? result.snapshot?.turns;
-            if (id !== job.conversationId || turn !== job.turn)
-              throw new Error("projection job disagrees with authoritative turn identity");
-            return { delivery, job };
-          } catch (error) {
-            return { delivery, error };
-          }
-        });
-        rows.sort((a, b) => (a.job?.turn ?? 0) - (b.job?.turn ?? 0));
-        for (const { delivery, job, error } of rows) {
-          if (stopping || lostLease || Date.now() - started > 1_000) break;
-          await deps.deliveries.defer(delivery.id, Date.now() + 1_000);
-          if (!job) {
-            await quarantine(delivery, error);
-            continue;
-          }
-          const key = delivery.destination.target;
-          let progress = await deps.progress.get(key);
-          if (progress?.initializing) {
-            const state = await captureMailboxes.get(JSON.stringify([job.mailbox, job.context.owner]));
-            if (state?.pending.some((id) => progress!.initialCaptures?.includes(id))) continue;
-            progress = await deps.progress.merge(key, { initializing: false, initialCaptures: undefined });
-          }
-          if (job.turn > 0 && (!progress || job.turn > progress.lastTurn + 1)) {
-            if (progress) {
-              const note = `waiting for turn ${progress.lastTurn + 1} before turn ${job.turn}; explicit replay required`;
-              if (progress.lastSkipNote !== note) {
-                await deps.progress.merge(key, { lastSkipNote: note });
-                await deps.links.noteSkip(
-                  { owner: job.context.owner, mailbox: job.mailbox, conversationId: job.conversationId },
-                  note,
-                );
-                console.error(`[conversation-projection] ${key}: ${note}`);
-              }
-            }
-            continue;
-          }
-          try {
-            if (job.turn === 0 || !progress || job.turn > progress.lastTurn) {
-              const projector = projectorFor(job);
-              await projector.project(job.observation);
-              if (lostLease) throw new Error("projection leader lease lost before acknowledgement");
-              if (job.turn > 0) {
-                if (!deps.progress.update) throw new Error("projection progress requires atomic update support");
-                await deps.progress.update(key, (value) => ({
-                  ...value,
-                  lastTurn: Math.max(value.lastTurn, job.turn),
-                  lastSkipNote: undefined,
-                }));
-              }
-            }
-            await deps.deliveries.ack(delivery.id, Date.now());
-          } catch (error) {
-            const note = errMessage(error);
-            if (progress?.lastSkipNote !== note) {
-              if (progress) await deps.progress.merge(key, { lastSkipNote: note });
-              swallow("conversation projection retry pending", error);
-            }
-          }
-        }
-      });
-    };
-    inFlight = work().finally(() => {
+        if (!leaseLost && !stopping) await dispatchOutbox();
+      })
+      .then(() => undefined);
+    inFlight = work.finally(() => {
       inFlight = undefined;
     });
-    return inFlight;
+    return work;
   }
 
-  const sweeper = createSweeper(sweep, 1_000, { immediate: true, label: "conversation projections" });
+  const sweeper = createSweeper(sweep, RECONCILE_INTERVAL_MS, {
+    immediate: true,
+    label: "conversation ledger projections",
+  });
   return {
-    begin,
-    capture,
-    inspect: (id) => captures.get(id),
+    hint,
+    sweep,
     async diagnostics() {
-      const pending = await deps.deliveries.pending(CAPTURE_TYPE, { limit: 32, readyAt: Number.MAX_SAFE_INTEGER });
-      const rows = await Promise.all(
-        pending.map(async (delivery) => {
-          const record = await captures.get(delivery.destination.target);
+      const checkpoints = await Promise.all(
+        (await deps.mcpServers.list()).map(async (server) => {
+          const audience = audienceFor(server);
+          if (!audience) return null;
+          const checkpoint = await readers.get(audience);
           return {
-            id: delivery.destination.target,
-            state: record?.state ?? "missing",
-            ...(record?.error ? { error: record.error } : {}),
+            audience,
+            afterCursor: checkpoint.afterCursor,
+            version: checkpoint.version,
+            ...(checkpoint.recoveryCode ? { recoveryCode: checkpoint.recoveryCode } : {}),
+            skips: await readers.skips(audience),
           };
         }),
       );
-      const dead = await deps.deliveries.pending(QUARANTINE_TYPE, { limit: 32, readyAt: Number.MAX_SAFE_INTEGER });
       return {
-        captures: rows,
-        quarantined: dead.map((delivery) => {
-          const record = JSON.parse(delivery.text);
-          return { id: delivery.id, sourceId: record.sourceId, error: record.error };
-        }),
+        readers: checkpoints.filter((row): row is NonNullable<typeof row> => row !== null),
+        pendingBindings: await pendingBindings.all(),
+        outbox: await readers.pending(100, Number.MAX_SAFE_INTEGER),
       };
     },
-    async recover(id) {
-      const record = await captures.get(id);
-      if (!record) throw new Error("capture not found");
-      await processCapture(id, record, true);
-    },
-    sweep,
     start() {
       stopping = false;
       sweeper.start();

@@ -27,31 +27,19 @@ export interface McpToolDescriptor {
   agentConversations: boolean;
 }
 
-export interface McpRawResult {
-  text: string;
-  structuredContent?: unknown;
-  conversationBinding?: { owner: string; mailbox: string; remoteName: string };
-}
-
 export interface McpCallObservation {
   name: string;
   serverId?: string;
   runtimeContext?: McpRuntimeContext;
   args: Record<string, unknown>;
-  conversationBinding?: McpRawResult["conversationBinding"];
-}
-
-export interface McpCallObserver {
-  result(raw: McpRawResult): Promise<void>;
-  failed(error: unknown): Promise<void>;
+  conversationBinding?: { owner: string; mailbox: string; remoteName: string };
 }
 
 interface McpToolCallOptions {
   principalId?: string;
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
-  onCallStart?: (call: McpCallObservation) => Promise<McpCallObserver | undefined>;
-  onRawResult?: (raw: McpRawResult) => void | Promise<void>;
+  onCallStart?: (call: McpCallObservation) => void | Promise<void>;
 }
 
 export class McpReadOnlyError extends Error {}
@@ -162,51 +150,30 @@ export function createMcpToolService(opts: {
       if (!def) throw new Error(`unknown MCP tool: ${name}`);
       const server = await opts.servers.get(def.serverId);
       if (!server || !server.enabled) throw new Error(`MCP server ${def.serverId} is not available`);
-      let observer: McpCallObserver | undefined;
       try {
         if (options.readOnly && !server.readOnly)
           throw new McpReadOnlyError(`MCP tool ${name} is unavailable in read-only turns`);
         const conversationBinding = server.zipviz
           ? { owner: server.zipviz.actorPrincipalId, mailbox: server.zipviz.mailbox, remoteName: def.remoteName }
           : undefined;
-        observer = await options.onCallStart?.({
-          name,
-          serverId: def.serverId,
-          runtimeContext: options.runtimeContext ? structuredClone(options.runtimeContext) : undefined,
-          args: structuredClone(args),
-          conversationBinding,
-        });
+        if (options.onCallStart) {
+          try {
+            await options.onCallStart({
+              name,
+              serverId: def.serverId,
+              runtimeContext: options.runtimeContext ? structuredClone(options.runtimeContext) : undefined,
+              args: structuredClone(args),
+              conversationBinding,
+            });
+          } catch (error) {
+            swallow("MCP projection hint", error);
+          }
+        }
         const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
         record("call", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
         const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
-        const raw: McpRawResult = {
-          text,
-          ...(conversationBinding ? { conversationBinding } : {}),
-          ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
-        };
-        if (observer) {
-          try {
-            await observer.result(raw);
-          } catch (e) {
-            swallow("MCP durable capture result", e);
-          }
-        }
-        if (options.onRawResult) {
-          try {
-            await options.onRawResult(raw);
-          } catch (e) {
-            swallow("MCP raw result observer", e);
-          }
-        }
         return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
       } catch (e) {
-        if (observer) {
-          try {
-            await observer.failed(e);
-          } catch (captureError) {
-            swallow("MCP durable capture failure", captureError);
-          }
-        }
         record("call", `${def.serverId}/${def.remoteName}`, `error: ${errMessage(e)}`, options.principalId);
         throw e;
       }
