@@ -208,6 +208,20 @@ export function createPostgresDeliveryStore(connectionString: string): DeliveryS
       const rows = await q("SELECT * FROM deliveries WHERE idempotency_key = $1", [idempotencyKey]);
       return rows[0] ? rowToDelivery(rows[0]) : null;
     },
+    async pruneRejectedConversationCopies(cutoff) {
+      const result = await query(
+        `UPDATE deliveries SET text='{"expired":true,"kind":"conversation-delivery-rejection"}',attachments=NULL
+         WHERE shadow AND created_at < $1 AND idempotency_key LIKE 'delivery-failure:%'
+           AND text <> '{"expired":true,"kind":"conversation-delivery-rejection"}'`,
+        [cutoff],
+      );
+      await query(
+        `DELETE FROM deliveries WHERE idempotency_key LIKE 'delivery-failure:%' AND shadow AND id NOT IN
+         (SELECT id FROM deliveries WHERE idempotency_key LIKE 'delivery-failure:%' AND shadow
+          ORDER BY created_at DESC,id DESC LIMIT 100)`,
+      );
+      return result.rowCount;
+    },
     async recordRecipientThread(id, recipientThreadRef, at) {
       await query(
         `UPDATE deliveries

@@ -33,6 +33,7 @@ export interface DeliveryStore {
   setEditRefByKey(idempotencyKey: string, editRef: string): Promise<void>;
   get(id: string): Promise<Delivery | null>;
   getByKey(idempotencyKey: string): Promise<Delivery | null>;
+  pruneRejectedConversationCopies(cutoff: number): Promise<number>;
   recordRecipientThread(id: string, recipientThreadRef: string, at: number): Promise<void>;
   listByRecipientThread(recipientThreadRef: string, opts?: { limit?: number }): Promise<Delivery[]>;
   listBySourceSession(sourceSessionId: string, sourceThreadRef: string, opts?: { limit?: number }): Promise<Delivery[]>;
@@ -186,6 +187,29 @@ export function createDeliveryStore(): DeliveryStore {
     async getByKey(idempotencyKey) {
       const id = byKey.get(idempotencyKey);
       return id ? (deliveries.get(id) ?? null) : null;
+    },
+    async pruneRejectedConversationCopies(cutoff) {
+      let pruned = 0;
+      for (const delivery of deliveries.values()) {
+        if (
+          !delivery.shadow ||
+          delivery.createdAt >= cutoff ||
+          !delivery.idempotencyKey.startsWith("delivery-failure:") ||
+          delivery.text === '{"expired":true,"kind":"conversation-delivery-rejection"}'
+        )
+          continue;
+        delivery.text = '{"expired":true,"kind":"conversation-delivery-rejection"}';
+        delivery.attachments = undefined;
+        pruned += 1;
+      }
+      const evidence = [...deliveries.values()]
+        .filter((delivery) => delivery.shadow && delivery.idempotencyKey.startsWith("delivery-failure:"))
+        .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+      for (const delivery of evidence.slice(100)) {
+        deliveries.delete(delivery.id);
+        byKey.delete(delivery.idempotencyKey);
+      }
+      return pruned;
     },
     async recordRecipientThread(id, recipientThreadRef, at) {
       const d = deliveries.get(id);

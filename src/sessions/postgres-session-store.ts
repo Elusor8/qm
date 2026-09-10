@@ -480,6 +480,43 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
       });
     },
 
+    async upsertProjection(lease, marker, revision, entry) {
+      return withLease(lease, "projection upsert without a valid session lease", async (client) => {
+        const existing = await client.query(
+          `SELECT seq, (payload::jsonb)->>'projectionRevision' AS projection_revision FROM session_entries
+           WHERE session_id = $1 AND type = 'user' AND payload LIKE '%zvconv:%'
+             AND (payload::jsonb)->>'ts' = $2 FOR UPDATE`,
+          [lease.sessionId, marker],
+        );
+        if (!existing.rows[0]) {
+          const max = await client.query(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM session_entries WHERE session_id = $1",
+            [lease.sessionId],
+          );
+          const seq = Number(max.rows[0]!.n);
+          const stored = jsonbSafeStringify(entry.payload ?? null);
+          await client.query(
+            "INSERT INTO session_entries(session_id, seq, parent_seq, type, payload, scope_label, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            [lease.sessionId, seq, seq === 0 ? null : seq - 1, entry.type, stored, entry.scopeLabel, now()],
+          );
+          await client.query(
+            `UPDATE sessions SET last_activity = GREATEST(COALESCE(last_activity, 0), $2), messages = $3
+             WHERE id = $1`,
+            [lease.sessionId, now(), seq + 1],
+          );
+          return "inserted";
+        }
+        if (Number(existing.rows[0].projection_revision ?? 0) >= revision) return "unchanged";
+        await client.query("UPDATE session_entries SET payload=$3, scope_label=$4 WHERE session_id=$1 AND seq=$2", [
+          lease.sessionId,
+          existing.rows[0].seq,
+          jsonbSafeStringify(entry.payload ?? null),
+          entry.scopeLabel,
+        ]);
+        return "updated";
+      });
+    },
+
     async hasProjectionMarker(sessionId, ts) {
       return (
         (

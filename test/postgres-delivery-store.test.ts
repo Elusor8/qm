@@ -100,3 +100,28 @@ test("pg retry eligibility survives a fresh store", { skip }, async () => {
   assert.equal((await reader.pending("retry-test", { limit: 32, readyAt: until }))[0]?.id, row.id);
   await reader.ack(row.id, Date.now());
 });
+
+test("pg rejected conversation copies expire content across store instances", { skip }, async () => {
+  const writer = createPostgresDeliveryStore(URL!);
+  const rejected = await writer.enqueue({
+    destination: { type: "slack", target: "C1" },
+    text: JSON.stringify({ failure: "invalid_blocks", body: "sensitive body" }),
+    attachments: [{ name: "sensitive.txt", mimetype: "text/plain", sizeBytes: 9, blobId: "sensitive-blob" }],
+    idempotencyKey: "delivery-failure:pg-expiry",
+    shadow: true,
+    provenance: {
+      trigger: "conversation",
+      surface: "slack",
+      fireKey: "event-pg-expiry",
+      sourceScopeId: "channel:C1",
+      sourceThreadRef: "slack:C1:1",
+    },
+  });
+
+  assert.equal(await writer.pruneRejectedConversationCopies(rejected.createdAt + 1), 1);
+  const retained = await createPostgresDeliveryStore(URL!).get(rejected.id);
+  assert.equal(retained?.deliveredAt, null);
+  assert.equal(retained?.provenance?.fireKey, "event-pg-expiry");
+  assert.equal(retained?.text, '{"expired":true,"kind":"conversation-delivery-rejection"}');
+  assert.equal(retained?.attachments, undefined);
+});

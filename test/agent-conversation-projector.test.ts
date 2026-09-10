@@ -145,6 +145,7 @@ async function assertProjected(fixture: Awaited<ReturnType<typeof setup>>, direc
     kind: "agent_conversation_projection",
     overheard: true,
     ts: MARKER,
+    projectionRevision: 0,
     name: `signed conversation with ${PEER}`,
     text: (entries[0]!.payload as { text: string }).text,
   });
@@ -231,4 +232,68 @@ test("append failure releases the lease, contains the rejection and leaves repla
 
   assert.equal(attempts, 2);
   await assertProjected(fixture, "out");
+});
+
+test("web receipt revisions update the durable projection entry in place", async () => {
+  const fixture = await setup();
+  const link = await fixture.links.get(SIDE);
+  assert.ok(link);
+  const projection = {
+    event_id: "event-2",
+    projection_revision: 1,
+    source: "zipviz-signed-v3",
+    authoritative: true,
+    mailbox: SIDE.mailbox,
+    conversation_id: CONVERSATION,
+    turn: TURN,
+    side: "them",
+    from: PEER,
+    to: SIDE.mailbox,
+    msg_id: "msg-2",
+    body: MESSAGE,
+    body_trust: "counterparty-untrusted",
+    ledger_status: "committed",
+    signed: {
+      envelope_v: 3,
+      signature: "sig",
+      timestamp: "2026-09-10T00:00:00Z",
+      expires_at: "2026-09-11T00:00:00Z",
+      reply_to: null,
+      intent: "accept",
+      state: "active",
+      goal_ref: "goal",
+      authority_claim: null,
+      acting_for_claim: null,
+      reply_by: null,
+      wake: null,
+      outcome_code: null,
+      human_summary: null,
+    },
+    receipt: { present: false, status: null, received_at: null, signed_receipt: null },
+    timing: {},
+    correlation: {
+      adapter_kind: "adapter",
+      adapter_instance: "qm",
+      external_scope: "thread",
+      external_conversation_ref: THREAD_REF,
+      external_event_id: null,
+      disposition: null,
+    },
+  } as const;
+  await fixture.projector().projectEvent(projection, link, link.createdAt);
+  await fixture.projector().projectEvent(
+    {
+      ...projection,
+      projection_revision: 2,
+      receipt: { present: true, status: "delivered", received_at: "2026-09-10T00:01:00Z", signed_receipt: {} },
+    },
+    link,
+    link.createdAt,
+  );
+  await fixture.projector().projectEvent(projection, link, link.createdAt);
+  const entries = await fixture.sessions.getEntries(fixture.session.id);
+  assert.equal(entries.length, 1);
+  assert.equal((entries[0]!.payload as { projectionRevision: number }).projectionRevision, 2);
+  assert.match((entries[0]!.payload as { text: string }).text, /Receipt: delivered/);
+  assert.ok(isOverheardEntry(entries[0]!));
 });

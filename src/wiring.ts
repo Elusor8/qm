@@ -10,6 +10,7 @@ import {
 import {
   createMemoryProjectionReaderStore,
   createPostgresProjectionReaderStore,
+  retireLegacyConversationProjection,
 } from "./conversations/conversation-projection-reader-store.ts";
 import type { AgentConversationLink } from "./types.ts";
 import { mkdirSync } from "node:fs";
@@ -1106,6 +1107,10 @@ export function buildApp(
   const conversationLinks = createAgentConversationLinkStore(
     artifactMap<AgentConversationLink>("agent_conversation_links"),
   );
+  if (pgArtifactMap)
+    void retireLegacyConversationProjection(pgArtifactMap.pool).catch(
+      swallowAs("wiring: legacy conversation projection retirement", undefined),
+    );
   const conversationProjection = createAgentConversationProjectionService({
     links: conversationLinks,
     deliveries,

@@ -40,6 +40,12 @@ interface ProjectionSessions {
   ): Promise<{ lease: Lease | null }>;
   releaseLease(lease: Lease): Promise<void>;
   append(lease: Lease, entry: NewEntry): Promise<unknown>;
+  upsertProjection?(
+    lease: Lease,
+    marker: string,
+    revision: number,
+    entry: NewEntry,
+  ): Promise<"inserted" | "updated" | "unchanged">;
   hasProjectionMarker?(sessionId: string, ts: string): Promise<boolean>;
   getEntries(
     sessionId: string,
@@ -141,7 +147,12 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     await deps.links.noteSkip(identity, note, { notifiedOwner: true });
   }
 
-  async function postToSession(link: AgentConversationLink, turn: number, text: string): Promise<boolean> {
+  async function postToSession(
+    link: AgentConversationLink,
+    turn: number,
+    text: string,
+    projectionRevision = 0,
+  ): Promise<boolean> {
     const sessions = deps.projectionSessions;
     if (!sessions) return false;
     const session = await sessions.getByThread(link.openerThreadRef);
@@ -161,24 +172,21 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         !(await deliverable(link.owner, link.ownerScopeId, link.destination))
       )
         return false;
-      const already = sessions.hasProjectionMarker
-        ? await sessions.hasProjectionMarker(session.id, marker)
-        : (await sessions.getEntries(session.id)).some(
-            (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === marker,
-          );
-      if (!already) {
-        await sessions.append(lease, {
-          type: "user",
-          payload: {
-            kind: "agent_conversation_projection",
-            overheard: true,
-            ts: marker,
-            name: `signed conversation with ${link.peer ?? "the peer"}`,
-            text,
-          },
-          scopeLabel: link.ownerScopeId,
-        });
-      }
+      const entry: NewEntry = {
+        type: "user",
+        payload: {
+          kind: "agent_conversation_projection",
+          overheard: true,
+          ts: marker,
+          projectionRevision,
+          name: `signed conversation with ${link.peer ?? "the peer"}`,
+          text,
+        },
+        scopeLabel: link.ownerScopeId,
+      };
+      if (sessions.upsertProjection) await sessions.upsertProjection(lease, marker, projectionRevision, entry);
+      else if (projectionRevision > 0) throw new Error("projection session store cannot apply durable revisions");
+      else if (!(await sessions.hasProjectionMarker?.(session.id, marker))) await sessions.append(lease, entry);
     } finally {
       await sessions.releaseLease(lease);
     }
@@ -360,7 +368,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         return;
       }
       if (!TEXT_SINKS.has(destination.type)) {
-        if (!(await postToSession(link, event.turn, rendered)))
+        if (!(await postToSession(link, event.turn, rendered, event.projection_revision)))
           throw new Error(`could not project into the ${destination.type} surface`);
         return;
       }

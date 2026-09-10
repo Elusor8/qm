@@ -450,6 +450,12 @@ export interface SessionStore {
   forceReleaseLease(sessionId: string): Promise<void>;
 
   append(lease: Lease, entry: NewEntry): Promise<SessionEntry>;
+  upsertProjection?(
+    lease: Lease,
+    marker: string,
+    revision: number,
+    entry: NewEntry,
+  ): Promise<"inserted" | "updated" | "unchanged">;
   getEntries(sessionId: string, opts?: GetEntriesOptions): Promise<SessionEntry[]>;
   hasProjectionMarker(sessionId: string, ts: string): Promise<boolean>;
   clearSecurityTaint(sessionId: string): Promise<boolean>;

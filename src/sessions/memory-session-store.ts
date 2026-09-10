@@ -183,6 +183,26 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       return full;
     },
 
+    async upsertProjection(lease, marker, revision, entry) {
+      const held = leases.get(lease.sessionId);
+      if (!held || held.token !== lease.token) throw new Error("projection upsert without a valid session lease");
+      held.expiresAt = now() + leaseTtlMs;
+      const log = entries.get(lease.sessionId);
+      if (!log) throw new Error(`unknown session: ${lease.sessionId}`);
+      const existing = log.find(
+        (row) => row.type === "user" && (row.payload as { ts?: unknown } | null)?.ts === marker,
+      );
+      if (!existing) {
+        await this.append(lease, entry);
+        return "inserted";
+      }
+      const prior = Number((existing.payload as { projectionRevision?: unknown } | null)?.projectionRevision ?? 0);
+      if (prior >= revision) return "unchanged";
+      existing.payload = structuredClone(entry.payload);
+      existing.scopeLabel = entry.scopeLabel as ScopeId;
+      return "updated";
+    },
+
     async getEntries(sessionId, opts?: GetEntriesOptions) {
       const log = entries.get(sessionId) ?? [];
       const since = opts?.sinceSeq ?? 0;

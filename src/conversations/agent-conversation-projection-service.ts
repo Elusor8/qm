@@ -9,9 +9,12 @@ import {
   createAgentConversationProjector,
   type AgentConversationProjectorDeps,
 } from "./agent-conversation-projector.ts";
+import { agentConversationLinkId } from "./agent-conversation-link-store.ts";
 import type { ConversationProjectionEvent } from "./conversation-projection-event.ts";
 import {
   createMemoryProjectionReaderStore,
+  PROJECTION_CONTENT_RETENTION_MS,
+  PROJECTION_RETENTION_SWEEP_MS,
   projectionReaderAudienceKey,
   type ProjectionOutboxJob,
   type ProjectionReaderAudience,
@@ -52,8 +55,8 @@ export interface ProjectionPendingBinding extends ProjectionContext {
 
 interface ProjectionJobPayload {
   event: ConversationProjectionEvent;
-  context: ProjectionContext;
-  destinationRevision: number;
+  serverId: string;
+  context?: ProjectionContext;
 }
 
 interface ProjectionEventsPage {
@@ -77,7 +80,9 @@ export interface AgentConversationProjectionService {
     }>;
     pendingBindings: ProjectionPendingBinding[];
     outbox: ProjectionOutboxJob[];
+    retention: { contentMs: number; sweepMs: number; unresolvedEvidenceLimit: number };
   }>;
+  releaseGap(audience: ProjectionReaderAudience, msgId: string, reason: string): Promise<boolean>;
   start(): void;
   stop(): Promise<void>;
 }
@@ -202,6 +207,7 @@ export function createAgentConversationProjectionService(
   const pendingBindings = deps.pendingBindings ?? createMemoryMap<ProjectionPendingBinding>();
   let stopping = false;
   let inFlight: Promise<void> | undefined;
+  let lastRetentionSweep = 0;
 
   async function trimPending(): Promise<void> {
     const entries = (await pendingBindings.entries()).sort((a, b) => a[1].createdAt - b[1].createdAt);
@@ -278,21 +284,26 @@ export function createAgentConversationProjectionService(
     return link;
   }
 
-  async function readAudience(server: McpServer, candidates: ProjectionPendingBinding[]): Promise<void> {
+  async function readAudience(
+    server: McpServer,
+    candidates: ProjectionPendingBinding[],
+    recoveryAfter?: string | null,
+  ): Promise<void> {
     const audience = audienceFor(server);
     const context = candidates[0];
     if (!audience || !context || !server.zipviz) return;
     for (let pages = 0; pages < MAX_PAGES_PER_SWEEP && !stopping; pages += 1) {
       const checkpoint = await readers.get(audience);
+      const readAfter = recoveryAfter === undefined ? checkpoint.afterCursor : recoveryAfter;
       let result: ProjectionEventsPage;
       try {
         result = page(
-          await deps.mcp.call(
+          await deps.mcp.machineRead(
             `${server.id}_zipviz_conversation_projection_events`,
             {
               mailbox: audience.mailbox,
               limit: PAGE_SIZE,
-              ...(checkpoint.afterCursor ? { after_cursor: checkpoint.afterCursor } : {}),
+              ...(readAfter ? { after_cursor: readAfter } : {}),
             },
             {
               principalId: server.zipviz.actorPrincipalId,
@@ -308,6 +319,7 @@ export function createAgentConversationProjectionService(
         const code = String((error as { code?: unknown }).code ?? "");
         if (code === "E_STALE_CURSOR" || code === "E_BAD_CURSOR") {
           await readers.reset(audience, checkpoint.version, code, errMessage(error));
+          if (recoveryAfter === undefined) await readAudience(server, candidates, null);
           return;
         }
         throw error;
@@ -318,30 +330,40 @@ export function createAgentConversationProjectionService(
         try {
           const event = projectionEvent(candidate, audience);
           const link = await linkFor(server, event, candidates);
-          if (!link) continue;
-          const destinationRevision = link.createdAt;
+          const subscriptionKey = agentConversationLinkId({
+            owner: server.zipviz!.actorPrincipalId,
+            mailbox: event.mailbox,
+            conversationId: event.conversation_id,
+          });
           const payload: ProjectionJobPayload = {
             event,
-            context: {
-              owner: link.owner,
-              ownerScopeId: link.ownerScopeId,
-              threadRef: link.openerThreadRef,
-              sessionId: link.openerSessionId,
-              surface: link.surface,
-              ...(link.destination ? { destination: link.destination } : {}),
-            },
-            destinationRevision,
+            serverId: server.id,
+            ...(link
+              ? {
+                  context: {
+                    owner: link.owner,
+                    ownerScopeId: link.ownerScopeId,
+                    threadRef: link.openerThreadRef,
+                    sessionId: link.openerSessionId,
+                    surface: link.surface,
+                    ...(link.destination ? { destination: link.destination } : {}),
+                  },
+                }
+              : {}),
           };
           jobs.push({
-            id: JSON.stringify([projectionReaderAudienceKey(audience), event.event_id, destinationRevision]),
+            id: JSON.stringify([projectionReaderAudienceKey(audience), event.event_id]),
             audienceKey: projectionReaderAudienceKey(audience),
             eventId: event.event_id,
             projectionRevision: event.projection_revision,
-            destinationRevision,
+            destinationRevision: link?.createdAt ?? 0,
             payload,
             createdAt: Date.now(),
             availableAt: 0,
             attempts: 0,
+            state: link ? "ready" : "awaiting_binding",
+            subscriptionKey,
+            msgId: event.msg_id,
           });
         } catch (error) {
           const row = object(candidate);
@@ -352,7 +374,13 @@ export function createAgentConversationProjectionService(
           });
         }
       }
-      const skips = [...result.skipped.map(skipMarker), ...quarantined];
+      const skips: ProjectionSkipMarker[] = [];
+      for (const value of result.skipped) {
+        const marker = skipMarker(value);
+        const subscriptionKey = await readers.subscriptionForMsg(audience, marker.msgId);
+        skips.push({ ...marker, ...(subscriptionKey ? { subscriptionKey } : {}) });
+      }
+      skips.push(...quarantined);
       const replacement = result.has_more ? result.next_cursor : result.high_water_cursor;
       const afterCursor =
         replacement ?? (result.events.length || result.skipped.length ? checkpoint.afterCursor : undefined);
@@ -363,6 +391,7 @@ export function createAgentConversationProjectionService(
         skips,
         afterCursor,
       });
+      recoveryAfter = undefined;
       if (!accepted || !result.has_more) return;
     }
   }
@@ -372,34 +401,65 @@ export function createAgentConversationProjectionService(
       try {
         const payload = job.payload as ProjectionJobPayload;
         const event = payload.event;
-        const link = await deps.links.get({
-          owner: payload.context.owner,
+        const server = await deps.mcpServers.get(payload.serverId);
+        if (!server?.zipviz) throw new Error("projection server binding no longer exists");
+        let link = await deps.links.get({
+          owner: server.zipviz.actorPrincipalId,
           mailbox: event.mailbox,
           conversationId: event.conversation_id,
         });
-        if (!link) throw new Error("projection binding no longer exists");
-        const stableDeliveryKey = `zvconv:event:${event.event_id}:destination:${payload.destinationRevision}`;
+        if (!link) link = await linkFor(server, event, await contexts(server));
+        if (!link) {
+          await readers.defer(job.id, job.projectionRevision, Date.now(), "awaiting binding");
+          continue;
+        }
+        if (await readers.held(job.audienceKey, job.subscriptionKey)) {
+          await readers.defer(job.id, job.projectionRevision, Date.now(), "subscription held by gap");
+          continue;
+        }
+        const context: ProjectionContext = payload.context ?? {
+          owner: link.owner,
+          ownerScopeId: link.ownerScopeId,
+          threadRef: link.openerThreadRef,
+          sessionId: link.openerSessionId,
+          surface: link.surface,
+          ...(link.destination ? { destination: link.destination } : {}),
+        };
+        const destinationRevision = link.createdAt;
+        const stableDeliveryKey = `zvconv:event:${event.event_id}:destination:${destinationRevision}`;
         const existingDelivery = await deps.deliveries.getByKey(stableDeliveryKey);
         const lastTurn = Math.max(link.lastProjectedInTurn ?? 0, link.lastProjectedOutTurn ?? 0);
-        if (!existingDelivery && event.turn !== lastTurn + 1) {
+        const sessionRevision = link.destination && !["slack", "principal", "group"].includes(link.destination.type);
+        if (!existingDelivery && !sessionRevision && event.turn !== lastTurn + 1) {
           await readers.defer(
             job.id,
             job.projectionRevision,
-            Date.now() + RECONCILE_INTERVAL_MS,
+            Date.now(),
             event.turn < lastTurn
               ? `refusing reverse-order turn ${event.turn} after ${lastTurn}`
               : `waiting for turn ${lastTurn + 1} before ${event.turn}`,
           );
           continue;
         }
-        const projector = createAgentConversationProjector({ ...deps, ...payload.context, toolDefs: () => [] });
-        await projector.projectEvent(event, link, payload.destinationRevision);
+        const projector = createAgentConversationProjector({ ...deps, ...context, toolDefs: () => [] });
+        await projector.projectEvent(event, link, destinationRevision);
         await readers.ack(job.id, job.projectionRevision);
       } catch (error) {
         await readers.defer(job.id, job.projectionRevision, Date.now() + 1_000, errMessage(error));
         swallow("conversation projection outbox", error);
       }
     }
+  }
+
+  async function pruneCopies(): Promise<void> {
+    const now = Date.now();
+    if (now - lastRetentionSweep < PROJECTION_RETENTION_SWEEP_MS) return;
+    lastRetentionSweep = now;
+    const cutoff = now - PROJECTION_CONTENT_RETENTION_MS;
+    await readers.prune(cutoff);
+    await deps.deliveries.pruneRejectedConversationCopies(cutoff);
+    for (const [id, binding] of await pendingBindings.entries())
+      if (binding.createdAt < cutoff) await pendingBindings.delete(id);
   }
 
   function sweep(): Promise<void> {
@@ -420,6 +480,7 @@ export function createAgentConversationProjectionService(
             );
         }
         if (!leaseLost && !stopping) await dispatchOutbox();
+        if (!leaseLost && !stopping) await pruneCopies();
       })
       .then(() => undefined);
     inFlight = work.finally(() => {
@@ -435,6 +496,7 @@ export function createAgentConversationProjectionService(
   return {
     hint,
     sweep,
+    releaseGap: (audience, msgId, reason) => readers.releaseGap(audience, msgId, reason),
     async diagnostics() {
       const checkpoints = await Promise.all(
         (await deps.mcpServers.list()).map(async (server) => {
@@ -453,7 +515,12 @@ export function createAgentConversationProjectionService(
       return {
         readers: checkpoints.filter((row): row is NonNullable<typeof row> => row !== null),
         pendingBindings: await pendingBindings.all(),
-        outbox: await readers.pending(100, Number.MAX_SAFE_INTEGER),
+        outbox: await readers.allOutbox(100),
+        retention: {
+          contentMs: PROJECTION_CONTENT_RETENTION_MS,
+          sweepMs: PROJECTION_RETENTION_SWEEP_MS,
+          unresolvedEvidenceLimit: 100,
+        },
       };
     },
     start() {

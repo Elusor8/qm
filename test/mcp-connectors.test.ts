@@ -188,3 +188,48 @@ test("a projection hint failure never refuses remote dispatch", async (t) => {
   assert.equal(out, "ran query");
   assert.equal(calls.length, count + 1);
 });
+
+test("authorized machine reads preserve large projection pages while model calls stay clamped", async (t) => {
+  const body = "x".repeat(70_000);
+  const page = JSON.stringify({ events: [{ body }, { body: "second" }], skipped: [], has_more: false });
+  const fetch: McpFetch = async (_url, init) => {
+    const request = JSON.parse(init.body) as { id: number; method: string; params?: { name?: string } };
+    const result =
+      request.method === "tools/list"
+        ? { tools: [{ name: "zipviz_conversation_projection_events", inputSchema: { type: "object" } }] }
+        : { content: [{ type: "text", text: page }] };
+    return jsonResponse({ jsonrpc: "2.0", id: request.id, result });
+  };
+  const store = createMcpServerStore(createMemoryMap<McpServer>());
+  const service = createMcpToolService({
+    servers: store,
+    fetchImpl: fetch,
+    signingSecret: "x".repeat(32),
+    refreshIntervalMs: 3600_000,
+  });
+  t.after(() => service.close());
+  await store.put(
+    server({
+      id: "zipviz",
+      readOnly: false,
+      zipviz: {
+        mailbox: "alice.example.viz",
+        adapterKind: "https://example.invalid/adapter",
+        adapterInstance: "qm",
+        actorExternalId: "alice",
+        actorPrincipalId: "U1",
+      },
+    }),
+  );
+  await service.refresh();
+  const options = {
+    principalId: "U1",
+    runtimeContext: { actorId: "U1", threadRef: "slack:C1:1", nativeEventId: "projection-read" },
+  };
+  const machine = await service.machineRead("zipviz_zipviz_conversation_projection_events", {}, options);
+  assert.equal(JSON.parse(machine).events[0].body.length, 70_000);
+  const model = await service.call("zipviz_zipviz_conversation_projection_events", {}, options);
+  assert.equal(model.length, 60_012);
+  assert.match(model, /\[truncated\]$/);
+  assert.throws(() => JSON.parse(model));
+});

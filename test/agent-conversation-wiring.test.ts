@@ -10,6 +10,7 @@ import { testConfig } from "./support/test-config.ts";
 
 const mailbox = "alice.example.viz";
 const conversationId = "conv-00000000-0000-4000-8000-000000000001";
+const peerConversationId = "conv-00000000-0000-4000-8000-000000000002";
 const binding = {
   mailbox,
   actorPrincipalId: "U1",
@@ -86,14 +87,45 @@ test("ledger feed resolves a pending open and projects verified ingress and outb
         ],
       };
     } else if (request.params.name === "zipviz_conversation_projection_events") {
+      const read = projectionReads++;
+      let events: ReturnType<typeof event>[] = [];
+      if (read === 0)
+        events = [
+          { ...event(1, "us", 1), body: `SIGNED OUTBOUND ${"x".repeat(70_000)}` },
+          event(2, "them", 2),
+          {
+            ...event(1, "them", 3),
+            event_id: "event-peer-1",
+            conversation_id: peerConversationId,
+            msg_id: "msg-peer-1",
+            correlation: {
+              ...event(1, "them", 3).correlation,
+              external_conversation_ref: "slack:U1:peer-open",
+            },
+          },
+        ];
+      if (read === 1)
+        events = [
+          { ...event(3, "us", 5), event_id: "event-3", msg_id: "msg-3" },
+          {
+            ...event(2, "us", 6),
+            event_id: "event-peer-2",
+            conversation_id: peerConversationId,
+            msg_id: "msg-peer-2",
+            correlation: {
+              ...event(2, "us", 6).correlation,
+              external_conversation_ref: "slack:U1:peer-open",
+            },
+          },
+        ];
       result = {
         content: [
           {
             type: "text",
             text: JSON.stringify({
               mailbox,
-              events: projectionReads++ === 0 ? [event(1, "us", 1), event(2, "them", 2)] : [],
-              skipped: [],
+              events,
+              skipped: read === 1 ? [{ projection_revision: 4, msg_id: "msg-1", code: "E_RETAINED_EVENT_GAP" }] : [],
               next_cursor: null,
               high_water_cursor: "cursor-2",
               has_more: false,
@@ -153,6 +185,52 @@ test("ledger feed resolves a pending open and projects verified ingress and outb
   assert.match(posts[1]!.text, /SIGNED INBOUND/);
   assert.doesNotMatch(posts[1]!.text, /UNTRUSTED AGENT RESPONSE/);
   assert.ok(await built.conversationLinks.get({ owner: "U1", mailbox, conversationId }));
+  assert.equal((await built.conversationProjection.diagnostics()).outbox[0]?.state, "awaiting_binding");
+  await built.conversationProjection.hint(
+    {
+      owner: "U1",
+      ownerScopeId: "personal:U1",
+      threadRef: "slack:U1:peer-open",
+      sessionId: "session-peer-open",
+      surface: "slack",
+      destination: { type: "principal", target: "U1", audienceScopeId: "personal:U1", onBehalfOf: "U1" },
+    },
+    {
+      name: "zipviz_zipviz_conversation_adopt",
+      serverId: "zipviz",
+      runtimeContext: { actorId: "U1", threadRef: "slack:U1:peer-open", nativeEventId: "native-adopt" },
+      args: { mailbox },
+      conversationBinding: { owner: "U1", mailbox, remoteName: "zipviz_conversation_adopt" },
+    },
+  );
   await built.conversationProjection.sweep();
-  assert.equal((await built.deliveries.pending("principal")).length, 2);
+  await built.conversationProjection.sweep();
+  assert.equal((await built.deliveries.pending("principal")).length, 4);
+  assert.ok(await built.conversationLinks.get({ owner: "U1", mailbox, conversationId: peerConversationId }));
+  const diagnostics = await built.conversationProjection.diagnostics();
+  assert.equal(diagnostics.readers[0]?.afterCursor, "cursor-2");
+  assert.equal(
+    diagnostics.outbox.some((row) => row.eventId === "event-3"),
+    true,
+  );
+  assert.equal(
+    diagnostics.outbox.some((row) => row.eventId === "event-peer-2"),
+    false,
+  );
+  assert.equal(
+    await built.conversationProjection.releaseGap(
+      {
+        mailbox,
+        adapterKind: binding.adapterKind,
+        adapterInstance: binding.adapterInstance,
+        externalScope: "thread",
+        externalPrincipalRef: binding.actorExternalId,
+      },
+      "msg-1",
+      "test operator accepted incomplete history",
+    ),
+    true,
+  );
+  await built.conversationProjection.sweep();
+  assert.equal((await built.deliveries.pending("principal")).length, 5);
 });
