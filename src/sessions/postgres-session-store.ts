@@ -521,7 +521,8 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         );
         if (existing.rows[0]) {
           const prior = Number(existing.rows[0].projection_revision ?? 0);
-          if (prior >= input.revision) return { status: "unchanged" as const, appliedRevision: prior, contiguousTurn };
+          if (prior >= input.revision || !input.entry)
+            return { status: "unchanged" as const, appliedRevision: prior, contiguousTurn };
           await client.query("UPDATE session_entries SET payload=$3, scope_label=$4 WHERE session_id=$1 AND seq=$2", [
             lease.sessionId,
             existing.rows[0].seq,
@@ -529,6 +530,17 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
             input.entry.scopeLabel,
           ]);
           return { status: "updated" as const, appliedRevision: input.revision, contiguousTurn };
+        }
+        if (!input.entry) {
+          if (input.turn > contiguousTurn + 1) return { status: "blocked" as const, contiguousTurn };
+          let skippedTurn = Math.max(contiguousTurn, input.turn);
+          while (appliedTurns.has(skippedTurn + 1)) skippedTurn += 1;
+          await client.query(
+            `UPDATE session_projection_progress SET contiguous_turn=$3,updated_at=$4
+             WHERE session_id=$1 AND subscription_key=$2`,
+            [lease.sessionId, input.subscriptionKey, skippedTurn, now()],
+          );
+          return { status: "skipped" as const, appliedRevision: input.revision, contiguousTurn: skippedTurn };
         }
         if (input.turn !== contiguousTurn + 1) return { status: "blocked" as const, contiguousTurn };
         const max = await client.query(

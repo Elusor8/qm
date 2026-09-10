@@ -60,6 +60,7 @@ export interface ProjectionReaderStore {
   reset(audience: ProjectionReaderAudience, expectedVersion: number, code: string, detail: string): Promise<boolean>;
   pending(limit: number, readyAt: number): Promise<ProjectionOutboxJob[]>;
   ack(id: string, projectionRevision: number): Promise<void>;
+  drop(id: string, projectionRevision: number, code: string, detail: string): Promise<void>;
   defer(id: string, projectionRevision: number, until: number, detail: string): Promise<void>;
   skips(audience: ProjectionReaderAudience): Promise<ProjectionSkipMarker[]>;
   subscriptionForMsg(audience: ProjectionReaderAudience, msgId: string): Promise<string | null>;
@@ -227,6 +228,29 @@ export function createMemoryProjectionReaderStore(): ProjectionReaderStore {
     async ack(id, projectionRevision) {
       const current = outbox.get(id);
       if (current?.projectionRevision === projectionRevision) outbox.delete(id);
+    },
+    async drop(id, projectionRevision, code, detail) {
+      const current = outbox.get(id);
+      if (current?.projectionRevision !== projectionRevision) return;
+      const rows = markers.get(current.audienceKey) ?? [];
+      if (!rows.some((row) => row.msgId === current.msgId && row.code === code))
+        markers.set(
+          current.audienceKey,
+          [
+            ...rows,
+            {
+              projectionRevision,
+              msgId: current.msgId,
+              code,
+              subscriptionKey: current.subscriptionKey,
+              releasedAt: Date.now(),
+              resolution: detail,
+            },
+          ]
+            .sort((a, b) => a.projectionRevision - b.projectionRevision)
+            .slice(-100),
+        );
+      outbox.delete(id);
     },
     async defer(id, projectionRevision, until) {
       const current = outbox.get(id);
@@ -554,6 +578,36 @@ export function createPostgresProjectionReaderStore(connectionString: string): P
         id,
         projectionRevision,
       ]);
+    },
+    async drop(id, projectionRevision, code, detail) {
+      const pool = await pg.pool();
+      await withPgTransaction(pool, async (client) => {
+        const rows = await client.query(
+          `SELECT audience_key,subscription_key,msg_id FROM agent_conversation_projection_outbox
+           WHERE id=$1 AND projection_revision=$2 FOR UPDATE`,
+          [id, projectionRevision],
+        );
+        const job = rows.rows[0];
+        if (!job) return;
+        await client.query(
+          `INSERT INTO agent_conversation_projection_skips
+            (audience_key,projection_revision,msg_id,code,created_at,subscription_key,released_at,resolution)
+           VALUES($1,$2,$3,$4,$5,$6,$5,$7) ON CONFLICT DO NOTHING`,
+          [
+            String(job.audience_key),
+            projectionRevision,
+            String(job.msg_id),
+            code,
+            Date.now(),
+            String(job.subscription_key),
+            detail,
+          ],
+        );
+        await client.query("DELETE FROM agent_conversation_projection_outbox WHERE id=$1 AND projection_revision=$2", [
+          id,
+          projectionRevision,
+        ]);
+      });
     },
     async defer(id, projectionRevision, until, detail) {
       await pg.query(
