@@ -159,8 +159,13 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     const subscriptionKey = agentConversationLinkId(link);
     let appliedRevision: number | undefined;
     try {
-      if (!(await canWriteScope(link.owner, session.scopeId)) || !link.destination) return false;
-      if (text !== undefined && !(await deliverable(link.owner, link.ownerScopeId, link.destination))) return false;
+      if (!link.destination) return false;
+      if (
+        text !== undefined &&
+        (!(await canWriteScope(link.owner, session.scopeId)) ||
+          !(await deliverable(link.owner, link.ownerScopeId, link.destination)))
+      )
+        return false;
       const entry: NewEntry | undefined =
         text === undefined
           ? undefined
