@@ -431,13 +431,20 @@ export function createAgentConversationProjectionService(
         const lastTurn = Math.max(link.lastProjectedInTurn ?? 0, link.lastProjectedOutTurn ?? 0);
         const sessionRevision = link.destination && !["slack", "principal", "group"].includes(link.destination.type);
         if (!existingDelivery && !sessionRevision && event.turn !== lastTurn + 1) {
+          if (event.turn <= lastTurn) {
+            await readers.drop(
+              job.id,
+              job.projectionRevision,
+              "E_TURN_BEHIND_WATERMARK",
+              `turn ${event.turn} was not projected: ${link.owner} is already projected through turn ${lastTurn}`,
+            );
+            continue;
+          }
           await readers.defer(
             job.id,
             job.projectionRevision,
             Date.now(),
-            event.turn < lastTurn
-              ? `refusing reverse-order turn ${event.turn} after ${lastTurn}`
-              : `waiting for turn ${lastTurn + 1} before ${event.turn}`,
+            `waiting for turn ${lastTurn + 1} before ${event.turn}`,
           );
           continue;
         }
