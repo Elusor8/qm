@@ -165,13 +165,10 @@ test("a drop that fails after the watermark advanced is retried instead of stran
   await built.conversationProjection.sweep();
   const recovered = await built.conversationProjection.diagnostics();
   assert.equal(recovered.outbox.length, 0);
-  assert.deepEqual(
-    (recovered.readers[0]?.skips ?? []).map((skip) => [skip.msgId, skip.code]).sort(),
-    [
-      ["msg-1", "E_TURN_BEHIND_WATERMARK"],
-      ["msg-2", "E_DESTINATION_UNAVAILABLE"],
-    ],
-  );
+  assert.deepEqual((recovered.readers[0]?.skips ?? []).map((skip) => [skip.msgId, skip.code]).sort(), [
+    ["msg-1", "E_TURN_BEHIND_WATERMARK"],
+    ["msg-2", "E_DESTINATION_UNAVAILABLE"],
+  ]);
   await built.projects.addMember(project.id, "U2", "U1");
   await built.conversationProjection.sweep();
   await built.conversationProjection.sweep();
