@@ -442,8 +442,15 @@ export function createAgentConversationProjectionService(
           continue;
         }
         const projector = createAgentConversationProjector({ ...deps, ...context, toolDefs: () => [] });
-        await projector.projectEvent(event, link, destinationRevision);
-        await readers.ack(job.id, job.projectionRevision);
+        const outcome = await projector.projectEvent(event, link, destinationRevision);
+        if (outcome === "undeliverable")
+          await readers.drop(
+            job.id,
+            job.projectionRevision,
+            "E_DESTINATION_UNAVAILABLE",
+            `turn ${event.turn} was not projected: the destination is not visible to ${link.owner}`,
+          );
+        else await readers.ack(job.id, job.projectionRevision);
       } catch (error) {
         await readers.defer(job.id, job.projectionRevision, Date.now() + 1_000, errMessage(error));
         swallow("conversation projection outbox", error);

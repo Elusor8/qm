@@ -210,10 +210,18 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       );
       if (existing) {
         const prior = Number((existing.payload as { projectionRevision?: unknown } | null)?.projectionRevision ?? 0);
-        if (prior >= input.revision) return { status: "unchanged", appliedRevision: prior, contiguousTurn };
+        if (prior >= input.revision || !input.entry)
+          return { status: "unchanged", appliedRevision: prior, contiguousTurn };
         existing.payload = structuredClone(input.entry.payload);
         existing.scopeLabel = input.entry.scopeLabel as ScopeId;
         return { status: "updated", appliedRevision: input.revision, contiguousTurn };
+      }
+      if (!input.entry) {
+        if (input.turn > contiguousTurn + 1) return { status: "blocked", contiguousTurn };
+        contiguousTurn = Math.max(contiguousTurn, input.turn);
+        while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
+        projectionProgress.set(progressKey, contiguousTurn);
+        return { status: "skipped", appliedRevision: input.revision, contiguousTurn };
       }
       if (input.turn !== contiguousTurn + 1) return { status: "blocked", contiguousTurn };
       await this.append(lease, input.entry);

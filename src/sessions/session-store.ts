@@ -429,11 +429,11 @@ export interface ProjectionApplication {
   marker: string;
   turn: number;
   revision: number;
-  entry: NewEntry;
+  entry?: NewEntry;
 }
 
 export interface ProjectionApplicationResult {
-  status: "inserted" | "updated" | "unchanged" | "blocked";
+  status: "inserted" | "updated" | "unchanged" | "blocked" | "skipped";
   appliedRevision?: number;
   contiguousTurn: number;
 }

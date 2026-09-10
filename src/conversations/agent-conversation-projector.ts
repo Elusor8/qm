@@ -56,6 +56,8 @@ export interface AgentConversationProjectorDeps
   destination?: Destination;
 }
 
+export type ProjectionOutcome = "projected" | "undeliverable";
+
 export interface AgentConversationProjector {
   observe(observation: ProjectionObservation): Promise<void>;
   project(observation: ProjectionObservation): Promise<void>;
@@ -64,7 +66,7 @@ export interface AgentConversationProjector {
     event: ConversationProjectionEvent,
     link: AgentConversationLink,
     destinationRevision: number,
-  ): Promise<void>;
+  ): Promise<ProjectionOutcome>;
 }
 
 function parseJson(text: string): Record<string, unknown> | null {
@@ -139,7 +141,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
   async function postToSession(
     link: AgentConversationLink,
     turn: number,
-    text: string,
+    text: string | undefined,
     projectionRevision = 0,
   ): Promise<boolean> {
     const sessions = deps.projectionSessions;
@@ -157,34 +159,34 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     const subscriptionKey = agentConversationLinkId(link);
     let appliedRevision: number | undefined;
     try {
-      if (
-        !(await canWriteScope(link.owner, session.scopeId)) ||
-        !link.destination ||
-        !(await deliverable(link.owner, link.ownerScopeId, link.destination))
-      )
-        return false;
-      const entry: NewEntry = {
-        type: "user",
-        payload: {
-          kind: "agent_conversation_projection",
-          overheard: true,
-          ts: marker,
-          projectionSubscriptionKey: subscriptionKey,
-          projectionTurn: turn,
-          projectionRevision,
-          name: `signed conversation with ${link.peer ?? "the peer"}`,
-          text,
-        },
-        scopeLabel: link.ownerScopeId,
-      };
+      if (!(await canWriteScope(link.owner, session.scopeId)) || !link.destination) return false;
+      if (text !== undefined && !(await deliverable(link.owner, link.ownerScopeId, link.destination))) return false;
+      const entry: NewEntry | undefined =
+        text === undefined
+          ? undefined
+          : {
+              type: "user",
+              payload: {
+                kind: "agent_conversation_projection",
+                overheard: true,
+                ts: marker,
+                projectionSubscriptionKey: subscriptionKey,
+                projectionTurn: turn,
+                projectionRevision,
+                name: `signed conversation with ${link.peer ?? "the peer"}`,
+                text,
+              },
+              scopeLabel: link.ownerScopeId,
+            };
       const application = await sessions.applyProjection(lease, {
         subscriptionKey,
         marker,
         turn,
         revision: projectionRevision,
-        entry,
+        ...(entry ? { entry } : {}),
       });
       if (application.status === "blocked") return false;
+      if (application.status === "skipped") return true;
       appliedRevision = application.appliedRevision;
     } finally {
       await sessions.releaseLease(lease);
@@ -198,6 +200,28 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     return true;
   }
 
+  async function dropTurn(
+    link: AgentConversationLink,
+    direction: "in" | "out",
+    turn: number,
+    destination: Destination | undefined,
+    projectionRevision = 0,
+  ): Promise<void> {
+    await noticeOnce(
+      link,
+      destination
+        ? "the destination is no longer visible to you"
+        : "the conversation has no destination to project into",
+    );
+    if (
+      destination &&
+      !TEXT_SINKS.has(destination.type) &&
+      !(await postToSession(link, turn, undefined, projectionRevision))
+    )
+      throw new Error(`could not record a skipped turn in the ${destination.type} surface`);
+    await deps.links.advance(link, direction === "in" ? { lastProjectedInTurn: turn } : { lastProjectedOutTurn: turn });
+  }
+
   async function post(link: AgentConversationLink, direction: "in" | "out", turn: number, text: string): Promise<void> {
     const destination = link.destination;
     if (!destination) return;
@@ -205,7 +229,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       deps.links.advance(link, direction === "in" ? { lastProjectedInTurn: turn } : { lastProjectedOutTurn: turn });
 
     if (!(await deliverable(link.owner, link.ownerScopeId, destination))) {
-      await noticeOnce(link, "the destination is no longer visible to you");
+      await dropTurn(link, direction, turn, destination);
       return;
     }
     if (!TEXT_SINKS.has(destination.type)) {
@@ -362,10 +386,9 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         (event.side === "us" ? renderOutboundTurn(facts, event.body) : renderInboundTurn(facts, event.body)) + receipt;
       const direction = event.side === "us" ? "out" : "in";
       const destination = link.destination;
-      if (!destination) return;
-      if (!(await deliverable(link.owner, link.ownerScopeId, destination))) {
-        await noticeOnce(link, "the destination is no longer visible to you");
-        return;
+      if (!destination || !(await deliverable(link.owner, link.ownerScopeId, destination))) {
+        await dropTurn(link, direction, event.turn, destination, event.projection_revision);
+        return "undeliverable";
       }
       if (!TEXT_SINKS.has(destination.type)) {
         if (!(await postToSession(link, event.turn, rendered, event.projection_revision)))
@@ -374,7 +397,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
           link,
           direction === "in" ? { lastProjectedInTurn: event.turn } : { lastProjectedOutTurn: event.turn },
         );
-        return;
+        return "projected";
       }
       await deps.deliveries.enqueueProjection({
         destination,
@@ -401,6 +424,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         link,
         direction === "in" ? { lastProjectedInTurn: event.turn } : { lastProjectedOutTurn: event.turn },
       );
+      return "projected";
     },
     async observe(observation) {
       try {

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { buildApp } from "../src/wiring.ts";
+import { projectGroupRef } from "../src/projects/project-store.ts";
 import { testConfig } from "./support/test-config.ts";
 
 const mailbox = "alice.example.viz";
@@ -73,6 +74,117 @@ function event(turn: number, side: "us" | "them", revision: number) {
     },
   };
 }
+
+test("a turn whose destination went invisible is dropped with evidence and later turns still project", async (t) => {
+  let projectionReads = 0;
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const request = JSON.parse(String(init.body));
+    let result: unknown = { content: [{ type: "text", text: "{}" }] };
+    if (request.method === "tools/list")
+      result = { tools: [{ name: "zipviz_conversation_projection_events", inputSchema: { type: "object" } }] };
+    else if (request.params.name === "zipviz_conversation_projection_events") {
+      const read = projectionReads++;
+      const events = [[event(1, "us", 1)], [event(2, "them", 2)]][read] ?? [];
+      result = {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              mailbox,
+              events,
+              skipped: [],
+              next_cursor: null,
+              high_water_cursor: `cursor-${read}`,
+              has_more: false,
+            }),
+          },
+        ],
+      };
+    }
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+      headers: { "content-type": "application/json" },
+    });
+  });
+  const built = buildApp(
+    testConfig({ dataDir: mkdtempSync(join(tmpdir(), "ledger-invisible-")), signingSecret: "x".repeat(32) }),
+  );
+  t.after(async () => {
+    built.mcpToolService.close();
+    await built.runtime.stop();
+  });
+  await built.app.upsertDirectory([
+    { principalId: "U1", displayName: "Alice", type: "internal" },
+    { principalId: "U2", displayName: "Owner", type: "internal" },
+  ]);
+  const project = await built.projects.create({ name: "Ops", ownerId: "U2" });
+  await built.projects.addMember(project.id, "U2", "U1");
+  const groupRef = projectGroupRef(project.id);
+  await built.mcpServers.put({
+    id: "zipviz",
+    name: "ZipViz",
+    url: "https://mcp-projection.invalid/mcp",
+    auth: "none",
+    enabled: true,
+    readOnly: false,
+    updatedAt: 0,
+    updatedBy: "U1",
+    zipviz: binding,
+  });
+  await built.mcpToolService.refresh();
+  await built.conversationProjection.hint(
+    {
+      owner: "U1",
+      ownerScopeId: "personal:U1",
+      threadRef: "slack:U1:open",
+      sessionId: "session-open",
+      surface: "slack",
+      destination: { type: "group", target: groupRef },
+    },
+    {
+      name: "zipviz_zipviz_conversation_open",
+      serverId: "zipviz",
+      runtimeContext: { actorId: "U1", threadRef: "slack:U1:open", nativeEventId: "native-open" },
+      args: { mailbox },
+      conversationBinding: { owner: "U1", mailbox, remoteName: "zipviz_conversation_open" },
+    },
+  );
+  await built.projects.removeMember(project.id, "U2", "U1");
+  await built.conversationProjection.sweep();
+  assert.equal((await built.deliveries.pending("group")).length, 0);
+  const audience = {
+    mailbox,
+    adapterKind: binding.adapterKind,
+    adapterInstance: binding.adapterInstance,
+    externalScope: "thread",
+    externalPrincipalRef: binding.actorExternalId,
+  };
+  const afterDrop = await built.conversationProjection.diagnostics();
+  assert.equal(afterDrop.outbox.length, 0);
+  assert.deepEqual(
+    (afterDrop.readers[0]?.skips ?? [])
+      .filter((skip) => skip.code === "E_DESTINATION_UNAVAILABLE")
+      .map((skip) => [skip.msgId, skip.projectionRevision]),
+    [["msg-1", 1]],
+  );
+  assert.equal(
+    (await built.deliveries.pending("principal")).some((row) => row.provenance?.conversation?.notice === true),
+    true,
+  );
+  await built.projects.addMember(project.id, "U2", "U1");
+  await built.conversationProjection.sweep();
+  await built.conversationProjection.sweep();
+  const projected = await built.deliveries.pending("group");
+  assert.deepEqual(
+    projected.map((row) => row.provenance?.conversation?.turn),
+    [2],
+  );
+  assert.match(projected[0]!.text, /SIGNED INBOUND/);
+  assert.equal((await built.conversationProjection.diagnostics()).outbox.length, 0);
+  assert.equal(
+    await built.conversationProjection.releaseGap(audience, "msg-1", "test operator reviewed the drop"),
+    false,
+  );
+});
 
 test("ledger feed resolves a pending open and projects verified ingress and outbound turns once", async (t) => {
   let projectionReads = 0;
