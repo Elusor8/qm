@@ -149,6 +149,28 @@ test("a correlated gap holds only its subscription while reader work for another
   );
 });
 
+test("bounded gap evidence never releases an unresolved durable hold", async () => {
+  const store = createMemoryProjectionReaderStore();
+  await store.acceptPage({
+    audience,
+    expectedVersion: 0,
+    jobs: [],
+    skips: Array.from({ length: 101 }, (_, index) => ({
+      projectionRevision: index + 1,
+      msgId: `gap-${index}`,
+      code: "E_RETAINED_EVENT_GAP",
+      subscriptionKey: `subscription-${index}`,
+    })),
+    afterCursor: "cursor-101",
+  });
+  assert.equal((await store.skips(audience)).length, 100);
+  assert.equal(await store.held(projectionReaderAudienceKey(audience), "subscription-0"), true);
+  assert.equal(await store.held(projectionReaderAudienceKey(audience), "subscription-100"), true);
+  assert.equal(await store.held(projectionReaderAudienceKey(audience), "unrelated"), false);
+  assert.equal(await store.releaseGap(audience, "gap-0", "operator accepted incomplete history"), true);
+  assert.equal(await store.held(projectionReaderAudienceKey(audience), "subscription-0"), false);
+});
+
 test("expired unbound work loses its body without acknowledgement or silent hold release", async () => {
   const store = createMemoryProjectionReaderStore();
   const unbound = {

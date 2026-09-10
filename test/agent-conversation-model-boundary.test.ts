@@ -189,7 +189,7 @@ async function setup(kind: "dm" | "channel" = "dm") {
           {
             from: "bob.example.viz",
             body: POISON,
-            conversation: { conversation_id: side.conversationId, turn: 2, intent: "accept", peer: "bob.example.viz" },
+            conversation: { conversation_id: side.conversationId, turn: 1, intent: "accept", peer: "bob.example.viz" },
           },
         ],
       }),

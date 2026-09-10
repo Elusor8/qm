@@ -6,7 +6,7 @@ Full event payloads in the projection outbox are retained for 14 days, matching 
 
 Pending open and adopt bindings older than 14 days are removed. A retained unbound outbox row remains the durable evidence and ordering hold for the unresolved event.
 
-Gap evidence is limited to the latest 100 markers per reader audience. A marker is released only by authoritative replay of the same message or an audited administrator decision through `POST /v1/admin/conversation-projections/release` with the full audience key, message id, and reason.
+Gap evidence is limited to the latest 100 markers per reader audience. Unresolved delivery holds are stored separately and are not removed when that evidence log is compacted. A hold is released only by authoritative replay of the same message or an audited administrator decision through `POST /v1/admin/conversation-projections/release` with the full audience key, message id, and reason.
 
 Legacy capture rows are migrated into pending bindings when they contain a usable open or adopt context, then the capture, capture-mailbox, progress, and legacy queue rows are cleared transactionally and their durable-map versions advance. Repeating the cutover is safe. Conversation links remain untouched and authoritative turns and receipts remain in the ledger.
 

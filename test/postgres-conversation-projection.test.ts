@@ -24,7 +24,7 @@ before(async () => {
   const pg = (await import("pg")).default;
   const pool = new pg.Pool({ connectionString: URL });
   await pool.query(
-    "DROP TABLE IF EXISTS agent_conversation_projection_event_index, agent_conversation_projection_skips, agent_conversation_projection_outbox, agent_conversation_projection_readers CASCADE",
+    "DROP TABLE IF EXISTS agent_conversation_projection_holds, agent_conversation_projection_event_index, agent_conversation_projection_skips, agent_conversation_projection_outbox, agent_conversation_projection_readers CASCADE",
   );
   await pool.end();
 });
@@ -56,6 +56,7 @@ test("Postgres reader atomically versions checkpoint, outbox and bounded skip ev
         projectionRevision: index + 2,
         msgId: `msg-${index}`,
         code: "E_PROOF_UNAVAILABLE",
+        subscriptionKey: `subscription-${index}`,
       })),
       afterCursor: "cursor-111",
     }),
@@ -64,6 +65,11 @@ test("Postgres reader atomically versions checkpoint, outbox and bounded skip ev
   assert.equal((await store.get(audience)).afterCursor, "cursor-111");
   assert.equal((await store.pending(10, Date.now())).length, 1);
   assert.equal((await store.skips(audience)).length, 100);
+  assert.equal(await store.held(key, "subscription-0"), true);
+  assert.equal(await store.held(key, "subscription-109"), true);
+  assert.equal(await store.held(key, "unrelated"), false);
+  assert.equal(await store.releaseGap(audience, "msg-0", "operator accepted incomplete history"), true);
+  assert.equal(await store.held(key, "subscription-0"), false);
 });
 
 test("Postgres concurrent reader versions cannot regress accepted progress", { skip }, async () => {
@@ -154,37 +160,70 @@ test("legacy capture retirement migrates bindings once and preserves conversatio
   assert.equal((await pg.q("SELECT COUNT(*)::int AS n FROM agent_conversation_links"))[0]!.n, 1);
 });
 
-test("Postgres web projection revisions survive restart in the same entry", { skip }, async () => {
-  const threadRef = `web:projection-revision:${Date.now()}`;
-  const marker = `zvconv:revision:${Date.now()}`;
-  const first = createPostgresSessionStore(URL!);
-  const session = await first.getOrCreateByThread(threadRef, "dm", scopeId("personal", "U1"), undefined, "web");
-  const firstLease = (await first.acquireLease(session.id, "backfill")).lease!;
-  await first.upsertProjection!(firstLease, marker, 1, {
-    type: "user",
-    payload: { ts: marker, overheard: true, projectionRevision: 1, text: "committed" },
-    scopeLabel: session.scopeId,
-  });
-  await first.releaseLease(firstLease);
-  const restarted = createPostgresSessionStore(URL!);
-  const secondLease = (await restarted.acquireLease(session.id, "backfill")).lease!;
-  await restarted.upsertProjection!(secondLease, marker, 2, {
-    type: "user",
-    payload: { ts: marker, overheard: true, projectionRevision: 2, text: "receipt delivered" },
-    scopeLabel: session.scopeId,
-  });
-  await restarted.upsertProjection!(secondLease, marker, 1, {
-    type: "user",
-    payload: { ts: marker, overheard: true, projectionRevision: 1, text: "stale" },
-    scopeLabel: session.scopeId,
-  });
-  await restarted.releaseLease(secondLease);
-  const entries = await restarted.getEntries(session.id);
-  assert.equal(entries.length, 1);
-  assert.deepEqual(entries[0]!.payload, {
-    ts: marker,
-    overheard: true,
-    projectionRevision: 2,
-    text: "receipt delivered",
-  });
-});
+test(
+  "Postgres session boundary preserves contiguous projection order and in-place revisions across restart",
+  { skip },
+  async () => {
+    const stamp = Date.now();
+    const threadRef = `web:projection-order:${stamp}`;
+    const subscriptionKey = `subscription:${stamp}`;
+    const first = createPostgresSessionStore(URL!, { now: () => stamp });
+    const session = await first.getOrCreateByThread(threadRef, "dm", scopeId("personal", "U1"), undefined, "web");
+    const apply = async (
+      store: ReturnType<typeof createPostgresSessionStore>,
+      turn: number,
+      revision: number,
+      eventId: string,
+    ) => {
+      let lease = null;
+      for (let attempt = 0; attempt < 20 && !lease; attempt += 1) {
+        lease = (await store.acquireLease(session.id, "backfill")).lease;
+        if (!lease) await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      assert.ok(lease);
+      const marker = `zvconv:${subscriptionKey}:${turn}`;
+      try {
+        return await store.applyProjection(lease, {
+          subscriptionKey,
+          marker,
+          turn,
+          revision,
+          entry: {
+            type: "user",
+            payload: { ts: marker, overheard: true, projectionRevision: revision, eventId, text: eventId },
+            scopeLabel: session.scopeId,
+          },
+        });
+      } finally {
+        await store.releaseLease(lease);
+      }
+    };
+
+    const reverse = await Promise.all([apply(first, 8, 1, "event-a"), apply(first, 7, 1, "event-z")]);
+    assert.deepEqual(
+      reverse.map((result) => result.status),
+      ["blocked", "blocked"],
+    );
+    assert.equal((await first.getEntries(session.id)).length, 0);
+
+    const restarted = createPostgresSessionStore(URL!, { now: () => stamp });
+    assert.equal((await apply(restarted, 3, 1, "gap-turn-3")).status, "blocked");
+    assert.equal((await apply(restarted, 1, 1, "turn-1")).status, "inserted");
+    assert.equal((await apply(restarted, 3, 1, "gap-turn-3")).status, "blocked");
+    assert.equal((await apply(restarted, 2, 1, "turn-2")).status, "inserted");
+    assert.equal((await apply(createPostgresSessionStore(URL!), 3, 1, "turn-3")).status, "inserted");
+
+    const beforeRevision = await restarted.getEntries(session.id);
+    const turnTwoSeq = beforeRevision.find(
+      (entry) => (entry.payload as { eventId?: string }).eventId === "turn-2",
+    )!.seq;
+    assert.equal((await apply(restarted, 2, 2, "turn-2-revised")).status, "updated");
+    assert.equal((await apply(restarted, 2, 1, "turn-2-stale")).status, "unchanged");
+    const entries = await createPostgresSessionStore(URL!).getEntries(session.id);
+    assert.deepEqual(
+      entries.map((entry) => (entry.payload as { eventId: string }).eventId),
+      ["turn-1", "turn-2-revised", "turn-3"],
+    );
+    assert.equal(entries[1]!.seq, turnTwoSeq);
+  },
+);

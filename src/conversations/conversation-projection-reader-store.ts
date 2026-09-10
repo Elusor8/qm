@@ -147,6 +147,7 @@ export function createMemoryProjectionReaderStore(): ProjectionReaderStore {
   const outbox = new Map<string, ProjectionOutboxJob>();
   const markers = new Map<string, ProjectionSkipMarker[]>();
   const subscriptions = new Map<string, { subscriptionKey: string; updatedAt: number }>();
+  const holds = new Map<string, ProjectionSkipMarker>();
   return {
     async get(audience) {
       return structuredClone(checkpoints.get(projectionReaderAudienceKey(audience)) ?? initial(audience));
@@ -163,6 +164,18 @@ export function createMemoryProjectionReaderStore(): ProjectionReaderStore {
           subscriptionKey: job.subscriptionKey,
           updatedAt: Date.now(),
         });
+        for (const [holdKey, hold] of holds)
+          if (holdKey.startsWith(`${key}\u0000${job.msgId}\u0000`) && hold.releasedAt === undefined)
+            holds.set(holdKey, { ...hold, releasedAt: Date.now(), resolution: "authoritative recovery" });
+      }
+      for (const marker of input.skips) {
+        if (!["E_RETAINED_EVENT_GAP", "E_PROOF_UNAVAILABLE"].includes(marker.code)) continue;
+        if (input.jobs.some((job) => job.msgId === marker.msgId)) continue;
+        const holdKey = `${key}\u0000${marker.msgId}\u0000${marker.code}`;
+        const prior = holds.get(holdKey);
+        if (!prior) holds.set(holdKey, structuredClone(marker));
+        else if (prior.releasedAt === undefined && marker.subscriptionKey)
+          holds.set(holdKey, { ...prior, subscriptionKey: marker.subscriptionKey });
       }
       const recovered = new Set(input.jobs.map((job) => job.msgId));
       const nextMarkers = [
@@ -227,9 +240,9 @@ export function createMemoryProjectionReaderStore(): ProjectionReaderStore {
       return subscriptions.get(JSON.stringify([projectionReaderAudienceKey(audience), msgId]))?.subscriptionKey ?? null;
     },
     async held(audienceKey, subscriptionKey) {
-      return [...(markers.get(audienceKey) ?? [])].some(
-        (marker) =>
-          ["E_RETAINED_EVENT_GAP", "E_PROOF_UNAVAILABLE"].includes(marker.code) &&
+      return [...holds.entries()].some(
+        ([key, marker]) =>
+          key.startsWith(`${audienceKey}\u0000`) &&
           marker.releasedAt === undefined &&
           (!marker.subscriptionKey || marker.subscriptionKey === subscriptionKey),
       );
@@ -238,9 +251,14 @@ export function createMemoryProjectionReaderStore(): ProjectionReaderStore {
       const key = projectionReaderAudienceKey(audience);
       const rows = markers.get(key) ?? [];
       const index = rows.findIndex((row) => row.msgId === msgId && row.releasedAt === undefined);
-      if (index < 0) return false;
-      rows[index] = { ...rows[index]!, releasedAt: Date.now(), resolution };
-      return true;
+      let released = false;
+      for (const [holdKey, hold] of holds)
+        if (holdKey.startsWith(`${key}\u0000${msgId}\u0000`) && hold.releasedAt === undefined) {
+          holds.set(holdKey, { ...hold, releasedAt: Date.now(), resolution });
+          released = true;
+        }
+      if (index >= 0) rows[index] = { ...rows[index]!, releasedAt: Date.now(), resolution };
+      return released;
     },
     async prune(cutoff) {
       let expiredOutbox = 0;
@@ -330,6 +348,18 @@ export function createPostgresProjectionReaderStore(connectionString: string): P
       updated_at BIGINT NOT NULL,
       PRIMARY KEY(audience_key,msg_id)
     )`,
+    `CREATE TABLE IF NOT EXISTS agent_conversation_projection_holds(
+      audience_key TEXT NOT NULL,
+      msg_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      subscription_key TEXT,
+      created_at BIGINT NOT NULL,
+      released_at BIGINT,
+      resolution TEXT,
+      PRIMARY KEY(audience_key,msg_id,code)
+    )`,
+    `ALTER TABLE agent_conversation_projection_holds ADD COLUMN IF NOT EXISTS released_at BIGINT`,
+    `ALTER TABLE agent_conversation_projection_holds ADD COLUMN IF NOT EXISTS resolution TEXT`,
   ]);
 
   const rowCheckpoint = (audience: ProjectionReaderAudience, row?: Record<string, unknown>) =>
@@ -404,6 +434,11 @@ export function createPostgresProjectionReaderStore(connectionString: string): P
              WHERE audience_key=$1 AND msg_id=$2 AND released_at IS NULL`,
             [key, job.msgId, Date.now()],
           );
+          await client.query(
+            `UPDATE agent_conversation_projection_holds SET released_at=$3,resolution='authoritative recovery'
+             WHERE audience_key=$1 AND msg_id=$2 AND released_at IS NULL`,
+            [key, job.msgId, Date.now()],
+          );
         }
         for (const skip of input.skips) {
           await client.query(
@@ -421,6 +456,17 @@ export function createPostgresProjectionReaderStore(connectionString: string): P
               input.jobs.some((job) => job.msgId === skip.msgId) ? "authoritative recovery" : null,
             ],
           );
+          if (
+            ["E_RETAINED_EVENT_GAP", "E_PROOF_UNAVAILABLE"].includes(skip.code) &&
+            !input.jobs.some((job) => job.msgId === skip.msgId)
+          )
+            await client.query(
+              `INSERT INTO agent_conversation_projection_holds
+                (audience_key,msg_id,code,subscription_key,created_at) VALUES($1,$2,$3,$4,$5)
+               ON CONFLICT(audience_key,msg_id,code) DO UPDATE SET
+                 subscription_key=COALESCE(EXCLUDED.subscription_key,agent_conversation_projection_holds.subscription_key)`,
+              [key, skip.msgId, skip.code, skip.subscriptionKey ?? null, Date.now()],
+            );
         }
         await client.query(
           `DELETE FROM agent_conversation_projection_skips WHERE audience_key=$1 AND projection_revision NOT IN
@@ -541,20 +587,29 @@ export function createPostgresProjectionReaderStore(connectionString: string): P
     },
     async held(audienceKey, subscriptionKey) {
       const rows = await pg.q(
-        `SELECT 1 FROM agent_conversation_projection_skips
-         WHERE audience_key=$1 AND code IN ('E_RETAINED_EVENT_GAP','E_PROOF_UNAVAILABLE')
-           AND released_at IS NULL AND (subscription_key IS NULL OR subscription_key=$2) LIMIT 1`,
+        `SELECT 1 FROM agent_conversation_projection_holds
+         WHERE audience_key=$1 AND released_at IS NULL
+           AND (subscription_key IS NULL OR subscription_key=$2) LIMIT 1`,
         [audienceKey, subscriptionKey],
       );
       return rows.length > 0;
     },
     async releaseGap(audience, msgId, resolution) {
-      const result = await pg.query(
-        `UPDATE agent_conversation_projection_skips SET released_at=$3,resolution=$4
-         WHERE audience_key=$1 AND msg_id=$2 AND released_at IS NULL`,
-        [projectionReaderAudienceKey(audience), msgId, Date.now(), resolution],
-      );
-      return result.rowCount > 0;
+      const pool = await pg.pool();
+      return withPgTransaction(pool, async (client) => {
+        const key = projectionReaderAudienceKey(audience);
+        const result = await client.query(
+          `UPDATE agent_conversation_projection_holds SET released_at=$3,resolution=$4
+           WHERE audience_key=$1 AND msg_id=$2 AND released_at IS NULL`,
+          [key, msgId, Date.now(), resolution],
+        );
+        await client.query(
+          `UPDATE agent_conversation_projection_skips SET released_at=$3,resolution=$4
+           WHERE audience_key=$1 AND msg_id=$2 AND released_at IS NULL`,
+          [key, msgId, Date.now(), resolution],
+        );
+        return (result.rowCount ?? 0) > 0;
+      });
     },
     async prune(cutoff) {
       const expired = await pg.query(

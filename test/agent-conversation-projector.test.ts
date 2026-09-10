@@ -20,10 +20,10 @@ const OWNER_SCOPE = scopeId("personal", "U1");
 const THREAD_REF = "web:opener";
 const PEER = "bob.external.viz";
 const MESSAGE = "I can do that.";
-const TURN = 2;
+const TURN = 1;
 const SIDE = { conversationId: CONVERSATION, mailbox: "alice.example.viz", owner: "U1" };
 const MARKER = `zvconv:${agentConversationLinkId(SIDE)}:${TURN}`;
-const NUDGE_KEY = `zvconv:nudge:${agentConversationLinkId(SIDE)}:${TURN}`;
+const NUDGE_KEY = `zvconv:nudge:${agentConversationLinkId(SIDE)}:${TURN}:0`;
 
 const TOOLS: McpToolDescriptor[] = ["zipviz_conversation_send", "zipviz_inbox_claim"].map((remoteName) => ({
   name: `zipviz_${remoteName}`,
@@ -145,6 +145,8 @@ async function assertProjected(fixture: Awaited<ReturnType<typeof setup>>, direc
     kind: "agent_conversation_projection",
     overheard: true,
     ts: MARKER,
+    projectionSubscriptionKey: agentConversationLinkId(SIDE),
+    projectionTurn: TURN,
     projectionRevision: 0,
     name: `signed conversation with ${PEER}`,
     text: (entries[0]!.payload as { text: string }).text,
@@ -281,6 +283,9 @@ test("web receipt revisions update the durable projection entry in place", async
     },
   } as const;
   await fixture.projector().projectEvent(projection, link, link.createdAt);
+  const firstNudge = (await fixture.deliveries.pending("web"))[0]!;
+  assert.equal(firstNudge.idempotencyKey, `zvconv:nudge:${agentConversationLinkId(SIDE)}:${TURN}:1`);
+  await fixture.deliveries.ack(firstNudge.id, 1);
   await fixture.projector().projectEvent(
     {
       ...projection,
@@ -296,4 +301,7 @@ test("web receipt revisions update the durable projection entry in place", async
   assert.equal((entries[0]!.payload as { projectionRevision: number }).projectionRevision, 2);
   assert.match((entries[0]!.payload as { text: string }).text, /Receipt: delivered/);
   assert.ok(isOverheardEntry(entries[0]!));
+  const revisedNudges = await fixture.deliveries.pending("web");
+  assert.equal(revisedNudges.length, 1);
+  assert.equal(revisedNudges[0]!.idempotencyKey, `zvconv:nudge:${agentConversationLinkId(SIDE)}:${TURN}:2`);
 });

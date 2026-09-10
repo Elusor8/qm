@@ -424,6 +424,20 @@ export function isOverheardEntry(e: Pick<SessionEntry, "type" | "payload">): boo
   return e.type === "user" && (e.payload as { overheard?: unknown } | null)?.overheard === true;
 }
 
+export interface ProjectionApplication {
+  subscriptionKey: string;
+  marker: string;
+  turn: number;
+  revision: number;
+  entry: NewEntry;
+}
+
+export interface ProjectionApplicationResult {
+  status: "inserted" | "updated" | "unchanged" | "blocked";
+  appliedRevision?: number;
+  contiguousTurn: number;
+}
+
 interface AddParticipantOptions {
   includeHistory?: boolean;
 }
@@ -450,12 +464,7 @@ export interface SessionStore {
   forceReleaseLease(sessionId: string): Promise<void>;
 
   append(lease: Lease, entry: NewEntry): Promise<SessionEntry>;
-  upsertProjection?(
-    lease: Lease,
-    marker: string,
-    revision: number,
-    entry: NewEntry,
-  ): Promise<"inserted" | "updated" | "unchanged">;
+  applyProjection(lease: Lease, input: ProjectionApplication): Promise<ProjectionApplicationResult>;
   getEntries(sessionId: string, opts?: GetEntriesOptions): Promise<SessionEntry[]>;
   hasProjectionMarker(sessionId: string, ts: string): Promise<boolean>;
   clearSecurityTaint(sessionId: string): Promise<boolean>;

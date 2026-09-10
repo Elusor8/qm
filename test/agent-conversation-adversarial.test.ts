@@ -37,7 +37,7 @@ function observation(name: string, args: Record<string, unknown>, result: unknow
   return { name, args, resultText: JSON.stringify(result) };
 }
 
-function claim(mailbox = MAILBOX, from = PEER, state = "active", turn = 2) {
+function claim(mailbox = MAILBOX, from = PEER, state = "active", turn = 1) {
   return observation(
     "zipviz_inbox_claim",
     { mailbox },
@@ -65,7 +65,7 @@ function claim(mailbox = MAILBOX, from = PEER, state = "active", turn = 2) {
   );
 }
 
-function send(turn = 2, mailbox = MAILBOX) {
+function send(turn = 1, mailbox = MAILBOX) {
   return observation(
     "zipviz_conversation_send",
     {
@@ -408,7 +408,7 @@ for (const scope of ["group:G1", "channel:C1", "team:T1"]) {
     await projector.observe(send(4));
     assert.equal((await f.sessions.getEntries(f.session.id)).length, 1);
     assert.equal((await f.deliveries.pending("principal")).length, 1);
-    assert.equal((await f.links.get(f.side))?.lastProjectedOutTurn, 2);
+    assert.equal((await f.links.get(f.side))?.lastProjectedOutTurn, 1);
   });
 }
 

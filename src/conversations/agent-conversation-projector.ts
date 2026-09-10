@@ -5,7 +5,7 @@ import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { principalDestination, reachEnqueue } from "../reach/reach.ts";
 import type { VisibilityDeps } from "../triggers/trigger-visibility.ts";
 import { createCanWriteScope, type ScopeMembershipDeps } from "../resolution/scope-membership.ts";
-import type { Lease, NewEntry } from "../sessions/session-store.ts";
+import type { Lease, NewEntry, ProjectionApplication, ProjectionApplicationResult } from "../sessions/session-store.ts";
 import { swallow } from "../util/errors.ts";
 import {
   agentConversationLinkId,
@@ -39,18 +39,7 @@ interface ProjectionSessions {
     holder?: "turn" | "compaction" | "fork" | "backfill",
   ): Promise<{ lease: Lease | null }>;
   releaseLease(lease: Lease): Promise<void>;
-  append(lease: Lease, entry: NewEntry): Promise<unknown>;
-  upsertProjection?(
-    lease: Lease,
-    marker: string,
-    revision: number,
-    entry: NewEntry,
-  ): Promise<"inserted" | "updated" | "unchanged">;
-  hasProjectionMarker?(sessionId: string, ts: string): Promise<boolean>;
-  getEntries(
-    sessionId: string,
-    opts?: { sinceSeq?: number },
-  ): Promise<ReadonlyArray<{ type: string; payload: unknown }>>;
+  applyProjection(lease: Lease, input: ProjectionApplication): Promise<ProjectionApplicationResult>;
 }
 
 export interface AgentConversationProjectorDeps
@@ -165,6 +154,8 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
     }
     if (!lease) return false;
     const marker = projectionMarker(link, turn);
+    const subscriptionKey = agentConversationLinkId(link);
+    let appliedRevision: number | undefined;
     try {
       if (
         !(await canWriteScope(link.owner, session.scopeId)) ||
@@ -178,22 +169,31 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
           kind: "agent_conversation_projection",
           overheard: true,
           ts: marker,
+          projectionSubscriptionKey: subscriptionKey,
+          projectionTurn: turn,
           projectionRevision,
           name: `signed conversation with ${link.peer ?? "the peer"}`,
           text,
         },
         scopeLabel: link.ownerScopeId,
       };
-      if (sessions.upsertProjection) await sessions.upsertProjection(lease, marker, projectionRevision, entry);
-      else if (projectionRevision > 0) throw new Error("projection session store cannot apply durable revisions");
-      else if (!(await sessions.hasProjectionMarker?.(session.id, marker))) await sessions.append(lease, entry);
+      const application = await sessions.applyProjection(lease, {
+        subscriptionKey,
+        marker,
+        turn,
+        revision: projectionRevision,
+        entry,
+      });
+      if (application.status === "blocked") return false;
+      appliedRevision = application.appliedRevision;
     } finally {
       await sessions.releaseLease(lease);
     }
+    if (appliedRevision !== projectionRevision) return true;
     await deps.deliveries.enqueue({
       destination: { type: "web", target: link.openerThreadRef },
       text: "",
-      idempotencyKey: `zvconv:nudge:${agentConversationLinkId(link)}:${turn}`,
+      idempotencyKey: `zvconv:nudge:${subscriptionKey}:${turn}:${projectionRevision}`,
     });
     return true;
   }
@@ -370,6 +370,10 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
       if (!TEXT_SINKS.has(destination.type)) {
         if (!(await postToSession(link, event.turn, rendered, event.projection_revision)))
           throw new Error(`could not project into the ${destination.type} surface`);
+        await deps.links.advance(
+          link,
+          direction === "in" ? { lastProjectedInTurn: event.turn } : { lastProjectedOutTurn: event.turn },
+        );
         return;
       }
       await deps.deliveries.enqueueProjection({
