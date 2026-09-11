@@ -90,7 +90,8 @@
     "fast-json-stringify": {
       "fast-uri": "4.1.4"
     },
-    "protobufjs": "7.6.5"
+    "protobufjs": "7.6.5",
+    "qs": "^6.16.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
