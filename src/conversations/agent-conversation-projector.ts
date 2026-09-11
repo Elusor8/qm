@@ -56,7 +56,7 @@ export interface AgentConversationProjectorDeps
   destination?: Destination;
 }
 
-export type ProjectionOutcome = "projected" | "undeliverable";
+type ProjectionOutcome = "projected" | "undeliverable";
 
 export interface AgentConversationProjector {
   observe(observation: ProjectionObservation): Promise<void>;

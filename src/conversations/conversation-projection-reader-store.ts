@@ -11,7 +11,7 @@ export interface ProjectionReaderAudience {
   externalPrincipalRef: string;
 }
 
-export interface ProjectionReaderCheckpoint extends ProjectionReaderAudience {
+interface ProjectionReaderCheckpoint extends ProjectionReaderAudience {
   afterCursor: string | null;
   version: number;
   updatedAt: number;
@@ -43,7 +43,7 @@ export interface ProjectionOutboxJob {
   msgId: string;
 }
 
-export interface ProjectionPruneResult {
+interface ProjectionPruneResult {
   expiredOutbox: number;
   deletedSkips: number;
 }

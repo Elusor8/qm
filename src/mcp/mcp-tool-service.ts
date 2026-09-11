@@ -44,7 +44,7 @@ interface McpToolCallOptions {
 }
 
 export class McpReadOnlyError extends Error {}
-export class McpMachineResultTooLargeError extends Error {}
+class McpMachineResultTooLargeError extends Error {}
 
 export interface McpToolService {
   /** Current snapshot of injectable tools across enabled servers. */
