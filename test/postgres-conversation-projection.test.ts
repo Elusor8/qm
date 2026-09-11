@@ -330,12 +330,13 @@ test("Postgres real projector recovers an invisible skipped turn at a higher rev
   const skipped = (await sessions.getEntries(session.id)).find(
     (entry) => (entry.payload as { kind?: string }).kind === "agent_conversation_projection_skip",
   );
-  assert.equal((skipped?.payload as { projectionRevision?: number }).projectionRevision, 1);
+  assert.ok(skipped);
+  assert.equal((skipped.payload as { projectionRevision?: number }).projectionRevision, 1);
   visible = true;
   assert.equal(await projector.projectEvent(event(2), link, link.createdAt), "projected");
   const entries = await createPostgresSessionStore(URL!).getEntries(session.id);
   assert.equal(entries.length, 1);
-  assert.equal(entries[0]!.seq, skipped?.seq);
+  assert.equal(entries[0]!.seq, skipped.seq);
   assert.equal((entries[0]!.payload as { kind?: string }).kind, "agent_conversation_projection");
   assert.equal((entries[0]!.payload as { projectionRevision?: number }).projectionRevision, 2);
   assert.match((entries[0]!.payload as { text?: string }).text ?? "", /visible revision/);

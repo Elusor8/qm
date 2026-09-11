@@ -276,7 +276,8 @@ test("a session turn whose owner lost the session scope is dropped with evidence
   const skipped = (await built.sessions.getEntries(session.id)).find(
     (entry) => (entry.payload as { kind?: string }).kind === "agent_conversation_projection_skip",
   );
-  assert.equal((skipped?.payload as { projectionRevision?: number }).projectionRevision, 1);
+  assert.ok(skipped);
+  assert.equal((skipped.payload as { projectionRevision?: number }).projectionRevision, 1);
   await built.projects.addMember(project.id, "U2", "U1");
   await built.conversationProjection.sweep();
   await built.conversationProjection.sweep();
@@ -288,7 +289,7 @@ test("a session turn whose owner lost the session scope is dropped with evidence
     projections.map((entry) => (entry.payload as { projectionTurn?: number }).projectionTurn),
     [1, 2],
   );
-  assert.equal(projections[0]!.seq, skipped?.seq);
+  assert.equal(projections[0]!.seq, skipped.seq);
   assert.match((projections[0]!.payload as { text: string }).text, /RECOVERED SIGNED OUTBOUND/);
   assert.match((projections[1]!.payload as { text: string }).text, /SIGNED INBOUND/);
   assert.equal((await built.conversationProjection.diagnostics()).outbox.length, 0);
