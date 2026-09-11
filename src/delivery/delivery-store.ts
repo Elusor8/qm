@@ -1,3 +1,4 @@
+import { isConversationDelivery } from "../conversations/conversation-delivery.ts";
 import { randomUUID } from "node:crypto";
 import type { Delivery, DeliveryProvenance, Destination, OutgoingAttachment } from "../types.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
@@ -11,13 +12,28 @@ export interface DeliveryStore {
     idempotencyKey: string;
     shadow?: boolean;
   }): Promise<Delivery>;
-  pending(type: string): Promise<Delivery[]>;
+  enqueueProjection(input: {
+    destination: Destination;
+    text: string;
+    provenance: DeliveryProvenance;
+    idempotencyKey: string;
+    projectionRevision: number;
+  }): Promise<Delivery>;
+  pending(type: string, opts?: { limit: number; readyAt: number }): Promise<Delivery[]>;
+  defer(id: string, until: number): Promise<void>;
   claimPending(type: string, ttlMs: number): Promise<Delivery[]>;
   listShadow(opts?: { limit?: number }): Promise<Delivery[]>;
-  ack(id: string, at: number, slackApiMs?: number): Promise<void>;
+  ack(
+    id: string,
+    at: number,
+    slackApiMs?: number,
+    external?: { messageRef: string; channelRef: string },
+  ): Promise<void>;
   ackByKey(idempotencyKey: string, at: number): Promise<void>;
   setEditRefByKey(idempotencyKey: string, editRef: string): Promise<void>;
   get(id: string): Promise<Delivery | null>;
+  getByKey(idempotencyKey: string): Promise<Delivery | null>;
+  pruneRejectedConversationCopies(cutoff: number): Promise<number>;
   recordRecipientThread(id: string, recipientThreadRef: string, at: number): Promise<void>;
   listByRecipientThread(recipientThreadRef: string, opts?: { limit?: number }): Promise<Delivery[]>;
   listBySourceSession(sourceSessionId: string, sourceThreadRef: string, opts?: { limit?: number }): Promise<Delivery[]>;
@@ -30,6 +46,7 @@ export function createDeliveryStore(): DeliveryStore {
   const deliveries = new Map<string, Delivery>();
   const byKey = new Map<string, string>();
   const claimedUntil = new Map<string, number>();
+  const availableAt = new Map<string, number>();
   const enqueueListeners = new Set<() => void>();
 
   return {
@@ -52,16 +69,73 @@ export function createDeliveryStore(): DeliveryStore {
       if (!delivery.shadow) for (const l of enqueueListeners) l();
       return delivery;
     },
-    async pending(type) {
-      return [...deliveries.values()].filter((d) => d.deliveredAt === null && !d.shadow && d.destination.type === type);
+    async enqueueProjection(input) {
+      const existingId = byKey.get(input.idempotencyKey);
+      const existing = existingId ? deliveries.get(existingId) : undefined;
+      const priorRevision = existing?.provenance?.conversation?.projectionRevision ?? 0;
+      if (existing && priorRevision >= input.projectionRevision) return existing;
+      if (existing) {
+        existing.text = input.text;
+        existing.provenance = input.provenance;
+        existing.deliveredAt = null;
+        claimedUntil.delete(existing.id);
+        availableAt.delete(existing.id);
+        if (existing.externalMessageRef)
+          existing.destination = { ...input.destination, editRef: existing.externalMessageRef };
+        else existing.destination = input.destination;
+        for (const listener of enqueueListeners) listener();
+        return existing;
+      }
+      return this.enqueue(input);
+    },
+    async pending(type, opts) {
+      const rows: Delivery[] = [];
+      const limit = opts ? Math.max(1, Math.min(100, opts.limit)) : Infinity;
+      for (const d of deliveries.values()) {
+        if (
+          d.deliveredAt !== null ||
+          d.shadow ||
+          d.destination.type !== type ||
+          (opts && (availableAt.get(d.id) ?? 0) > opts.readyAt)
+        )
+          continue;
+        rows.push(d);
+        if (opts) {
+          rows.sort(
+            (a, b) =>
+              (availableAt.get(a.id) ?? 0) - (availableAt.get(b.id) ?? 0) ||
+              a.createdAt - b.createdAt ||
+              a.id.localeCompare(b.id),
+          );
+          if (rows.length > limit) rows.pop();
+        }
+      }
+      return rows;
+    },
+    async defer(id, until) {
+      availableAt.set(id, until);
     },
     async claimPending(type, ttlMs) {
       const now = Date.now();
       const rows = [...deliveries.values()].filter(
         (d) =>
-          d.deliveredAt === null && !d.shadow && d.destination.type === type && (claimedUntil.get(d.id) ?? 0) <= now,
+          d.deliveredAt === null &&
+          !d.shadow &&
+          d.destination.type === type &&
+          (claimedUntil.get(d.id) ?? 0) <= now &&
+          ![...deliveries.values()].some(
+            (prior) =>
+              prior.deliveredAt === null &&
+              !prior.shadow &&
+              d.provenance?.conversation?.sideKey &&
+              prior.provenance?.conversation?.sideKey === d.provenance.conversation.sideKey &&
+              (prior.provenance.conversation.turn ?? Infinity) < (d.provenance.conversation.turn ?? -1),
+          ),
       );
-      for (const d of rows) claimedUntil.set(d.id, now + ttlMs);
+      for (const d of rows) {
+        claimedUntil.set(d.id, now + ttlMs);
+        if (isConversationDelivery(d)) d.claimAttempts = (d.claimAttempts ?? 0) + 1;
+      }
       return rows;
     },
     async listShadow(opts) {
@@ -71,12 +145,17 @@ export function createDeliveryStore(): DeliveryStore {
         .sort((a, b) => b.createdAt - a.createdAt)
         .slice(0, limit);
     },
-    async ack(id, at, slackApiMs) {
+    async ack(id, at, slackApiMs, external) {
       const d = deliveries.get(id);
       if (d && d.deliveredAt === null) {
         d.deliveredAt = at;
         d.deliverLatencyMs = Math.max(0, at - d.createdAt);
         if (slackApiMs !== undefined) d.slackApiMs = slackApiMs;
+        if (external) {
+          d.externalMessageRef = external.messageRef;
+          d.externalChannelRef = external.channelRef;
+          d.destination = { ...d.destination, editRef: external.messageRef };
+        }
       }
     },
     async ackByKey(idempotencyKey, at) {
@@ -104,6 +183,33 @@ export function createDeliveryStore(): DeliveryStore {
     },
     async get(id) {
       return deliveries.get(id) ?? null;
+    },
+    async getByKey(idempotencyKey) {
+      const id = byKey.get(idempotencyKey);
+      return id ? (deliveries.get(id) ?? null) : null;
+    },
+    async pruneRejectedConversationCopies(cutoff) {
+      let pruned = 0;
+      for (const delivery of deliveries.values()) {
+        if (
+          !delivery.shadow ||
+          delivery.createdAt >= cutoff ||
+          !delivery.idempotencyKey.startsWith("delivery-failure:") ||
+          delivery.text === '{"expired":true,"kind":"conversation-delivery-rejection"}'
+        )
+          continue;
+        delivery.text = '{"expired":true,"kind":"conversation-delivery-rejection"}';
+        delivery.attachments = undefined;
+        pruned += 1;
+      }
+      const evidence = [...deliveries.values()]
+        .filter((delivery) => delivery.shadow && delivery.idempotencyKey.startsWith("delivery-failure:"))
+        .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
+      for (const delivery of evidence.slice(100)) {
+        deliveries.delete(delivery.id);
+        byKey.delete(delivery.idempotencyKey);
+      }
+      return pruned;
     },
     async recordRecipientThread(id, recipientThreadRef, at) {
       const d = deliveries.get(id);

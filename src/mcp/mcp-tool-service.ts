@@ -15,6 +15,7 @@ import type { McpRuntimeContext, ZipvizSigning } from "./zipviz-runtime-context.
 const REFRESH_INTERVAL_MS = 5 * 60_000;
 const MAX_TOOLS_PER_SERVER = 64;
 const MAX_RESULT_CHARS = 60_000;
+const MAX_MACHINE_RESULT_CHARS = 2_000_000;
 
 export interface McpToolDescriptor {
   /** Namespaced tool name exposed to the model, e.g. "salesforce_query". */
@@ -27,26 +28,30 @@ export interface McpToolDescriptor {
   agentConversations: boolean;
 }
 
-export interface McpRawResult {
-  text: string;
-  structuredContent?: unknown;
+export interface McpCallObservation {
+  name: string;
+  serverId?: string;
+  runtimeContext?: McpRuntimeContext;
+  args: Record<string, unknown>;
   conversationBinding?: { owner: string; mailbox: string; remoteName: string };
 }
 
-export interface McpToolCallOptions {
+interface McpToolCallOptions {
   principalId?: string;
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
-  onRawResult?: (raw: McpRawResult) => void | Promise<void>;
+  onCallStart?: (call: McpCallObservation) => void | Promise<void>;
 }
 
 export class McpReadOnlyError extends Error {}
+class McpMachineResultTooLargeError extends Error {}
 
 export interface McpToolService {
   /** Current snapshot of injectable tools across enabled servers. */
   toolDefs(): McpToolDescriptor[];
   /** Call a namespaced tool. Returns the tool's text output (clamped). */
   call(name: string, args: Record<string, unknown>, options?: McpToolCallOptions): Promise<string>;
+  machineRead(name: string, args: Record<string, unknown>, options: McpToolCallOptions): Promise<string>;
   /** Force a registry re-read + tools/list refresh (admin save path, tests). */
   refresh(): Promise<void>;
   /** Probe a server config without persisting it. Returns its tool names. */
@@ -141,44 +146,64 @@ export function createMcpToolService(opts: {
   timer.unref?.();
   void refresh();
 
+  async function invoke(
+    name: string,
+    args: Record<string, unknown>,
+    options: McpToolCallOptions,
+    machineRead: boolean,
+  ): Promise<string> {
+    const def = snapshot.find((t) => t.name === name);
+    if (!def) throw new Error(`unknown MCP tool: ${name}`);
+    const server = await opts.servers.get(def.serverId);
+    if (!server || !server.enabled) throw new Error(`MCP server ${def.serverId} is not available`);
+    if (machineRead && (!server.zipviz || def.remoteName !== "zipviz_conversation_projection_events"))
+      throw new McpReadOnlyError(`MCP tool ${name} is unavailable to internal machine reads`);
+    try {
+      if (options.readOnly && !machineRead && !server.readOnly)
+        throw new McpReadOnlyError(`MCP tool ${name} is unavailable in read-only turns`);
+      const conversationBinding = server.zipviz
+        ? { owner: server.zipviz.actorPrincipalId, mailbox: server.zipviz.mailbox, remoteName: def.remoteName }
+        : undefined;
+      if (options.onCallStart) {
+        try {
+          await options.onCallStart({
+            name,
+            serverId: def.serverId,
+            runtimeContext: options.runtimeContext ? structuredClone(options.runtimeContext) : undefined,
+            args: structuredClone(args),
+            conversationBinding,
+          });
+        } catch (error) {
+          swallow("MCP projection hint", error);
+        }
+      }
+      const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
+      const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
+      if (machineRead) {
+        if (text.length > MAX_MACHINE_RESULT_CHARS)
+          throw new McpMachineResultTooLargeError(
+            `MCP machine-read result exceeds ${MAX_MACHINE_RESULT_CHARS} characters`,
+          );
+        record("machine-read", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
+        return text;
+      }
+      record("call", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
+      return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
+    } catch (e) {
+      record(
+        machineRead ? "machine-read" : "call",
+        `${def.serverId}/${def.remoteName}`,
+        `error: ${errMessage(e)}`,
+        options.principalId,
+      );
+      throw e;
+    }
+  }
+
   return {
     toolDefs: () => snapshot,
-    async call(name, args, options = {}) {
-      const def = snapshot.find((t) => t.name === name);
-      if (!def) throw new Error(`unknown MCP tool: ${name}`);
-      const server = await opts.servers.get(def.serverId);
-      if (!server || !server.enabled) throw new Error(`MCP server ${def.serverId} is not available`);
-      try {
-        if (options.readOnly && !server.readOnly)
-          throw new McpReadOnlyError(`MCP tool ${name} is unavailable in read-only turns`);
-        const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
-        record("call", `${def.serverId}/${def.remoteName}`, "ok", options.principalId);
-        const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
-        if (options.onRawResult) {
-          try {
-            await options.onRawResult({
-              text,
-              ...(server.zipviz
-                ? {
-                    conversationBinding: {
-                      owner: server.zipviz.actorPrincipalId,
-                      mailbox: server.zipviz.mailbox,
-                      remoteName: def.remoteName,
-                    },
-                  }
-                : {}),
-              ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
-            });
-          } catch (e) {
-            swallow("MCP raw result observer", e);
-          }
-        }
-        return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n[truncated]` : text;
-      } catch (e) {
-        record("call", `${def.serverId}/${def.remoteName}`, `error: ${errMessage(e)}`, options.principalId);
-        throw e;
-      }
-    },
+    call: (name, args, options = {}) => invoke(name, args, options, false),
+    machineRead: (name, args, options) => invoke(name, args, options, true),
     refresh,
     async probe(server) {
       const zipviz = zipvizOf(server);

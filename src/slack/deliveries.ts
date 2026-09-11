@@ -1,3 +1,4 @@
+import { isConversationDelivery } from "../conversations/conversation-delivery.ts";
 import { errMessage, swallow, swallowAs } from "../util/errors.ts";
 import { performance } from "node:perf_hooks";
 import {
@@ -55,7 +56,18 @@ export function createDeliveryPoller(deps: {
   }
 
   const ackDelivery = (id: string, body?: unknown): Promise<void> =>
-    core.ackDelivery(id, body as { recipientThreadRef?: string; slackApiMs?: number } | undefined);
+    core.ackDelivery(
+      id,
+      body as
+        | {
+            recipientThreadRef?: string;
+            slackApiMs?: number;
+            failure?: string;
+            externalMessageRef?: string;
+            externalChannelRef?: string;
+          }
+        | undefined,
+    );
 
   const deliveryTracker = createDeliveryTracker();
 
@@ -68,20 +80,68 @@ export function createDeliveryPoller(deps: {
       );
     };
 
+  async function deliver(
+    delivery: Delivery,
+    opts: Pick<Parameters<typeof deliverWithRetry>[0], "post" | "ack">,
+  ): Promise<void> {
+    const onError = logDeliveryError(delivery.id);
+    if (!isConversationDelivery(delivery))
+      return deliverWithRetry({ ...opts, tracker: deliveryTracker, id: delivery.id, onError });
+    let stage: "post" | "ack" = "post";
+    try {
+      let body: unknown;
+      try {
+        body = await opts.post();
+      } catch (error) {
+        const slack = error as { code?: string; data?: { error?: string } };
+        if (
+          slack.code !== "slack_webapi_platform_error" ||
+          !["msg_too_long", "no_text", "invalid_blocks", "invalid_metadata", "invalid_arguments"].includes(
+            slack.data?.error ?? "",
+          )
+        )
+          throw error;
+        body = { failure: `Slack rejected the conversation projection: ${slack.data!.error}` };
+        onError("post", error, true);
+      }
+      stage = "ack";
+      await opts.ack(body);
+    } catch (error) {
+      onError(stage, error, false);
+    }
+  }
+
+  function conversationPostOptions(delivery: Delivery) {
+    if (!isConversationDelivery(delivery)) return undefined;
+    return {
+      verifyFirst: (delivery.claimAttempts ?? 2) > 1,
+      verifyOldest: String((delivery.createdAt - 5_000) / 1000),
+      maxVerifyPages: 5 * Math.max(1, (delivery.claimAttempts ?? 2) - 1),
+      beforePost: async () => {
+        if (!(await core.authorizeConversationDelivery(delivery.id)))
+          throw new Error("conversation delivery is no longer authorized");
+      },
+    };
+  }
+
   async function deliverToConversations(client: any): Promise<void> {
     for (const d of [...(await fetchDeliveries("slack")), ...(await fetchDeliveries("group"))]) {
       const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
       if (runId && inFlightRuns.has(runId)) continue;
       if (runId && typeof d.createdAt === "number" && Date.now() - d.createdAt < RUN_RECOVERY_GRACE_MS) continue;
       let slackApiMs: number | undefined;
-      await deliverWithRetry({
-        tracker: deliveryTracker,
-        id: d.id,
+      await deliver(d, {
         post: async () => {
           const tPost = performance.now();
           try {
+            if (isConversationDelivery(d) && (d.destination.react || d.destination.delete || d.attachments?.length))
+              throw new Error("conversation projections require a plain message delivery");
             const postClient = d.destination.identity ? clientForIdentity(d.destination.identity) : client;
             const { channel, threadTs } = parseDeliveryTarget(d.destination.target);
+            if (isConversationDelivery(d) && d.destination.editRef) {
+              await postClient.chat.update({ channel, ts: d.destination.editRef, text: toSlackMrkdwn(d.text) });
+              return { externalMessageRef: d.destination.editRef, externalChannelRef: channel };
+            }
             if (d.destination.react) {
               const { failed } = await applyReactions(client, channel, d.destination.react.messageTs, [
                 d.destination.react.emoji,
@@ -233,11 +293,12 @@ export function createDeliveryPoller(deps: {
                     verifyFirst: true,
                     ...(typeof d.createdAt === "number" ? { verifyOldest: String((d.createdAt - 5_000) / 1000) } : {}),
                   }
-                : undefined,
+                : conversationPostOptions(d),
             );
             const root = threadTs ?? (res?.ts ? String(res.ts) : undefined);
             if (root) threads.mark(channel, root, true);
-            if (!d.destination.identity) mirrorSelfPost(channel, res?.ts, text, { sub: threadTs });
+            if (!d.destination.identity && !isConversationDelivery(d))
+              mirrorSelfPost(channel, res?.ts, text, { sub: threadTs });
             if (composedUploadError) {
               await client.chat
                 .postMessage(slackReplyArgs(channel, uploadFailureNote(composedUploadError), root))
@@ -245,13 +306,14 @@ export function createDeliveryPoller(deps: {
             } else {
               await replayAttachments(root);
             }
-            return undefined;
+            return isConversationDelivery(d) && res?.ts
+              ? { externalMessageRef: String(res.ts), externalChannelRef: channel }
+              : undefined;
           } finally {
             slackApiMs = Math.round(performance.now() - tPost);
           }
         },
         ack: (body) => ackDelivery(d.id, mergeSlackApiMs(body, slackApiMs)),
-        onError: logDeliveryError(d.id),
       });
     }
   }
@@ -259,18 +321,27 @@ export function createDeliveryPoller(deps: {
   async function deliverToPrincipals(client: any): Promise<void> {
     for (const d of await fetchDeliveries("principal")) {
       let slackApiMs: number | undefined;
-      await deliverWithRetry({
-        tracker: deliveryTracker,
-        id: d.id,
+      await deliver(d, {
         post: async () => {
           const tPost = performance.now();
           try {
+            if (isConversationDelivery(d) && (d.destination.react || d.destination.delete || d.attachments?.length))
+              throw new Error("conversation projections require a plain message delivery");
             const text = toSlackMrkdwn(stripReactionDirectives(d.text));
             if (!text.trim() && !d.attachments?.length) return undefined;
             const channel = await openConversationFor(client, [d.destination.target]);
             const threadTs = d.destination.threadTs;
+            if (isConversationDelivery(d) && d.destination.editRef) {
+              await client.chat.update({ channel, ts: d.destination.editRef, text: toSlackMrkdwn(d.text) });
+              return {
+                recipientThreadRef: dmThreadRef(channel, threadTs),
+                externalMessageRef: d.destination.editRef,
+                externalChannelRef: channel,
+              };
+            }
             let composedUpload = false;
             let uploadError: unknown;
+            let externalMessageRef: string | undefined;
             if (text.trim() && d.attachments?.length && d.destination.unfurlLinks === undefined) {
               try {
                 const uploaded = await uploadAttachments(
@@ -293,10 +364,13 @@ export function createDeliveryPoller(deps: {
             }
             if (!composedUpload) {
               if (text.trim()) {
-                const posted = await client.chat.postMessage(
-                  slackReplyArgs(channel, text, threadTs, { unfurlLinks: d.destination.unfurlLinks }),
-                );
-                mirrorSelfPost(channel, posted?.ts, text, { kind: "dm", sub: threadTs });
+                const args = slackReplyArgs(channel, text, threadTs, { unfurlLinks: d.destination.unfurlLinks });
+                const posted = isConversationDelivery(d)
+                  ? await postWithVerify(client, { ...args }, d.idempotencyKey, conversationPostOptions(d))
+                  : await client.chat.postMessage(args);
+                if (isConversationDelivery(d) && posted?.ts) externalMessageRef = String(posted.ts);
+                if (!isConversationDelivery(d))
+                  mirrorSelfPost(channel, posted?.ts, text, { kind: "dm", sub: threadTs });
               }
               if (d.attachments?.length && !uploadError) {
                 try {
@@ -322,13 +396,15 @@ export function createDeliveryPoller(deps: {
                 .postMessage(slackReplyArgs(channel, uploadFailureNote(uploadError), threadTs))
                 .catch(swallowAs("slack: post principal upload-failure note", undefined));
             }
-            return { recipientThreadRef: dmThreadRef(channel, threadTs) };
+            return {
+              recipientThreadRef: dmThreadRef(channel, threadTs),
+              ...(externalMessageRef ? { externalMessageRef, externalChannelRef: channel } : {}),
+            };
           } finally {
             slackApiMs = Math.round(performance.now() - tPost);
           }
         },
         ack: (body) => ackDelivery(d.id, mergeSlackApiMs(body, slackApiMs)),
-        onError: logDeliveryError(d.id),
       });
     }
   }

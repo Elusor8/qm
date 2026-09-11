@@ -1,3 +1,4 @@
+import { isConversationDelivery } from "../../conversations/conversation-delivery.ts";
 import type {
   CandidateDestination,
   CommandApprovalGrant,
@@ -187,7 +188,9 @@ export async function recentPrincipalDeliveryNote(
   threadRef: string,
 ): Promise<string> {
   if (!deliveries) return "";
-  const recent = await deliveries.listByRecipientThread(threadRef, { limit: 5 });
+  const recent = (await deliveries.listByRecipientThread(threadRef, { limit: 5 })).filter(
+    (delivery) => !isConversationDelivery(delivery),
+  );
   if (!recent.length) return "";
   const lines = recent.map((d) => {
     const from = d.destination.onBehalfOf ? ` from ${d.destination.onBehalfOf}` : "";

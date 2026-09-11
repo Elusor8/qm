@@ -43,7 +43,7 @@ import { swallow } from "../util/errors.ts";
 import { fileArtifactId, isArtifactPath, type FileArtifactStore } from "../files/file-artifact-store.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { MEMORY_FILE, type MemoryService } from "../memory/memory-service.ts";
-import type { McpToolService, McpToolDescriptor, McpRawResult } from "../mcp/mcp-tool-service.ts";
+import type { McpToolService, McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import type { ReachResolution } from "../resolution/scope-reach.ts";
 import type {
   ControlService,
@@ -409,11 +409,7 @@ export interface ToolContextDeps {
   memoryScopeId?: ScopeId;
   memoryAccess?: { write?: ScopeId; read: ScopeId[] };
   mcp?: McpToolService;
-  onMcpRawResult?: (observation: {
-    name: string;
-    args: Record<string, unknown>;
-    raw: McpRawResult;
-  }) => void | Promise<void>;
+  onMcpCallStart?: NonNullable<Parameters<McpToolService["call"]>[2]>["onCallStart"];
   readOnly?: boolean;
   sessionHistory?: { search(q: string, limit?: number): Promise<string[]> };
   actingSlackUserId?: string;
@@ -915,9 +911,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       return deps.mcp.call(name, args, {
         principalId: deps.createdBy,
         readOnly: deps.readOnly === true,
-        ...(deps.onMcpRawResult
-          ? { onRawResult: (raw: McpRawResult) => deps.onMcpRawResult!({ name, args: structuredClone(args), raw }) }
-          : {}),
+        ...(deps.onMcpCallStart ? { onCallStart: deps.onMcpCallStart } : {}),
         runtimeContext: {
           actorId: deps.createdBy,
           threadRef: deps.threadRef ?? "",

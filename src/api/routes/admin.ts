@@ -1,3 +1,4 @@
+import { listConversationProjectionState, releaseConversationProjectionGap } from "./admin/conversation-projections.ts";
 import { type ApiCtx, type Route } from "./route.ts";
 import {
   getAdminResources,
@@ -60,6 +61,18 @@ const timed =
   };
 
 const routes: ReadonlyArray<Route<ApiCtx>> = [
+  {
+    method: "GET",
+    path: "/v1/admin/conversation-projections",
+    auth: "either",
+    handle: listConversationProjectionState,
+  },
+  {
+    method: "POST",
+    path: "/v1/admin/conversation-projections/release",
+    auth: "either",
+    handle: releaseConversationProjectionGap,
+  },
   { method: "GET", path: "/v1/admin/slack-installation", auth: "either", handle: getSlackInstallation },
   { method: "GET", path: "/v1/admin/slack-emoji", auth: "either", handle: getSlackEmojiList },
   { method: "PUT", path: "/v1/admin/slack-installation", auth: "either", handle: putSlackInstallation },

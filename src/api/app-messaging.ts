@@ -1,3 +1,4 @@
+import { createConversationDeliveryAuthorizer } from "../conversations/conversation-delivery.ts";
 import type { ScopeId } from "../types.ts";
 import { orgId as orgIdOf } from "../config.ts";
 import { parseScopeId, scopeId } from "../types.ts";
@@ -44,6 +45,7 @@ export function createMessagingMethods(
   | "listWebhooks"
   | "setWebhookEnabled"
   | "setWebhookRecipientConsent"
+  | "authorizeConversationDelivery"
   | "pendingDeliveries"
   | "enqueueDelivery"
   | "ingestSurfaceEvents"
@@ -234,6 +236,7 @@ export function createMessagingMethods(
     setWebhookRecipientConsent(id, recipientConsent) {
       return deps.webhooks.setRecipientConsent(id, recipientConsent);
     },
+    authorizeConversationDelivery: createConversationDeliveryAuthorizer({ ...deps, managedGroups: deps.projects }),
     pendingDeliveries(type, claimMs) {
       return claimMs && claimMs > 0 ? deps.deliveries.claimPending(type, claimMs) : deps.deliveries.pending(type);
     },
@@ -338,8 +341,19 @@ export function createMessagingMethods(
       );
       return merged != null;
     },
-    async ackDelivery(id, slackApiMs) {
-      await deps.deliveries.ack(id, Date.now(), slackApiMs);
+    async ackDelivery(id, slackApiMs, failure, external) {
+      if (failure) {
+        const delivery = await deps.deliveries.get(id);
+        if (!delivery || delivery.deliveredAt !== null) return;
+        await deps.deliveries.enqueue({
+          destination: delivery.destination,
+          provenance: delivery.provenance,
+          text: JSON.stringify({ failure, delivery }),
+          idempotencyKey: `delivery-failure:${id}`,
+          shadow: true,
+        });
+      }
+      await deps.deliveries.ack(id, Date.now(), slackApiMs, external);
     },
     async ackDeliveryByKey(idempotencyKey) {
       await deps.deliveries.ackByKey(idempotencyKey, Date.now());

@@ -30,8 +30,10 @@ import type {
 import { tsPrefixQuery } from "./entry-search.ts";
 import {
   LEGACY_CRON_ID_PATTERN,
+  isProjectionSkipPayload,
   legacyOriginPattern,
   ORIGIN_ALTERNATION,
+  projectionSkipEntry,
   promptEnvelopeBody,
   sessionOrigin,
   STABLE_CRON_ID_PATTERN,
@@ -211,6 +213,10 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     `CREATE TABLE IF NOT EXISTS session_leases(
         session_id TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at BIGINT NOT NULL
       )`,
+    `CREATE TABLE IF NOT EXISTS session_projection_progress(
+        session_id TEXT NOT NULL, subscription_key TEXT NOT NULL, contiguous_turn INT NOT NULL, updated_at BIGINT NOT NULL,
+        PRIMARY KEY(session_id, subscription_key)
+      )`,
     `ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS holder TEXT`,
     `ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS acquired_at BIGINT`,
     `CREATE TABLE IF NOT EXISTS session_tape(
@@ -261,6 +267,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     `CREATE INDEX IF NOT EXISTS sessions_by_activity ON sessions((COALESCE(last_activity, created_at)) DESC, id DESC)`,
     `CREATE INDEX IF NOT EXISTS sessions_by_scope_activity
         ON sessions(scope_id, (COALESCE(last_activity, created_at)) DESC, id DESC)`,
+    `CREATE INDEX IF NOT EXISTS session_entries_projection_marker ON session_entries(session_id, ((payload::jsonb)->>'ts')) WHERE type = 'user' AND payload LIKE '%zvconv:%'`,
     `CREATE INDEX IF NOT EXISTS session_entries_user_ts ON session_entries(created_at) WHERE type = 'user'`,
     `CREATE INDEX IF NOT EXISTS session_entries_session_created ON session_entries(session_id, created_at DESC)`,
     `CREATE OR REPLACE FUNCTION entry_search_text(payload text) RETURNS text
@@ -479,6 +486,143 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
       });
     },
 
+    async applyProjection(lease, input) {
+      return withLease(lease, "projection upsert without a valid session lease", async (client) => {
+        const progress = await client.query(
+          `SELECT contiguous_turn FROM session_projection_progress
+           WHERE session_id=$1 AND subscription_key=$2 FOR UPDATE`,
+          [lease.sessionId, input.subscriptionKey],
+        );
+        const markerRows = await client.query(
+          `SELECT (payload::jsonb)->>'ts' AS marker FROM session_entries
+           WHERE session_id=$1 AND type='user' AND payload LIKE '%zvconv:%'`,
+          [lease.sessionId],
+        );
+        const prefix = `zvconv:${input.subscriptionKey}:`;
+        const appliedTurns = new Set<number>();
+        for (const row of markerRows.rows) {
+          const marker = String(row.marker ?? "");
+          if (!marker.startsWith(prefix)) continue;
+          const turn = Number(marker.slice(prefix.length));
+          if (Number.isInteger(turn) && turn > 0) appliedTurns.add(turn);
+        }
+        let contiguousTurn = progress.rows[0] ? Number(progress.rows[0].contiguous_turn) : 0;
+        while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
+        await client.query(
+          `INSERT INTO session_projection_progress(session_id,subscription_key,contiguous_turn,updated_at)
+           VALUES($1,$2,$3,$4) ON CONFLICT(session_id,subscription_key) DO UPDATE SET
+             contiguous_turn=GREATEST(session_projection_progress.contiguous_turn,EXCLUDED.contiguous_turn),
+             updated_at=EXCLUDED.updated_at`,
+          [lease.sessionId, input.subscriptionKey, contiguousTurn, now()],
+        );
+        const existing = await client.query(
+          `SELECT seq, payload, (payload::jsonb)->>'projectionRevision' AS projection_revision FROM session_entries
+           WHERE session_id = $1 AND type = 'user' AND payload LIKE '%zvconv:%'
+             AND (payload::jsonb)->>'ts' = $2 FOR UPDATE`,
+          [lease.sessionId, input.marker],
+        );
+        if (existing.rows[0]) {
+          const prior = Number(existing.rows[0].projection_revision ?? 0);
+          const skipped = isProjectionSkipPayload(JSON.parse(String(existing.rows[0].payload)));
+          if (skipped && !input.entry && input.revision > prior) {
+            const skip = projectionSkipEntry(input);
+            await client.query("UPDATE session_entries SET payload=$3,scope_label=$4 WHERE session_id=$1 AND seq=$2", [
+              lease.sessionId,
+              existing.rows[0].seq,
+              jsonbSafeStringify(skip.payload),
+              skip.scopeLabel,
+            ]);
+            return {
+              status: "skipped" as const,
+              appliedRevision: input.revision,
+              contiguousTurn,
+            };
+          }
+          if (skipped && (!input.entry || prior >= input.revision))
+            return { status: "skipped" as const, appliedRevision: prior, contiguousTurn };
+          if (prior >= input.revision || !input.entry)
+            return { status: "unchanged" as const, appliedRevision: prior, contiguousTurn };
+          await client.query("UPDATE session_entries SET payload=$3, scope_label=$4 WHERE session_id=$1 AND seq=$2", [
+            lease.sessionId,
+            existing.rows[0].seq,
+            jsonbSafeStringify(input.entry.payload ?? null),
+            input.entry.scopeLabel,
+          ]);
+          return { status: "updated" as const, appliedRevision: input.revision, contiguousTurn };
+        }
+        if (!input.entry) {
+          if (input.turn > contiguousTurn + 1) return { status: "blocked" as const, contiguousTurn };
+          let skippedTurn = Math.max(contiguousTurn, input.turn);
+          if (input.turn === contiguousTurn + 1) {
+            const max = await client.query(
+              "SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM session_entries WHERE session_id = $1",
+              [lease.sessionId],
+            );
+            const seq = Number(max.rows[0]!.n);
+            const skip = projectionSkipEntry(input);
+            await client.query(
+              "INSERT INTO session_entries(session_id,seq,parent_seq,type,payload,scope_label,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",
+              [
+                lease.sessionId,
+                seq,
+                seq === 0 ? null : seq - 1,
+                skip.type,
+                jsonbSafeStringify(skip.payload),
+                skip.scopeLabel,
+                now(),
+              ],
+            );
+            await client.query(
+              `UPDATE sessions SET last_activity=GREATEST(COALESCE(last_activity,0),$2),messages=$3 WHERE id=$1`,
+              [lease.sessionId, now(), seq + 1],
+            );
+          }
+          while (appliedTurns.has(skippedTurn + 1)) skippedTurn += 1;
+          await client.query(
+            `UPDATE session_projection_progress SET contiguous_turn=$3,updated_at=$4
+             WHERE session_id=$1 AND subscription_key=$2`,
+            [lease.sessionId, input.subscriptionKey, skippedTurn, now()],
+          );
+          return { status: "skipped" as const, appliedRevision: input.revision, contiguousTurn: skippedTurn };
+        }
+        if (input.turn !== contiguousTurn + 1) return { status: "blocked" as const, contiguousTurn };
+        const max = await client.query(
+          "SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM session_entries WHERE session_id = $1",
+          [lease.sessionId],
+        );
+        const seq = Number(max.rows[0]!.n);
+        const stored = jsonbSafeStringify(input.entry.payload ?? null);
+        await client.query(
+          "INSERT INTO session_entries(session_id, seq, parent_seq, type, payload, scope_label, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+          [lease.sessionId, seq, seq === 0 ? null : seq - 1, input.entry.type, stored, input.entry.scopeLabel, now()],
+        );
+        appliedTurns.add(input.turn);
+        while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
+        await client.query(
+          `UPDATE session_projection_progress SET contiguous_turn=$3,updated_at=$4
+           WHERE session_id=$1 AND subscription_key=$2`,
+          [lease.sessionId, input.subscriptionKey, contiguousTurn, now()],
+        );
+        await client.query(
+          `UPDATE sessions SET last_activity = GREATEST(COALESCE(last_activity, 0), $2), messages = $3
+           WHERE id = $1`,
+          [lease.sessionId, now(), seq + 1],
+        );
+        return { status: "inserted" as const, appliedRevision: input.revision, contiguousTurn };
+      });
+    },
+
+    async hasProjectionMarker(sessionId, ts) {
+      return (
+        (
+          await q(
+            "SELECT 1 FROM session_entries WHERE session_id = $1 AND type = 'user' AND payload LIKE '%zvconv:%' AND (payload::jsonb)->>'ts' = $2 LIMIT 1",
+            [sessionId, ts],
+          )
+        ).length > 0
+      );
+    },
+
     async clearSecurityTaint(sessionId) {
       const updated = await q(
         "UPDATE session_entries SET payload = (payload::jsonb - 'securityTainted')::text " +
@@ -665,6 +809,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         await lockSession(client, sessionId);
         await client.query("DELETE FROM session_llm_requests WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM session_leases WHERE session_id = $1", [sessionId]);
+        await client.query("DELETE FROM session_projection_progress WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM participants WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM session_entries WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM session_tape WHERE session_id = $1", [sessionId]);
@@ -684,6 +829,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         );
         if (gone.rowCount === 0) return false;
         await client.query("DELETE FROM session_llm_requests WHERE session_id = $1", [sessionId]);
+        await client.query("DELETE FROM session_projection_progress WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM session_leases WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM participants WHERE session_id = $1", [sessionId]);
         await client.query("DELETE FROM session_tape WHERE session_id = $1", [sessionId]);

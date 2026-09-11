@@ -66,3 +66,62 @@ test(
     await oldTask.ack(queued.id, 111);
   },
 );
+
+test("pg conversation delivery attempts survive an expired lease and a new store", { skip }, async () => {
+  const writer = createPostgresDeliveryStore(URL!);
+  const queued = await writer.enqueue({
+    destination: { type: "principal", target: "U1" },
+    text: "conversation",
+    idempotencyKey: "zvconv:pg-recovery:2",
+  });
+  const first = await writer.claimPending("principal", 0);
+  assert.equal(first.find((d) => d.id === queued.id)?.claimAttempts, 1);
+  const reader = createPostgresDeliveryStore(URL!);
+  const replay = await reader.claimPending("principal", 15_000);
+  assert.equal(replay.find((d) => d.id === queued.id)?.claimAttempts, 2);
+  await reader.ack(queued.id, Date.now());
+  assert.equal(
+    (await writer.pending("principal")).some((d) => d.id === queued.id),
+    false,
+  );
+});
+
+test("pg retry eligibility survives a fresh store", { skip }, async () => {
+  const writer = createPostgresDeliveryStore(URL!);
+  const row = await writer.enqueue({
+    destination: { type: "retry-test", target: "U1" },
+    text: "retry",
+    idempotencyKey: "retry-persist",
+  });
+  const until = Date.now() + 60_000;
+  await writer.defer(row.id, until);
+  const reader = createPostgresDeliveryStore(URL!);
+  assert.deepEqual(await reader.pending("retry-test", { limit: 32, readyAt: until - 1 }), []);
+  assert.equal((await reader.pending("retry-test", { limit: 32, readyAt: until }))[0]?.id, row.id);
+  await reader.ack(row.id, Date.now());
+});
+
+test("pg rejected conversation copies expire content across store instances", { skip }, async () => {
+  const writer = createPostgresDeliveryStore(URL!);
+  const rejected = await writer.enqueue({
+    destination: { type: "slack", target: "C1" },
+    text: JSON.stringify({ failure: "invalid_blocks", body: "sensitive body" }),
+    attachments: [{ name: "sensitive.txt", mimetype: "text/plain", sizeBytes: 9, blobId: "sensitive-blob" }],
+    idempotencyKey: "delivery-failure:pg-expiry",
+    shadow: true,
+    provenance: {
+      trigger: "conversation",
+      surface: "slack",
+      fireKey: "event-pg-expiry",
+      sourceScopeId: "channel:C1",
+      sourceThreadRef: "slack:C1:1",
+    },
+  });
+
+  assert.equal(await writer.pruneRejectedConversationCopies(rejected.createdAt + 1), 1);
+  const retained = await createPostgresDeliveryStore(URL!).get(rejected.id);
+  assert.equal(retained?.deliveredAt, null);
+  assert.equal(retained?.provenance?.fireKey, "event-pg-expiry");
+  assert.equal(retained?.text, '{"expired":true,"kind":"conversation-delivery-rejection"}');
+  assert.equal(retained?.attachments, undefined);
+});

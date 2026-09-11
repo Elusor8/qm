@@ -313,6 +313,10 @@ class FakeCore implements SlackCoreClient {
   async pushDirectory(body: any): Promise<void> {
     this.directories.push(body);
   }
+  async authorizeConversationDelivery(): Promise<boolean> {
+    return false;
+  }
+
   async claimDeliveries(): Promise<[]> {
     return [];
   }

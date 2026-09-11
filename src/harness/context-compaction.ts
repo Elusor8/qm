@@ -65,12 +65,21 @@ export function compactedScopeLabel(
   return labels.includes(sessionScopeId) ? sessionScopeId : orgScopeId;
 }
 
+export function isHumanOnlyEntry(entry: SessionEntry): boolean {
+  const payload = entry.payload as { kind?: unknown; ts?: unknown } | null;
+  return (
+    payload?.kind === "agent_conversation_projection" ||
+    (entry.type === "user" && typeof payload?.ts === "string" && payload.ts.startsWith("zvconv:"))
+  );
+}
+
 export function forModelContext(
   entries: SessionEntry[],
   opts: { includeSecurityTainted?: boolean } = {},
 ): SessionEntry[] {
   const replayable = entries.filter(
     (e) =>
+      !isHumanOnlyEntry(e) &&
       e.type !== "thinking" &&
       e.type !== "text" &&
       e.type !== "soul" &&
@@ -127,14 +136,14 @@ export function recentEntryCountWithinBudget(history: SessionEntry[], maxCount: 
 
 export function compactTranscript(history: SessionEntry[]): string {
   const resultByCallId = new Map<string, true>();
-  for (const entry of history) {
+  for (const entry of history.filter((entry) => !isHumanOnlyEntry(entry))) {
     if (entry.type !== "tool_result") continue;
     const cid = (entry.payload as { callId?: unknown } | null)?.callId;
     if (typeof cid === "string" && cid) resultByCallId.set(cid, true);
   }
   const lines: string[] = [];
   const push = (line: string) => lines.push(capCompactLine(line));
-  for (const entry of history) {
+  for (const entry of history.filter((entry) => !isHumanOnlyEntry(entry))) {
     const summary = contextSummaryPayload(entry);
     if (summary) {
       push(`Prior summary through seq ${summary.throughSeq}: ${summary.text}`);

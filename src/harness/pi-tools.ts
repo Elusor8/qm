@@ -1239,7 +1239,9 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
         return recordResult(
           callId,
           { tool: "background", action: params.action, readOnly: true },
-          text("[this is a read-only wake — background jobs can be polled and listed here, but not started, written to, stopped, or watched]"),
+          text(
+            "[this is a read-only wake — background jobs can be polled and listed here, but not started, written to, stopped, or watched]",
+          ),
           true,
         );
       }

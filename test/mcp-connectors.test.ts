@@ -168,136 +168,68 @@ test("marks ZipViz-bound tools as observable, and only those", async () => {
   assert.equal(defs.find((d) => d.name === "crm_query")?.agentConversations, false);
 });
 
-test("onRawResult sees the untruncated result while the model's view stays clamped", async () => {
-  const long = "x".repeat(70_000);
-  const fetch: McpFetch = async (_url, init) => {
-    const req = JSON.parse(init.body) as { id: number; method: string };
-    return jsonResponse({
-      jsonrpc: "2.0",
-      id: req.id,
-      result: req.method === "tools/list" ? { tools: TOOLS } : { content: [{ type: "text", text: long }] },
-    });
-  };
+test("a projection hint failure never refuses remote dispatch", async (t) => {
+  const { fetch, calls } = fakeServerFetch();
   const store = createMcpServerStore(createMemoryMap());
-  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
+  const service = createMcpToolService({ servers: store, fetchImpl: fetch });
+  t.after(() => service.close());
   await store.put(server());
   await service.refresh();
-
-  let raw: { text: string } | undefined;
+  const count = calls.length;
   const out = await service.call(
     "crm_query",
     {},
     {
-      onRawResult: (r) => {
-        raw = r;
-      },
-    },
-  );
-
-  assert.equal(raw?.text.length, 70_000, "the observer must see the whole result");
-  assert.ok(out.length < 70_000, "the model's view is still bounded");
-  assert.ok(out.endsWith("[truncated]"));
-});
-
-test("an observer whose promise rejects cannot fail the tool call", async () => {
-  const { fetch } = fakeServerFetch();
-  const store = createMcpServerStore(createMemoryMap());
-  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
-  await store.put(server());
-  await service.refresh();
-
-  const unhandled: unknown[] = [];
-  const onUnhandled = (reason: unknown) => unhandled.push(reason);
-  process.on("unhandledRejection", onUnhandled);
-  try {
-    const out = await service.call(
-      "crm_query",
-      {},
-      { onRawResult: async () => Promise.reject(new Error("async boom")) },
-    );
-    assert.equal(out, "ran query");
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(unhandled, []);
-  } finally {
-    process.off("unhandledRejection", onUnhandled);
-  }
-});
-
-test("an observer that throws cannot fail the tool call", async () => {
-  const { fetch } = fakeServerFetch();
-  const store = createMcpServerStore(createMemoryMap());
-  const service = createMcpToolService({ servers: store, fetchImpl: fetch, refreshIntervalMs: 3600_000 });
-  await store.put(server());
-  await service.refresh();
-
-  const out = await service.call(
-    "crm_query",
-    {},
-    {
-      onRawResult: () => {
-        throw new Error("projector exploded");
+      onCallStart: async () => {
+        throw new Error("projection database unavailable");
       },
     },
   );
   assert.equal(out, "ran query");
+  assert.equal(calls.length, count + 1);
 });
 
-test("raw capture finishes before the bounded result returns and carries the actual signed server binding", async (t) => {
-  const { createToolContext } = await import("../src/tools/primitives.ts");
-  const binding = {
-    mailbox: "alice.example.viz",
-    actorPrincipalId: "U1",
-    actorExternalId: "alice",
-    adapterKind: "https://example.invalid/adapter",
-    adapterInstance: "fixture",
+test("authorized machine reads preserve large projection pages while model calls stay clamped", async (t) => {
+  const body = "x".repeat(70_000);
+  const page = JSON.stringify({ events: [{ body }, { body: "second" }], skipped: [], has_more: false });
+  const fetch: McpFetch = async (_url, init) => {
+    const request = JSON.parse(init.body) as { id: number; method: string; params?: { name?: string } };
+    const result =
+      request.method === "tools/list"
+        ? { tools: [{ name: "zipviz_conversation_projection_events", inputSchema: { type: "object" } }] }
+        : { content: [{ type: "text", text: page }] };
+    return jsonResponse({ jsonrpc: "2.0", id: request.id, result });
   };
-  const store = createMcpServerStore(createMemoryMap());
-  await store.put(server({ readOnly: false, zipviz: binding }));
-  const rawText = JSON.stringify({ committed: true, body: "x".repeat(70_000) });
+  const store = createMcpServerStore(createMemoryMap<McpServer>());
   const service = createMcpToolService({
     servers: store,
-    signingSecret: "local-fixture",
-    fetchImpl: async (_url, init) => {
-      const request = JSON.parse(init.body);
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id: request.id,
-        result: request.method === "tools/list" ? { tools: TOOLS } : { content: [{ type: "text", text: rawText }] },
-      });
-    },
+    fetchImpl: fetch,
+    signingSecret: "x".repeat(32),
+    refreshIntervalMs: 3600_000,
   });
   t.after(() => service.close());
+  await store.put(
+    server({
+      id: "zipviz",
+      readOnly: false,
+      zipviz: {
+        mailbox: "alice.example.viz",
+        adapterKind: "https://example.invalid/adapter",
+        adapterInstance: "qm",
+        actorExternalId: "alice",
+        actorPrincipalId: "U1",
+      },
+    }),
+  );
   await service.refresh();
-  let stored = false;
-  const ctx = createToolContext({
-    sandbox: {} as never,
-    provision: async () => {
-      throw new Error("no sandbox");
-    },
-    layers: [],
-    commandPolicy: () => ({ mode: "denylist", rules: [] }),
-    authorizeCommand: () => false,
-    grantedHandles: [],
-    workspace: {} as never,
-    deploy: {} as never,
-    acl: {} as never,
-    createdBy: "U1",
-    threadRef: "opener",
-    runId: "run",
-    mcp: service,
-    onMcpRawResult: async (observation) => {
-      assert.equal(observation.raw.text, rawText);
-      assert.deepEqual(observation.raw.conversationBinding, {
-        owner: "U1",
-        mailbox: binding.mailbox,
-        remoteName: "query",
-      });
-      assert.deepEqual(observation.args, { mailbox: binding.mailbox });
-      await new Promise((resolve) => setImmediate(resolve));
-      stored = true;
-    },
-  });
-  const output = await ctx.callMcpTool("crm_query", { mailbox: binding.mailbox });
-  assert.equal(stored, true);
-  assert.ok(output.endsWith("[truncated]"));
+  const options = {
+    principalId: "U1",
+    runtimeContext: { actorId: "U1", threadRef: "slack:C1:1", nativeEventId: "projection-read" },
+  };
+  const machine = await service.machineRead("zipviz_zipviz_conversation_projection_events", {}, options);
+  assert.equal(JSON.parse(machine).events[0].body.length, 70_000);
+  const model = await service.call("zipviz_zipviz_conversation_projection_events", {}, options);
+  assert.equal(model.length, 60_012);
+  assert.match(model, /\[truncated\]$/);
+  assert.throws(() => JSON.parse(model));
 });

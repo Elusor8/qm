@@ -1,3 +1,4 @@
+import type { AgentConversationProjectionService } from "../conversations/agent-conversation-projection-service.ts";
 import type { ModelProvider, ModelProviderAvailability } from "../model/pi-models.ts";
 import type { ModelCredentialStore } from "../model/model-credential-store.ts";
 import type { UserModelCredentialStore } from "../model/user-model-credential-store.ts";
@@ -91,6 +92,7 @@ export interface ServerDeps {
   userModelCredentials?: UserModelCredentialStore;
   mcpServers?: McpServerStore;
   mcpToolService?: McpToolService;
+  conversationProjection?: AgentConversationProjectionService;
   modelCredentialFetch?: typeof fetch;
   customProviders?: CustomProviderStore;
   refreshCustomProviders?: () => Promise<void>;

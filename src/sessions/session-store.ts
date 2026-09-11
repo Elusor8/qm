@@ -424,6 +424,42 @@ export function isOverheardEntry(e: Pick<SessionEntry, "type" | "payload">): boo
   return e.type === "user" && (e.payload as { overheard?: unknown } | null)?.overheard === true;
 }
 
+export interface ProjectionApplication {
+  subscriptionKey: string;
+  marker: string;
+  turn: number;
+  revision: number;
+  scopeLabel: ScopeId;
+  entry?: NewEntry;
+}
+
+export function projectionSkipEntry(input: ProjectionApplication): NewEntry {
+  return {
+    type: "user",
+    payload: {
+      kind: "agent_conversation_projection_skip",
+      overheard: true,
+      ts: input.marker,
+      projectionSubscriptionKey: input.subscriptionKey,
+      projectionTurn: input.turn,
+      projectionRevision: input.revision,
+      name: "",
+      text: "",
+    },
+    scopeLabel: input.scopeLabel,
+  };
+}
+
+export function isProjectionSkipPayload(payload: unknown): boolean {
+  return (payload as { kind?: unknown } | null)?.kind === "agent_conversation_projection_skip";
+}
+
+export interface ProjectionApplicationResult {
+  status: "inserted" | "updated" | "unchanged" | "blocked" | "skipped";
+  appliedRevision?: number;
+  contiguousTurn: number;
+}
+
 interface AddParticipantOptions {
   includeHistory?: boolean;
 }
@@ -450,7 +486,9 @@ export interface SessionStore {
   forceReleaseLease(sessionId: string): Promise<void>;
 
   append(lease: Lease, entry: NewEntry): Promise<SessionEntry>;
+  applyProjection(lease: Lease, input: ProjectionApplication): Promise<ProjectionApplicationResult>;
   getEntries(sessionId: string, opts?: GetEntriesOptions): Promise<SessionEntry[]>;
+  hasProjectionMarker(sessionId: string, ts: string): Promise<boolean>;
   clearSecurityTaint(sessionId: string): Promise<boolean>;
 
   appendTape(lease: Lease, rec: NewTapeRecord): Promise<TapeRecord>;

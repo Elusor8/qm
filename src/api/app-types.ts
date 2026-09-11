@@ -363,6 +363,7 @@ export interface App {
   listWebhooks(): Promise<Webhook[]>;
   setWebhookEnabled(id: string, enabled: boolean): Promise<void>;
   setWebhookRecipientConsent(id: string, recipientConsent: RecipientConsent): Promise<void>;
+  authorizeConversationDelivery(id: string): Promise<boolean>;
   pendingDeliveries(type: string, claimMs?: number): Promise<Delivery[]>;
   enqueueDelivery(input: { destination: Destination; text: string; idempotencyKey: string }): Promise<void>;
   createContextRequest(source: string, query: SurfaceContextQuery): Promise<SurfaceContextRequest>;
@@ -394,7 +395,12 @@ export interface App {
     container: string,
     opts?: { reason?: "messages" | "scheduled" },
   ): Promise<AmbientDecision>;
-  ackDelivery(id: string, slackApiMs?: number): Promise<void>;
+  ackDelivery(
+    id: string,
+    slackApiMs?: number,
+    failure?: string,
+    external?: { messageRef: string; channelRef: string },
+  ): Promise<void>;
   ackDeliveryByKey(idempotencyKey: string): Promise<void>;
   setRunDeliveryState(runId: string, state: RunDeliveryState): Promise<boolean>;
   upsertDirectory(members: DirectoryMember[], syncedAt?: number): Promise<void>;

@@ -1,3 +1,4 @@
+import type { AgentConversationProjectionService } from "../../conversations/agent-conversation-projection-service.ts";
 import type {
   CommandApprovalGrant,
   Conversation,
@@ -133,6 +134,7 @@ export interface OrchestratorDeps {
   admin?: AdminService;
   memory: MemoryService;
   mcp?: McpToolService;
+  conversationProjection?: AgentConversationProjectionService;
   memoryPolicy?: MemoryPolicy;
   memoryStrategy?: MemoryStrategy;
   skills?: SkillStore;

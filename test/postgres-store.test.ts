@@ -1410,3 +1410,21 @@ test("pg deleteSessionIfEmpty: a held lease or landed entries refuse the discard
   assert.equal(Number(orphans.rows[0].e), 0, "no orphaned entries survive the discard");
   assert.equal(Number(orphans.rows[0].l), 0, "no orphaned lease survives the discard");
 });
+
+test("pg projection markers are found without loading transcript history", { skip }, async () => {
+  const store = createPostgresSessionStore(URL!);
+  const session = await store.getOrCreateByThread("projection-marker", "dm", "personal:U1", undefined, "web");
+  const { lease } = await store.acquireLease(session.id, "backfill");
+  assert.ok(lease);
+  const marker = 'zvconv:["alice.example.viz","U1","conv-1"]:1';
+  assert.equal(await store.hasProjectionMarker(session.id, marker), false);
+  await store.append(lease, {
+    type: "user",
+    scopeLabel: "personal:U1",
+    payload: { kind: "agent_conversation_projection", overheard: true, ts: marker, text: "projected" },
+  });
+  await store.releaseLease(lease);
+  const reader = createPostgresSessionStore(URL!);
+  assert.equal(await reader.hasProjectionMarker(session.id, marker), true);
+  assert.equal(await reader.hasProjectionMarker(session.id, marker + "0"), false);
+});

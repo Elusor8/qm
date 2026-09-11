@@ -23,7 +23,9 @@ import type {
 import { entrySearchAuthor, entrySearchText, matchesSearchTerms, searchTerms } from "./entry-search.ts";
 import {
   cronIdOf,
+  isProjectionSkipPayload,
   isOverheardEntry,
+  projectionSkipEntry,
   promptEnvelopeBody,
   sessionBucket,
   sessionCategory,
@@ -45,6 +47,7 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
   const tape = new Map<string, TapeRecord[]>();
   const llmRequests = new Map<string, LlmRequestRecord[]>();
   const promptEnvelopes = new Map<string, string>();
+  const projectionProgress = new Map<string, number>();
   const byThread = new Map<string, string>();
   const participants = new Map<string, Set<string>>();
   const windows = new Map<
@@ -146,6 +149,8 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       llmRequests.delete(sessionId);
       windows.delete(sessionId);
       leases.delete(sessionId);
+      for (const key of projectionProgress.keys())
+        if (key.startsWith(`${sessionId}\u0000`)) projectionProgress.delete(key);
     },
 
     async deleteSessionIfEmpty(sessionId) {
@@ -183,11 +188,72 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       return full;
     },
 
+    async applyProjection(lease, input) {
+      const held = leases.get(lease.sessionId);
+      if (!held || held.token !== lease.token) throw new Error("projection upsert without a valid session lease");
+      held.expiresAt = now() + leaseTtlMs;
+      const log = entries.get(lease.sessionId);
+      if (!log) throw new Error(`unknown session: ${lease.sessionId}`);
+      const progressKey = `${lease.sessionId}\u0000${input.subscriptionKey}`;
+      const prefix = `zvconv:${input.subscriptionKey}:`;
+      const appliedTurns = new Set(
+        log.flatMap((row) => {
+          const marker = (row.payload as { ts?: unknown } | null)?.ts;
+          if (typeof marker !== "string" || !marker.startsWith(prefix)) return [];
+          const turn = Number(marker.slice(prefix.length));
+          return Number.isInteger(turn) && turn > 0 ? [turn] : [];
+        }),
+      );
+      let contiguousTurn = projectionProgress.get(progressKey) ?? 0;
+      while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
+      projectionProgress.set(progressKey, contiguousTurn);
+      const existing = log.find(
+        (row) => row.type === "user" && (row.payload as { ts?: unknown } | null)?.ts === input.marker,
+      );
+      if (existing) {
+        const prior = Number((existing.payload as { projectionRevision?: unknown } | null)?.projectionRevision ?? 0);
+        const skipped = isProjectionSkipPayload(existing.payload);
+        if (skipped && !input.entry && input.revision > prior) {
+          const skip = projectionSkipEntry(input);
+          existing.payload = structuredClone(skip.payload);
+          existing.scopeLabel = skip.scopeLabel as ScopeId;
+          return { status: "skipped", appliedRevision: input.revision, contiguousTurn };
+        }
+        if (skipped && (!input.entry || prior >= input.revision))
+          return { status: "skipped", appliedRevision: prior, contiguousTurn };
+        if (prior >= input.revision || !input.entry)
+          return { status: "unchanged", appliedRevision: prior, contiguousTurn };
+        existing.payload = structuredClone(input.entry.payload);
+        existing.scopeLabel = input.entry.scopeLabel as ScopeId;
+        return { status: "updated", appliedRevision: input.revision, contiguousTurn };
+      }
+      if (!input.entry) {
+        if (input.turn > contiguousTurn + 1) return { status: "blocked", contiguousTurn };
+        if (input.turn === contiguousTurn + 1) await this.append(lease, projectionSkipEntry(input));
+        contiguousTurn = Math.max(contiguousTurn, input.turn);
+        while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
+        projectionProgress.set(progressKey, contiguousTurn);
+        return { status: "skipped", appliedRevision: input.revision, contiguousTurn };
+      }
+      if (input.turn !== contiguousTurn + 1) return { status: "blocked", contiguousTurn };
+      await this.append(lease, input.entry);
+      appliedTurns.add(input.turn);
+      while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
+      projectionProgress.set(progressKey, contiguousTurn);
+      return { status: "inserted", appliedRevision: input.revision, contiguousTurn };
+    },
+
     async getEntries(sessionId, opts?: GetEntriesOptions) {
       const log = entries.get(sessionId) ?? [];
       const since = opts?.sinceSeq ?? 0;
       const filtered = log.filter((e) => e.seq >= since);
       return opts?.limit !== undefined ? filtered.slice(-opts.limit) : filtered;
+    },
+
+    async hasProjectionMarker(sessionId, ts) {
+      return (entries.get(sessionId) ?? []).some(
+        (entry) => entry.type === "user" && (entry.payload as { ts?: unknown } | null)?.ts === ts,
+      );
     },
 
     async clearSecurityTaint(sessionId) {
