@@ -188,6 +188,7 @@ export function createAgentConversationProjector(deps: AgentConversationProjecto
         marker,
         turn,
         revision: projectionRevision,
+        scopeLabel: link.ownerScopeId,
         ...(entry ? { entry } : {}),
       });
       if (application.status === "blocked") return false;

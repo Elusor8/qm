@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { before, test } from "node:test";
+import { createAgentConversationLinkStore } from "../src/conversations/agent-conversation-link-store.ts";
+import { createAgentConversationProjector } from "../src/conversations/agent-conversation-projector.ts";
+import type { ConversationProjectionEvent } from "../src/conversations/conversation-projection-event.ts";
 import {
   createPostgresProjectionReaderStore,
   projectionReaderAudienceKey,
   retireLegacyConversationProjection,
 } from "../src/conversations/conversation-projection-reader-store.ts";
 import { createPgPool } from "../src/persistence/pg-pool.ts";
+import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
 import { createPostgresSessionStore } from "../src/sessions/postgres-session-store.ts";
 import { scopeId } from "../src/types.ts";
 
@@ -188,6 +192,7 @@ test(
           marker,
           turn,
           revision,
+          scopeLabel: session.scopeId,
           entry: {
             type: "user",
             payload: { ts: marker, overheard: true, projectionRevision: revision, eventId, text: eventId },
@@ -227,3 +232,111 @@ test(
     assert.equal(entries[1]!.seq, turnTwoSeq);
   },
 );
+
+test("Postgres real projector recovers an invisible skipped turn at a higher revision", { skip }, async () => {
+  const stamp = Date.now();
+  const owner = "U1";
+  const conversationId = `conv-skip-revision-${stamp}`;
+  const threadRef = `web:skip-revision:${stamp}`;
+  const ownerScopeId = scopeId("group", `G-${stamp}`);
+  const sessions = createPostgresSessionStore(URL!);
+  const session = await sessions.getOrCreateByThread(threadRef, "group", ownerScopeId, undefined, "web");
+  const links = createAgentConversationLinkStore();
+  const deliveries = createDeliveryStore();
+  let visible = false;
+  const directory = {
+    get: async () => null,
+    channelMember: async () => visible,
+    groupMember: async () => visible,
+    listChannelsFor: async () => [],
+  };
+  const destination = { type: "web", target: threadRef, audienceScopeId: ownerScopeId } as const;
+  await links.record({
+    owner,
+    createdBy: owner,
+    ownerScopeId,
+    conversationId,
+    mailbox: audience.mailbox,
+    peer: "bob.example.viz",
+    openerThreadRef: threadRef,
+    openerSessionId: session.id,
+    surface: "web",
+    destination,
+  });
+  const link = await links.get({ owner, mailbox: audience.mailbox, conversationId });
+  assert.ok(link);
+  const projector = createAgentConversationProjector({
+    links,
+    deliveries,
+    projectionSessions: sessions,
+    directory,
+    toolDefs: () => [],
+    owner,
+    ownerScopeId,
+    threadRef,
+    sessionId: session.id,
+    surface: "web",
+    destination,
+  });
+  const event = (revision: number): ConversationProjectionEvent => ({
+    event_id: `event-${conversationId}`,
+    projection_revision: revision,
+    source: "zipviz-signed-v3",
+    authoritative: true,
+    mailbox: audience.mailbox,
+    conversation_id: conversationId,
+    turn: 1,
+    side: "us",
+    from: audience.mailbox,
+    to: "bob.example.viz",
+    msg_id: `msg-${conversationId}`,
+    body: revision === 1 ? "invisible" : "visible revision",
+    body_trust: "own",
+    ledger_status: "committed",
+    signed: {
+      envelope_v: 3,
+      signature: "sig",
+      timestamp: "2026-09-11T00:00:00Z",
+      expires_at: "2026-09-12T00:00:00Z",
+      reply_to: null,
+      intent: "propose",
+      state: "active",
+      goal_ref: "goal",
+      authority_claim: null,
+      acting_for_claim: null,
+      reply_by: null,
+      wake: null,
+      outcome_code: null,
+      human_summary: null,
+    },
+    receipt: {
+      present: revision > 1,
+      status: revision > 1 ? "accepted" : null,
+      received_at: null,
+      signed_receipt: null,
+    },
+    timing: {},
+    correlation: {
+      adapter_kind: audience.adapterKind,
+      adapter_instance: audience.adapterInstance,
+      external_scope: audience.externalScope,
+      external_conversation_ref: threadRef,
+      external_event_id: null,
+      disposition: null,
+    },
+  });
+
+  assert.equal(await projector.projectEvent(event(1), link, link.createdAt), "undeliverable");
+  const skipped = (await sessions.getEntries(session.id)).find(
+    (entry) => (entry.payload as { kind?: string }).kind === "agent_conversation_projection_skip",
+  );
+  assert.equal((skipped?.payload as { projectionRevision?: number }).projectionRevision, 1);
+  visible = true;
+  assert.equal(await projector.projectEvent(event(2), link, link.createdAt), "projected");
+  const entries = await createPostgresSessionStore(URL!).getEntries(session.id);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.seq, skipped?.seq);
+  assert.equal((entries[0]!.payload as { kind?: string }).kind, "agent_conversation_projection");
+  assert.equal((entries[0]!.payload as { projectionRevision?: number }).projectionRevision, 2);
+  assert.match((entries[0]!.payload as { text?: string }).text ?? "", /visible revision/);
+});

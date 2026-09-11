@@ -429,7 +429,29 @@ export interface ProjectionApplication {
   marker: string;
   turn: number;
   revision: number;
+  scopeLabel: ScopeId;
   entry?: NewEntry;
+}
+
+export function projectionSkipEntry(input: ProjectionApplication): NewEntry {
+  return {
+    type: "user",
+    payload: {
+      kind: "agent_conversation_projection_skip",
+      overheard: true,
+      ts: input.marker,
+      projectionSubscriptionKey: input.subscriptionKey,
+      projectionTurn: input.turn,
+      projectionRevision: input.revision,
+      name: "",
+      text: "",
+    },
+    scopeLabel: input.scopeLabel,
+  };
+}
+
+export function isProjectionSkipPayload(payload: unknown): boolean {
+  return (payload as { kind?: unknown } | null)?.kind === "agent_conversation_projection_skip";
 }
 
 export interface ProjectionApplicationResult {

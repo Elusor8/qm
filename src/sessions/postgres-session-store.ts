@@ -30,8 +30,10 @@ import type {
 import { tsPrefixQuery } from "./entry-search.ts";
 import {
   LEGACY_CRON_ID_PATTERN,
+  isProjectionSkipPayload,
   legacyOriginPattern,
   ORIGIN_ALTERNATION,
+  projectionSkipEntry,
   promptEnvelopeBody,
   sessionOrigin,
   STABLE_CRON_ID_PATTERN,
@@ -514,13 +516,30 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
           [lease.sessionId, input.subscriptionKey, contiguousTurn, now()],
         );
         const existing = await client.query(
-          `SELECT seq, (payload::jsonb)->>'projectionRevision' AS projection_revision FROM session_entries
+          `SELECT seq, payload, (payload::jsonb)->>'projectionRevision' AS projection_revision FROM session_entries
            WHERE session_id = $1 AND type = 'user' AND payload LIKE '%zvconv:%'
              AND (payload::jsonb)->>'ts' = $2 FOR UPDATE`,
           [lease.sessionId, input.marker],
         );
         if (existing.rows[0]) {
           const prior = Number(existing.rows[0].projection_revision ?? 0);
+          const skipped = isProjectionSkipPayload(JSON.parse(String(existing.rows[0].payload)));
+          if (skipped && !input.entry && input.revision > prior) {
+            const skip = projectionSkipEntry(input);
+            await client.query("UPDATE session_entries SET payload=$3,scope_label=$4 WHERE session_id=$1 AND seq=$2", [
+              lease.sessionId,
+              existing.rows[0].seq,
+              jsonbSafeStringify(skip.payload),
+              skip.scopeLabel,
+            ]);
+            return {
+              status: "skipped" as const,
+              appliedRevision: input.revision,
+              contiguousTurn,
+            };
+          }
+          if (skipped && (!input.entry || prior >= input.revision))
+            return { status: "skipped" as const, appliedRevision: prior, contiguousTurn };
           if (prior >= input.revision || !input.entry)
             return { status: "unchanged" as const, appliedRevision: prior, contiguousTurn };
           await client.query("UPDATE session_entries SET payload=$3, scope_label=$4 WHERE session_id=$1 AND seq=$2", [
@@ -534,6 +553,30 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         if (!input.entry) {
           if (input.turn > contiguousTurn + 1) return { status: "blocked" as const, contiguousTurn };
           let skippedTurn = Math.max(contiguousTurn, input.turn);
+          if (input.turn === contiguousTurn + 1) {
+            const max = await client.query(
+              "SELECT COALESCE(MAX(seq), -1) + 1 AS n FROM session_entries WHERE session_id = $1",
+              [lease.sessionId],
+            );
+            const seq = Number(max.rows[0]!.n);
+            const skip = projectionSkipEntry(input);
+            await client.query(
+              "INSERT INTO session_entries(session_id,seq,parent_seq,type,payload,scope_label,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)",
+              [
+                lease.sessionId,
+                seq,
+                seq === 0 ? null : seq - 1,
+                skip.type,
+                jsonbSafeStringify(skip.payload),
+                skip.scopeLabel,
+                now(),
+              ],
+            );
+            await client.query(
+              `UPDATE sessions SET last_activity=GREATEST(COALESCE(last_activity,0),$2),messages=$3 WHERE id=$1`,
+              [lease.sessionId, now(), seq + 1],
+            );
+          }
           while (appliedTurns.has(skippedTurn + 1)) skippedTurn += 1;
           await client.query(
             `UPDATE session_projection_progress SET contiguous_turn=$3,updated_at=$4

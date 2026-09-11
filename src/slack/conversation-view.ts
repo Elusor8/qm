@@ -184,16 +184,20 @@ export function createConversationSerializer(deps: {
       const expanded = await Promise.all(
         threadParents.map(async (p: any) => {
           try {
-            return withoutConversationProjections(
-              (
-                await client.conversations.replies({
+            return (
+              await readWithoutConversationProjections(async (cursor) => {
+                const res = await client.conversations.replies({
                   channel,
                   ts: p.ts,
                   limit: EXPANDED_THREAD_REPLY_LIMIT,
                   include_all_metadata: true,
-                })
-              ).messages ?? [],
-            );
+                  ...(cursor ? { oldest: cursor } : {}),
+                });
+                const messages = (res.messages ?? []) as any[];
+                const next = newestTs(messages);
+                return { messages, ...(next ? { cursor: next } : {}), hasMore: Boolean(res.has_more) };
+              }, EXPANDED_THREAD_REPLY_LIMIT)
+            ).raw;
           } catch {
             return [];
           }

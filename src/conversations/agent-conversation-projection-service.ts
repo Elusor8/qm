@@ -24,7 +24,6 @@ import {
 
 const PAGE_SIZE = 50;
 const MAX_PAGES_PER_SWEEP = 4;
-const PENDING_BINDING_LIMIT = 64;
 const RECONCILE_INTERVAL_MS = 5_000;
 const PROJECTION_TOOLS = new Set([
   "zipviz_conversation_open",
@@ -209,12 +208,6 @@ export function createAgentConversationProjectionService(
   let inFlight: Promise<void> | undefined;
   let lastRetentionSweep = 0;
 
-  async function trimPending(): Promise<void> {
-    const entries = (await pendingBindings.entries()).sort((a, b) => a[1].createdAt - b[1].createdAt);
-    for (const [id] of entries.slice(0, Math.max(0, entries.length - PENDING_BINDING_LIMIT)))
-      await pendingBindings.delete(id);
-  }
-
   async function hint(context: ProjectionContext, call: McpCallObservation): Promise<void> {
     const binding = call.conversationBinding;
     if (!binding || !call.serverId || !call.runtimeContext || !PROJECTION_TOOLS.has(binding.remoteName)) return;
@@ -228,7 +221,6 @@ export function createAgentConversationProjectionService(
         externalThreadRef: call.runtimeContext.threadRef,
         createdAt: Date.now(),
       });
-      await trimPending();
     }
     void sweep().catch((error) => swallow("conversation projection hint", error));
   }
@@ -236,7 +228,10 @@ export function createAgentConversationProjectionService(
   async function contexts(server: McpServer): Promise<ProjectionPendingBinding[]> {
     const pending = (await pendingBindings.all()).filter((row) => row.serverId === server.id);
     const links = (await deps.links.list())
-      .filter((link) => link.owner === server.zipviz?.actorPrincipalId && link.mailbox === server.zipviz.mailbox)
+      .filter(
+        (link) =>
+          link.owner === server.zipviz?.actorPrincipalId && link.mailbox === server.zipviz.mailbox.trim().toLowerCase(),
+      )
       .map((link) => ({
         id: `link:${link.id}`,
         serverId: server.id,

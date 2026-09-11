@@ -23,7 +23,9 @@ import type {
 import { entrySearchAuthor, entrySearchText, matchesSearchTerms, searchTerms } from "./entry-search.ts";
 import {
   cronIdOf,
+  isProjectionSkipPayload,
   isOverheardEntry,
+  projectionSkipEntry,
   promptEnvelopeBody,
   sessionBucket,
   sessionCategory,
@@ -210,6 +212,15 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       );
       if (existing) {
         const prior = Number((existing.payload as { projectionRevision?: unknown } | null)?.projectionRevision ?? 0);
+        const skipped = isProjectionSkipPayload(existing.payload);
+        if (skipped && !input.entry && input.revision > prior) {
+          const skip = projectionSkipEntry(input);
+          existing.payload = structuredClone(skip.payload);
+          existing.scopeLabel = skip.scopeLabel as ScopeId;
+          return { status: "skipped", appliedRevision: input.revision, contiguousTurn };
+        }
+        if (skipped && (!input.entry || prior >= input.revision))
+          return { status: "skipped", appliedRevision: prior, contiguousTurn };
         if (prior >= input.revision || !input.entry)
           return { status: "unchanged", appliedRevision: prior, contiguousTurn };
         existing.payload = structuredClone(input.entry.payload);
@@ -218,6 +229,7 @@ export function createMemorySessionStore(opts: StoreOptions = {}): SessionStore 
       }
       if (!input.entry) {
         if (input.turn > contiguousTurn + 1) return { status: "blocked", contiguousTurn };
+        if (input.turn === contiguousTurn + 1) await this.append(lease, projectionSkipEntry(input));
         contiguousTurn = Math.max(contiguousTurn, input.turn);
         while (appliedTurns.has(contiguousTurn + 1)) contiguousTurn += 1;
         projectionProgress.set(progressKey, contiguousTurn);

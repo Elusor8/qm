@@ -168,6 +168,25 @@ test("a projection-only first thread page does not strand the newer ordinary rep
   );
 });
 
+test("expanded threads continue past a projection-only reply page", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const parent = { ts: "100.1", user: "U1", text: `${ORDINARY}_PARENT`, reply_count: 2 };
+  const ordinaryReply = { ts: "210.1", thread_ts: "100.1", user: "U1", text: `${ORDINARY}_EXPANDED_REPLY` };
+  const client = historyClient(calls, [[parent]], [[projection], [ordinaryReply]]);
+  const { view } = await serializer().serializeSlackConversation(
+    client,
+    { kind: "channel", channel: "C1", ts: "300.1", files: [] },
+    { audience: [{ externalId: "U1", displayName: "Alice" }] as never },
+  );
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2]!.oldest, "200.1");
+  assert.deepEqual(
+    view.messages.map((m) => m.text),
+    [`${ORDINARY}_PARENT`, `${ORDINARY}_EXPANDED_REPLY`],
+  );
+});
+
 test("live search drops our own projected posts and keeps ordinary matches", async () => {
   const posted: any[] = [];
   const lookups: Record<string, unknown>[] = [];
