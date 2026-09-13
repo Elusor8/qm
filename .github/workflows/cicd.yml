@@ -173,7 +173,9 @@ jobs:
       - name: Postgres-backed tests (durability + cross-process)
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm
-        run: npm run test:pg
+        run: |
+          npm run test:pg
+          node --experimental-test-module-mocks --test --test-name-pattern="lease " test/agent-conversation-wiring.test.ts
 
   admin-plugin:
     name: Admin plugin
