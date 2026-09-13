@@ -60,6 +60,8 @@ import { forModelContext, isHumanOnlyEntry } from "../harness/context-compaction
 import {
   renderSecurityPolicyPrompt,
   securityScreenPayload,
+  toolResultScreenLabel,
+  toolResultScreenPayload,
   UNSCREENED_REASON,
   unscreenedNotice,
 } from "../security/security-posture.ts";
@@ -2482,15 +2484,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     result: string,
                     unscreenable: boolean,
                   ): Promise<boolean | "unscreened"> => {
-                    const toolLabel = tool.replace(/[^A-Za-z0-9_-]/g, "_");
-                    const bounded = unscreenable
-                      ? null
-                      : securityScreenPayload({
-                          surface: `tool_result:${toolLabel}`,
-                          text: "",
-                          triggered: true,
-                          securityScreenData: result,
-                        });
+                    const toolLabel = toolResultScreenLabel(tool);
+                    const bounded = unscreenable ? null : toolResultScreenPayload(tool, result);
                     if (!unscreenable && bounded === null) return true;
                     const verdict =
                       bounded && !bounded.truncated
@@ -2563,12 +2558,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(securityPolicy.inboundScreening === "external" &&
             (deps.securityScreener || deps.harness.models.screenSecurity)
               ? {
-                  screenExternalContent: ({ content, tool }: { content: string; tool: string; source: string }) =>
-                    classifySecurityData(content, actor.id, scopeId, undefined, {
-                      hook: "tool_response",
-                      surface: tool,
-                      origin: input.origin.kind,
-                    }),
+                  screenExternalContent: ({ content, tool }: { content: string; tool: string; source: string }) => {
+                    const bounded = toolResultScreenPayload(tool, content);
+                    return classifySecurityData(
+                      bounded && !bounded.truncated ? bounded.content : content,
+                      actor.id,
+                      scopeId,
+                      recordScreenRequest,
+                      { hook: "tool_response", surface: tool, origin: input.origin.kind },
+                    );
+                  },
                 }
               : {}),
             ...(selectedTape

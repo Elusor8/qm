@@ -12,7 +12,12 @@ import { errMessage } from "../util/errors.ts";
 import { BOT_MODES } from "../surface-cache/channel-policy-store.ts";
 import { headSlice, tailSlice } from "../util/text.ts";
 import { GOAL_BLOCKED_MIN_ROUNDS, createGoalRecord, type GoalRecord } from "./goal.ts";
-import { unscreenedNotice, UNSCREENED_PREFIX, type SecurityScreenVerdict } from "../security/security-posture.ts";
+import {
+  toolResultScreenPayload,
+  unscreenedNotice,
+  UNSCREENED_PREFIX,
+  type SecurityScreenVerdict,
+} from "../security/security-posture.ts";
 import { CAPABILITY_TTL_MS } from "../auth/capability-token.ts";
 
 function describePublishAudience(a: PublishAudienceDescriptor | undefined): string {
@@ -364,6 +369,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
     ret: T,
     isError = false,
     sourceScopeId?: ScopeId | null,
+    screenedWhole = false,
   ): Promise<T> => {
     const t = ret.content
       .filter((c) => c.type === "text")
@@ -384,7 +390,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
         summary.ok === true &&
         result === "[sent]" &&
         ret.content.every((c) => c.type === "text"));
-    if (ref.screenToolResult && !screenExempt) {
+    if (ref.screenToolResult && !screenExempt && !screenedWhole) {
       const screen = await ref
         .screenToolResult(
           String(summary.tool ?? ""),
@@ -439,8 +445,13 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
       .join("\n");
     if (!content.trim() || !ref.screenExternalContent) return recordResult(callId, summary, ret, false, sourceScopeId);
     const verdict = await ref.screenExternalContent({ content, tool, source });
+    const screenedWhole =
+      verdict !== undefined &&
+      tool === String(summary.tool ?? "") &&
+      ret.content.every((part) => part.type === "text") &&
+      toolResultScreenPayload(tool, content)?.truncated === false;
     if (verdict?.decision === "auto") {
-      if (!verdict.unscreened) return recordResult(callId, summary, ret, false, sourceScopeId);
+      if (!verdict.unscreened) return recordResult(callId, summary, ret, false, sourceScopeId, screenedWhole);
       const bannered: T = {
         ...ret,
         content: [
@@ -463,6 +474,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
       blocked,
       true,
       sourceScopeId,
+      verdict !== undefined,
     );
   };
 
