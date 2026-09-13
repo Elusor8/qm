@@ -486,3 +486,130 @@ test("accepted pending bindings remain available beyond 64 concurrent opens", as
   }
   assert.equal((await built.conversationProjection.diagnostics()).pendingBindings.length, 65);
 });
+
+for (const scenario of ["success", "overlapping sweep", "lost response"] as const) {
+  test(`real MCP open projects from the ledger: ${scenario}`, { timeout: 10_000 }, async (t) => {
+    const published: ReturnType<typeof event>[] = [];
+    const opened = Promise.withResolvers<void>();
+    const respond = Promise.withResolvers<void>();
+    const firstRead = Promise.withResolvers<void>();
+    const finishRead = Promise.withResolvers<void>();
+    let reads = 0;
+    let boundBeforeDispatch = false;
+    t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      let result: unknown;
+      if (request.method === "tools/list") {
+        result = {
+          tools: ["zipviz_conversation_open", "zipviz_conversation_projection_events"].map((name) => ({
+            name,
+            inputSchema: { type: "object" },
+          })),
+        };
+      } else if (request.params.name === "zipviz_conversation_open") {
+        boundBeforeDispatch = (await built.conversationProjection.diagnostics()).pendingBindings.length === 1;
+        opened.resolve();
+        await respond.promise;
+        if (scenario === "lost response") throw new Error("remote response lost");
+        result = { content: [{ type: "text", text: "RAW RESULT MUST NOT PROJECT" }] };
+      } else {
+        const events = structuredClone(published);
+        reads += 1;
+        if (reads === 1) {
+          firstRead.resolve();
+          if (scenario === "overlapping sweep") await finishRead.promise;
+        }
+        result = {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                events,
+                skipped: [],
+                next_cursor: null,
+                high_water_cursor: `cursor-${published.length}`,
+                has_more: false,
+              }),
+            },
+          ],
+        };
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const built = buildApp(testConfig({ signingSecret: "x".repeat(32) }));
+    t.after(async () => {
+      respond.resolve();
+      finishRead.resolve();
+      built.mcpToolService.close();
+      await built.conversationProjection.stop();
+      await built.runtime.stop();
+    });
+    const owner = built.identity.resolve({ externalId: "U1" }).id;
+    await built.app.upsertDirectory([{ principalId: owner, displayName: "Alice", type: "internal" }]);
+    await built.mcpServers.put({
+      id: "zipviz",
+      name: "ZipViz",
+      url: "https://mcp-projection.invalid/mcp",
+      auth: "none",
+      enabled: true,
+      readOnly: false,
+      updatedAt: 0,
+      updatedBy: owner,
+      zipviz: { ...binding, actorPrincipalId: owner },
+    });
+    await built.mcpToolService.refresh();
+    const turn = built.app.turn({
+      surface: "web",
+      deliveryTarget: "slack:U1:open",
+      actor: { externalId: "U1" },
+      conversation: { kind: "dm", threadRef: "slack:U1:open" },
+      text: `!mcp zipviz_zipviz_conversation_open ${JSON.stringify({ mailbox, body: "ARGUMENT MUST NOT PROJECT" })}`,
+    });
+    await opened.promise;
+    await firstRead.promise;
+    assert.equal(boundBeforeDispatch, true);
+    if (scenario !== "overlapping sweep") await built.conversationProjection.sweep();
+    const session = await built.sessions.getByThread("slack:U1:open");
+    assert.ok(session);
+    const projections = async () =>
+      (await built.sessions.getEntries(session.id)).filter(
+        (entry) => (entry.payload as { kind?: string }).kind === "agent_conversation_projection",
+      );
+    assert.equal((await projections()).length, 0);
+    const committedAt = performance.now();
+    published.push(event(1, "us", 1));
+    if (scenario === "lost response") {
+      assert.equal((await built.conversationProjection.diagnostics()).pendingBindings.length, 1);
+      respond.resolve();
+      await turn;
+      await built.conversationProjection.sweep();
+    } else {
+      respond.resolve();
+      await turn;
+      finishRead.resolve();
+    }
+    await turn;
+    while ((await projections()).length === 0 && performance.now() - committedAt < 2_000)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await projections()).length, 1);
+    const visibilityMs = performance.now() - committedAt;
+    assert.ok(visibilityMs < 2_000);
+    t.diagnostic(`outbound visible after ${visibilityMs.toFixed(1)} ms without inbound traffic`);
+    assert.match((await projections())[0]!.payload.text, /SIGNED OUTBOUND/);
+    assert.doesNotMatch((await projections())[0]!.payload.text, /MUST NOT PROJECT/);
+    assert.equal((await built.conversationProjection.diagnostics()).pendingBindings.length, 0);
+    published.push(event(2, "them", 2));
+    await built.conversationProjection.sweep();
+    const before = await projections();
+    await built.conversationProjection.sweep();
+    await built.conversationProjection.sweep();
+    assert.deepEqual(await projections(), before);
+    assert.deepEqual(
+      before.map((entry) => (entry.payload as { projectionTurn?: number }).projectionTurn),
+      [1, 2],
+    );
+    assert.match(before[1]!.payload.text, /SIGNED INBOUND/);
+  });
+}

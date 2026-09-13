@@ -68,6 +68,7 @@ interface ProjectionEventsPage {
 
 export interface AgentConversationProjectionService {
   hint(context: ProjectionContext, call: McpCallObservation): Promise<void>;
+  hintSuccess(call: McpCallObservation): Promise<void>;
   sweep(): Promise<void>;
   diagnostics(): Promise<{
     readers: Array<{
@@ -223,6 +224,18 @@ export function createAgentConversationProjectionService(
       });
     }
     void sweep().catch((error) => swallow("conversation projection hint", error));
+  }
+
+  async function hintSuccess(call: McpCallObservation): Promise<void> {
+    if (
+      !call.conversationBinding ||
+      !call.serverId ||
+      !call.runtimeContext ||
+      !PROJECTION_TOOLS.has(call.conversationBinding.remoteName)
+    )
+      return;
+    await inFlight?.catch((error) => swallow("conversation projection previous sweep", error));
+    await sweep();
   }
 
   async function contexts(server: McpServer): Promise<ProjectionPendingBinding[]> {
@@ -504,6 +517,7 @@ export function createAgentConversationProjectionService(
   });
   return {
     hint,
+    hintSuccess,
     sweep,
     releaseGap: (audience, msgId, reason) => readers.releaseGap(audience, msgId, reason),
     async diagnostics() {

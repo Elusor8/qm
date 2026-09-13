@@ -1997,6 +1997,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(deps.mcp ? { mcp: deps.mcp } : {}),
           ...(deps.conversationProjection
             ? {
+                onMcpCallSuccess: (observation) => deps.conversationProjection!.hintSuccess(observation),
                 onMcpCallStart: (observation) =>
                   deps.conversationProjection!.hint(
                     {
