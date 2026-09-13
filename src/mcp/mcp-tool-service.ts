@@ -41,6 +41,7 @@ interface McpToolCallOptions {
   runtimeContext?: McpRuntimeContext;
   readOnly?: boolean;
   onCallStart?: (call: McpCallObservation) => void | Promise<void>;
+  onCallSuccess?: (call: McpCallObservation) => void | Promise<void>;
 }
 
 export class McpReadOnlyError extends Error {}
@@ -178,6 +179,19 @@ export function createMcpToolService(opts: {
         }
       }
       const result = await clientFor(server).callTool(def.remoteName, args, options.runtimeContext);
+      if (options.onCallSuccess && !result.isError) {
+        void Promise.resolve()
+          .then(() =>
+            options.onCallSuccess!({
+              name,
+              serverId: def.serverId,
+              runtimeContext: options.runtimeContext ? structuredClone(options.runtimeContext) : undefined,
+              args: structuredClone(args),
+              conversationBinding,
+            }),
+          )
+          .catch((error) => swallow("MCP post-success projection hint", error));
+      }
       const text = mcpResultText(result) || JSON.stringify(result.structuredContent ?? "") || "";
       if (machineRead) {
         if (text.length > MAX_MACHINE_RESULT_CHARS)

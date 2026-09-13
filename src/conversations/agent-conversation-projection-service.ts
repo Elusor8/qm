@@ -3,6 +3,7 @@ import type { McpCallObservation, McpToolService } from "../mcp/mcp-tool-service
 import type { McpServer, McpServerStore } from "../mcp/mcp-server-store.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import type { LeaderLease } from "../persistence/leader-lease.ts";
+import { sleep } from "../util/async.ts";
 import { createSweeper } from "../util/sweeper.ts";
 import { errMessage, swallow } from "../util/errors.ts";
 import {
@@ -25,6 +26,8 @@ import {
 const PAGE_SIZE = 50;
 const MAX_PAGES_PER_SWEEP = 4;
 const RECONCILE_INTERVAL_MS = 5_000;
+const SUCCESS_WAKE_ATTEMPTS = 20;
+const SUCCESS_WAKE_RETRY_MS = 100;
 const PROJECTION_TOOLS = new Set([
   "zipviz_conversation_open",
   "zipviz_conversation_adopt",
@@ -68,6 +71,7 @@ interface ProjectionEventsPage {
 
 export interface AgentConversationProjectionService {
   hint(context: ProjectionContext, call: McpCallObservation): Promise<void>;
+  hintSuccess(call: McpCallObservation): Promise<void>;
   sweep(): Promise<void>;
   diagnostics(): Promise<{
     readers: Array<{
@@ -205,7 +209,10 @@ export function createAgentConversationProjectionService(
   const readers = deps.readers ?? createMemoryProjectionReaderStore();
   const pendingBindings = deps.pendingBindings ?? createMemoryMap<ProjectionPendingBinding>();
   let stopping = false;
-  let inFlight: Promise<void> | undefined;
+  let inFlight: Promise<boolean> | undefined;
+  let successWake: Promise<void> | undefined;
+  let successWakePending = false;
+  let successWakeGeneration = 0;
   let lastRetentionSweep = 0;
 
   async function hint(context: ProjectionContext, call: McpCallObservation): Promise<void> {
@@ -223,6 +230,48 @@ export function createAgentConversationProjectionService(
       });
     }
     void sweep().catch((error) => swallow("conversation projection hint", error));
+  }
+
+  async function hintSuccess(call: McpCallObservation): Promise<void> {
+    if (
+      stopping ||
+      !call.conversationBinding ||
+      !call.serverId ||
+      !call.runtimeContext ||
+      !PROJECTION_TOOLS.has(call.conversationBinding.remoteName)
+    )
+      return;
+    successWakePending = true;
+    successWakeGeneration += 1;
+    if (!successWake) {
+      successWake = (async () => {
+        try {
+          let generation = successWakeGeneration;
+          let attempts = 0;
+          while (successWakePending && !stopping) {
+            await inFlight?.catch((error) => swallow("conversation projection previous sweep", error));
+            if (generation !== successWakeGeneration) {
+              generation = successWakeGeneration;
+              attempts = 0;
+            }
+            if (attempts === SUCCESS_WAKE_ATTEMPTS) break;
+            attempts += 1;
+            successWakePending = false;
+            if (!(await sweepWithLease())) successWakePending = true;
+            if (
+              successWakePending &&
+              !stopping &&
+              (attempts < SUCCESS_WAKE_ATTEMPTS || generation !== successWakeGeneration)
+            )
+              await sleep(SUCCESS_WAKE_RETRY_MS);
+          }
+        } finally {
+          successWake = undefined;
+          successWakePending = false;
+        }
+      })();
+    }
+    await successWake;
   }
 
   async function contexts(server: McpServer): Promise<ProjectionPendingBinding[]> {
@@ -471,9 +520,9 @@ export function createAgentConversationProjectionService(
       if (binding.createdAt < cutoff) await pendingBindings.delete(id);
   }
 
-  function sweep(): Promise<void> {
+  function sweepWithLease(): Promise<boolean> {
     if (inFlight) return inFlight;
-    if (stopping) return Promise.resolve();
+    if (stopping) return Promise.resolve(false);
     const work = deps.leaderLease
       .hold("conversation-projection-ledger", async (lost) => {
         let leaseLost = false;
@@ -490,12 +539,17 @@ export function createAgentConversationProjectionService(
         }
         if (!leaseLost && !stopping) await dispatchOutbox();
         if (!leaseLost && !stopping) await pruneCopies();
+        return !leaseLost && !stopping;
       })
-      .then(() => undefined);
+      .then((completed) => completed === true);
     inFlight = work.finally(() => {
       inFlight = undefined;
     });
-    return work;
+    return inFlight;
+  }
+
+  async function sweep(): Promise<void> {
+    await sweepWithLease();
   }
 
   const sweeper = createSweeper(sweep, RECONCILE_INTERVAL_MS, {
@@ -504,6 +558,7 @@ export function createAgentConversationProjectionService(
   });
   return {
     hint,
+    hintSuccess,
     sweep,
     releaseGap: (audience, msgId, reason) => readers.releaseGap(audience, msgId, reason),
     async diagnostics() {
@@ -539,7 +594,7 @@ export function createAgentConversationProjectionService(
     async stop() {
       stopping = true;
       sweeper.stop();
-      await inFlight;
+      await Promise.all([inFlight, successWake]);
     },
   };
 }

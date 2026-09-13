@@ -409,6 +409,7 @@ export interface ToolContextDeps {
   memoryScopeId?: ScopeId;
   memoryAccess?: { write?: ScopeId; read: ScopeId[] };
   mcp?: McpToolService;
+  onMcpCallSuccess?: NonNullable<Parameters<McpToolService["call"]>[2]>["onCallSuccess"];
   onMcpCallStart?: NonNullable<Parameters<McpToolService["call"]>[2]>["onCallStart"];
   readOnly?: boolean;
   sessionHistory?: { search(q: string, limit?: number): Promise<string[]> };
@@ -911,6 +912,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       return deps.mcp.call(name, args, {
         principalId: deps.createdBy,
         readOnly: deps.readOnly === true,
+        ...(deps.onMcpCallSuccess ? { onCallSuccess: deps.onMcpCallSuccess } : {}),
         ...(deps.onMcpCallStart ? { onCallStart: deps.onMcpCallStart } : {}),
         runtimeContext: {
           actorId: deps.createdBy,

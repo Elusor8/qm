@@ -233,3 +233,73 @@ test("authorized machine reads preserve large projection pages while model calls
   assert.match(model, /\[truncated\]$/);
   assert.throws(() => JSON.parse(model));
 });
+
+for (const failure of ["throw", "reject", "pending"] as const) {
+  test(`post-success projection ${failure} does not change or delay remote success`, { timeout: 2_000 }, async (t) => {
+    const { fetch } = fakeServerFetch();
+    const store = createMcpServerStore(createMemoryMap<McpServer>());
+    const service = createMcpToolService({ servers: store, fetchImpl: fetch });
+    t.after(() => service.close());
+    await store.put(server());
+    await service.refresh();
+    const pending = Promise.withResolvers<void>();
+    t.after(() => pending.resolve());
+    let observed = false;
+    const result = await service.call(
+      "crm_query",
+      { q: "hello" },
+      {
+        onCallSuccess: (call) => {
+          observed = true;
+          assert.deepEqual(Object.keys(call).sort(), [
+            "args",
+            "conversationBinding",
+            "name",
+            "runtimeContext",
+            "serverId",
+          ]);
+          if (failure === "throw") throw new Error("projection unavailable");
+          if (failure === "reject") return Promise.reject(new Error("projection unavailable"));
+          return pending.promise;
+        },
+      },
+    );
+    assert.equal(result, "ran query");
+    assert.equal(observed, true);
+  });
+}
+
+test("failed remote calls do not emit post-success hints", async (t) => {
+  const { fetch } = fakeServerFetch();
+  const store = createMcpServerStore(createMemoryMap<McpServer>());
+  const service = createMcpToolService({
+    servers: store,
+    fetchImpl: async (url, init) => {
+      const request = JSON.parse(init.body);
+      if (request.method === "tools/call")
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { isError: true, content: [{ type: "text", text: "remote failure" }] },
+        });
+      return fetch(url, init);
+    },
+  });
+  t.after(() => service.close());
+  await store.put(server());
+  await service.refresh();
+  let successes = 0;
+  await assert.rejects(
+    service.call(
+      "crm_query",
+      {},
+      {
+        onCallSuccess: () => {
+          successes += 1;
+        },
+      },
+    ),
+    /remote failure/,
+  );
+  assert.equal(successes, 0);
+});
