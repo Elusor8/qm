@@ -311,6 +311,10 @@ export function createMockHarness(): Harness {
             usedTool = true;
             reply = result.stdout.trim() || result.stderr.trim() || `(exit ${result.code})`;
           }
+        } else if (command0.startsWith("!screened-external ")) {
+          const content = cmd.slice(cmd.indexOf("!screened-external ") + "!screened-external ".length);
+          const verdict = await turn.screenExternalContent?.({ content, tool: "example_lookup", source: "mcp server" });
+          reply = `external screen: ${verdict?.decision ?? "none"}`;
         } else if (command0.startsWith("!screened-run ")) {
           const command = cmd.slice(cmd.indexOf("!screened-run ") + "!screened-run ".length);
           await turn.emit({ type: "tool_call", payload: { tool: "execute", command }, scopeLabel: turn.scopeLabel });

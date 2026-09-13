@@ -2285,6 +2285,19 @@ test("Auto screens only the external event envelope and records classifier usage
   assert.ok(built.modelGateway.audit().some((rec) => rec.model === "mock-security"));
 });
 
+test("Auto records the external-content screen beside the turn", async () => {
+  const built = freshApp();
+  const result = await built.app.turn(dm("!screened-external record 42 is active"));
+  assert.equal(result.status, "ok");
+  assert.equal(result.reply, "external screen: auto");
+
+  const screens = (await built.sessions.listLlmRequests(result.sessionId!)).filter(
+    (rec) => rec.model === "mock-security",
+  );
+  assert.equal(screens.length, 1, "the external screen leaves exactly one classifier record");
+  assert.match(JSON.stringify(screens[0]!.promptEnvelope), /record 42 is active/);
+});
+
 test("proxy shadow telemetry correlates its verdict with the authoritative model without enforcing it", async () => {
   const calls: Array<{ metadata?: Readonly<Record<string, unknown>>; requestId?: string }> = [];
   const screener: SecurityScreener = {
