@@ -2558,12 +2558,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(securityPolicy.inboundScreening === "external" &&
             (deps.securityScreener || deps.harness.models.screenSecurity)
               ? {
-                  screenExternalContent: ({ content, tool }: { content: string; tool: string; source: string }) =>
-                    classifySecurityData(content, actor.id, scopeId, recordScreenRequest, {
-                      hook: "tool_response",
-                      surface: tool,
-                      origin: input.origin.kind,
-                    }),
+                  screenExternalContent: ({ content, tool }: { content: string; tool: string; source: string }) => {
+                    const bounded = toolResultScreenPayload(tool, content);
+                    return classifySecurityData(
+                      bounded && !bounded.truncated ? bounded.content : content,
+                      actor.id,
+                      scopeId,
+                      recordScreenRequest,
+                      { hook: "tool_response", surface: tool, origin: input.origin.kind },
+                    );
+                  },
                 }
               : {}),
             ...(selectedTape

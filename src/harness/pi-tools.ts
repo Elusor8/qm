@@ -450,7 +450,9 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
     if (!content.trim() || !ref.screenExternalContent) return recordResult(callId, summary, ret, false, sourceScopeId);
     const verdict = await ref.screenExternalContent({ content, tool, source });
     if (verdict?.decision === "auto") {
-      if (!verdict.unscreened) return recordResult(callId, summary, ret, false, sourceScopeId, true);
+      if (!verdict.unscreened) {
+        return recordResult(callId, summary, ret, false, sourceScopeId, tool === String(summary.tool ?? ""));
+      }
       const bannered: T = {
         ...ret,
         content: [
