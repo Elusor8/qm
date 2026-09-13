@@ -246,10 +246,10 @@ export function createAgentConversationProjectionService(
     if (!successWake) {
       successWake = (async () => {
         try {
-          await inFlight?.catch((error) => swallow("conversation projection previous sweep", error));
           let generation = successWakeGeneration;
           let attempts = 0;
           while (successWakePending && !stopping) {
+            await inFlight?.catch((error) => swallow("conversation projection previous sweep", error));
             if (generation !== successWakeGeneration) {
               generation = successWakeGeneration;
               attempts = 0;

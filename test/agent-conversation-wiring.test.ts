@@ -807,3 +807,55 @@ for (const scenario of ["failed lease", "continued contention", "successful sing
     assert.equal(scans, expectedScans[scenario]);
   });
 }
+
+test("a success hint does not join a sweep that started before it", { timeout: 6_000 }, async (t) => {
+  const built = buildApp(testConfig());
+  const call = {
+    name: "zipviz_zipviz_conversation_open",
+    serverId: "zipviz",
+    args: { mailbox },
+    runtimeContext: { actorId: "U1", threadRef: "slack:U1:open", nativeEventId: "stale-sweep" },
+    conversationBinding: { owner: "U1", mailbox, remoteName: "zipviz_conversation_open" },
+  };
+  const staleScan = Promise.withResolvers<void>();
+  let attempts = 0;
+  let scans = 0;
+  const lease = createNoopLeaderLease();
+  const projection = createAgentConversationProjectionService({
+    links: built.conversationLinks,
+    deliveries: built.deliveries,
+    projectionSessions: built.sessions,
+    directory: built.directory,
+    identity: built.identity,
+    managedGroups: built.projects,
+    mcp: built.mcpToolService,
+    mcpServers: {
+      ...built.mcpServers,
+      list: async () => {
+        scans += 1;
+        if (scans === 1) await staleScan.promise;
+        return [];
+      },
+    },
+    leaderLease: {
+      hold: async (key, fn) => {
+        attempts += 1;
+        if (attempts === 1) return null;
+        return lease.hold(key, fn);
+      },
+    },
+  });
+  t.after(async () => {
+    await projection.stop();
+    built.mcpToolService.close();
+    await built.runtime.stop();
+  });
+  const firstHint = projection.hintSuccess(call);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const staleSweep = projection.sweep();
+  const secondHint = projection.hintSuccess(call);
+  setTimeout(() => staleScan.resolve(), 150);
+  await Promise.all([firstHint, secondHint, staleSweep]);
+  t.diagnostic(`${attempts} acquisition attempts, ${scans} scans after a hint during a stale sweep`);
+  assert.equal(scans, 2);
+});
