@@ -369,7 +369,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
     ret: T,
     isError = false,
     sourceScopeId?: ScopeId | null,
-    screenedExternally = false,
+    screenedWhole = false,
   ): Promise<T> => {
     const t = ret.content
       .filter((c) => c.type === "text")
@@ -390,11 +390,7 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
         summary.ok === true &&
         result === "[sent]" &&
         ret.content.every((c) => c.type === "text"));
-    const alreadyScreenedWhole =
-      screenedExternally &&
-      ret.content.every((c) => c.type === "text") &&
-      toolResultScreenPayload(String(summary.tool ?? ""), result)?.truncated !== true;
-    if (ref.screenToolResult && !screenExempt && !alreadyScreenedWhole) {
+    if (ref.screenToolResult && !screenExempt && !screenedWhole) {
       const screen = await ref
         .screenToolResult(
           String(summary.tool ?? ""),
@@ -449,10 +445,13 @@ export function createPiTools(ref: ToolContextRef, opts?: PiToolsOptions): ToolD
       .join("\n");
     if (!content.trim() || !ref.screenExternalContent) return recordResult(callId, summary, ret, false, sourceScopeId);
     const verdict = await ref.screenExternalContent({ content, tool, source });
+    const screenedWhole =
+      verdict !== undefined &&
+      tool === String(summary.tool ?? "") &&
+      ret.content.every((part) => part.type === "text") &&
+      toolResultScreenPayload(tool, content)?.truncated === false;
     if (verdict?.decision === "auto") {
-      if (!verdict.unscreened) {
-        return recordResult(callId, summary, ret, false, sourceScopeId, tool === String(summary.tool ?? ""));
-      }
+      if (!verdict.unscreened) return recordResult(callId, summary, ret, false, sourceScopeId, screenedWhole);
       const bannered: T = {
         ...ret,
         content: [
