@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { buildApp } from "../src/wiring.ts";
 import { projectGroupRef } from "../src/projects/project-store.ts";
 import { createAgentConversationProjectionService } from "../src/conversations/agent-conversation-projection-service.ts";
-import { createPostgresLeaderLease } from "../src/persistence/leader-lease.ts";
+import { createNoopLeaderLease, createPostgresLeaderLease } from "../src/persistence/leader-lease.ts";
 import { createPostgresProjectionReaderStore } from "../src/conversations/conversation-projection-reader-store.ts";
 import { createPgPool } from "../src/persistence/pg-pool.ts";
 import { testConfig } from "./support/test-config.ts";
@@ -745,4 +745,65 @@ for (const scenario of [
       assert.match((before[1]!.payload as { text: string }).text, /SIGNED INBOUND/);
     },
   );
+}
+
+for (const scenario of ["failed lease", "continued contention", "successful single-service sweeps"] as const) {
+  test(`late success survives the final retry: ${scenario}`, { timeout: 6_000 }, async (t) => {
+    const built = buildApp(testConfig());
+    const call = {
+      name: "zipviz_zipviz_conversation_open",
+      serverId: "zipviz",
+      args: { mailbox },
+      runtimeContext: { actorId: "U1", threadRef: "slack:U1:open", nativeEventId: "late-success" },
+      conversationBinding: { owner: "U1", mailbox, remoteName: "zipviz_conversation_open" },
+    };
+    const joined: Promise<void>[] = [];
+    let attempts = 0;
+    let scans = 0;
+    const lease = createNoopLeaderLease();
+    const projection = createAgentConversationProjectionService({
+      links: built.conversationLinks,
+      deliveries: built.deliveries,
+      projectionSessions: built.sessions,
+      directory: built.directory,
+      identity: built.identity,
+      managedGroups: built.projects,
+      mcp: built.mcpToolService,
+      mcpServers: {
+        ...built.mcpServers,
+        list: async () => {
+          scans += 1;
+          if (scenario === "successful single-service sweeps" && scans <= 20) joined.push(projection.hintSuccess(call));
+          return [];
+        },
+      },
+      leaderLease: {
+        hold: async (key, fn) => {
+          attempts += 1;
+          if (
+            scenario !== "successful single-service sweeps" &&
+            attempts <= (scenario === "continued contention" ? 40 : 20)
+          ) {
+            if (attempts === 20) joined.push(projection.hintSuccess(call));
+            return null;
+          }
+          return lease.hold(key, fn);
+        },
+      },
+    });
+    t.after(async () => {
+      await projection.stop();
+      built.mcpToolService.close();
+      await built.runtime.stop();
+    });
+    await projection.hintSuccess(call);
+    await Promise.all(joined);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    t.diagnostic(
+      `${scenario}: ${attempts} attempts, ${scans} successful scans, ${joined.length + 1} hints; observed 150 ms after worker completion`,
+    );
+    assert.equal(attempts, scenario === "continued contention" ? 40 : 21);
+    const expectedScans = { "continued contention": 0, "failed lease": 1, "successful single-service sweeps": 21 };
+    assert.equal(scans, expectedScans[scenario]);
+  });
 }

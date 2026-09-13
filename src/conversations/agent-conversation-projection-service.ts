@@ -212,6 +212,7 @@ export function createAgentConversationProjectionService(
   let inFlight: Promise<boolean> | undefined;
   let successWake: Promise<void> | undefined;
   let successWakePending = false;
+  let successWakeGeneration = 0;
   let lastRetentionSweep = 0;
 
   async function hint(context: ProjectionContext, call: McpCallObservation): Promise<void> {
@@ -241,19 +242,34 @@ export function createAgentConversationProjectionService(
     )
       return;
     successWakePending = true;
+    successWakeGeneration += 1;
     if (!successWake) {
       successWake = (async () => {
-        await inFlight?.catch((error) => swallow("conversation projection previous sweep", error));
-        for (let attempt = 0; attempt < SUCCESS_WAKE_ATTEMPTS && successWakePending && !stopping; attempt += 1) {
+        try {
+          await inFlight?.catch((error) => swallow("conversation projection previous sweep", error));
+          let generation = successWakeGeneration;
+          let attempts = 0;
+          while (successWakePending && !stopping) {
+            if (generation !== successWakeGeneration) {
+              generation = successWakeGeneration;
+              attempts = 0;
+            }
+            if (attempts === SUCCESS_WAKE_ATTEMPTS) break;
+            attempts += 1;
+            successWakePending = false;
+            if (!(await sweepWithLease())) successWakePending = true;
+            if (
+              successWakePending &&
+              !stopping &&
+              (attempts < SUCCESS_WAKE_ATTEMPTS || generation !== successWakeGeneration)
+            )
+              await sleep(SUCCESS_WAKE_RETRY_MS);
+          }
+        } finally {
+          successWake = undefined;
           successWakePending = false;
-          if (!(await sweepWithLease())) successWakePending = true;
-          if (successWakePending && !stopping && attempt + 1 < SUCCESS_WAKE_ATTEMPTS)
-            await sleep(SUCCESS_WAKE_RETRY_MS);
         }
-      })().finally(() => {
-        successWake = undefined;
-        successWakePending = false;
-      });
+      })();
     }
     await successWake;
   }
