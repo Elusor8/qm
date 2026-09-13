@@ -597,8 +597,8 @@ for (const scenario of ["success", "overlapping sweep", "lost response"] as cons
     const visibilityMs = performance.now() - committedAt;
     assert.ok(visibilityMs < 2_000);
     t.diagnostic(`outbound visible after ${visibilityMs.toFixed(1)} ms without inbound traffic`);
-    assert.match((await projections())[0]!.payload.text, /SIGNED OUTBOUND/);
-    assert.doesNotMatch((await projections())[0]!.payload.text, /MUST NOT PROJECT/);
+    assert.match(((await projections())[0]!.payload as { text: string }).text, /SIGNED OUTBOUND/);
+    assert.doesNotMatch(((await projections())[0]!.payload as { text: string }).text, /MUST NOT PROJECT/);
     assert.equal((await built.conversationProjection.diagnostics()).pendingBindings.length, 0);
     published.push(event(2, "them", 2));
     await built.conversationProjection.sweep();
@@ -610,6 +610,6 @@ for (const scenario of ["success", "overlapping sweep", "lost response"] as cons
       before.map((entry) => (entry.payload as { projectionTurn?: number }).projectionTurn),
       [1, 2],
     );
-    assert.match(before[1]!.payload.text, /SIGNED INBOUND/);
+    assert.match((before[1]!.payload as { text: string }).text, /SIGNED INBOUND/);
   });
 }
