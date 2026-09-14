@@ -1412,11 +1412,11 @@ export function refreshSessions(
   return run;
 }
 
-export async function sessionsRefreshSettled(refresh: Promise<boolean>): Promise<void> {
+export async function sessionsRefreshSettled(refresh: Promise<boolean>): Promise<boolean> {
   let awaited = refresh;
   for (;;) {
-    await awaited.catch(() => false);
-    if (latestSessionsRefresh === null || latestSessionsRefresh === awaited) return;
+    const applied = await awaited.catch(() => false);
+    if (latestSessionsRefresh === null || latestSessionsRefresh === awaited) return applied;
     awaited = latestSessionsRefresh;
   }
 }

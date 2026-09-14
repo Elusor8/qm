@@ -500,14 +500,14 @@ export function createChatSurface(
     threadRef: string,
     sessionsRefreshed: Promise<boolean>,
   ): Promise<void> {
-    await sessionsRefreshSettled(sessionsRefreshed);
-    if (
-      agent !== chatState.agent ||
-      threadRef !== chatState.threadRef ||
-      agent.state.isStreaming ||
-      chatState.sessionId !== null
-    )
-      return;
+    const stillAdopting = (): boolean =>
+      agent === chatState.agent &&
+      threadRef === chatState.threadRef &&
+      !agent.state.isStreaming &&
+      chatState.sessionId === null;
+    if (!(await sessionsRefreshSettled(sessionsRefreshed)) && stillAdopting())
+      await sessionsRefreshSettled(refreshSessions({ silent: true }));
+    if (!stillAdopting()) return;
     adoptActiveSessionFromList(agent);
     if (chatState.sessionId !== null) await refreshTranscriptFromEntries(agent);
   }

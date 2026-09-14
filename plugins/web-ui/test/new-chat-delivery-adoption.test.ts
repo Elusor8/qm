@@ -62,11 +62,13 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
   let listGate: Promise<void> | null = null;
   const listGates: Array<Promise<void> | null> = [];
   const listFetches: number[] = [];
+  const listFailures: number[] = [];
   const transcriptFetches: string[] = [];
   globalThis.fetch = async (input) => {
     const path = String(input);
     if (path === "/api/sessions") {
       listFetches.push(Date.now());
+      if (listFailures.shift()) return new Response("boom", { status: 500 });
       const gate = listGates.length ? listGates.shift() : listGate;
       const sessions = () => Response.json({ sessions: serverSessions });
       return gate ? gate.then(sessions) : sessions();
@@ -168,6 +170,23 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
       }
     });
 
+    await t.test("a nudge whose list refresh does not apply refreshes once more before adopting", async () => {
+      const threadRef = conv.newChat();
+      await settle();
+      serverSessions = [other, { id: "sess-retried", threadRef, scopeId: "personal:tester", title: null }];
+      listFailures.push(500);
+      try {
+        reset();
+        nudge(threadRef);
+        await settle();
+        assert.equal(listFetches.length, 2, "one retry after the refresh that did not apply");
+        assert.equal(conv.state.sessionId, "sess-retried");
+        assert.deepEqual(transcriptFetches, ["sess-retried"]);
+      } finally {
+        listFailures.length = 0;
+      }
+    });
+
     await t.test("a nudge for a different thread leaves the new chat alone", async () => {
       const threadRef = conv.newChat();
       await settle();
@@ -206,7 +225,7 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
       await settle();
       assert.equal(conv.state.sessionId, null);
       assert.deepEqual(transcriptFetches, []);
-      assert.equal(listFetches.length, 1, "no retry loop");
+      assert.equal(listFetches.length, 1, "an applied list without the session is final");
       assert.deepEqual(unhandled, []);
     });
 
