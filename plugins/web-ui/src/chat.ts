@@ -182,7 +182,8 @@ export function createChatSurface(
       if (!source) throw new Error("missing source session");
       await sessionOpener(source, Promise.resolve(page));
     },
-    current: () => Boolean(chatState.forkSession && chatState.sessionId === chatState.forkSession.id),
+    current: () =>
+      chatState.sessionId !== null && (!chatState.forkSession || chatState.sessionId === chatState.forkSession.id),
     redraw: () => {
       if (chatState.agent) drawActiveChat();
       else readonlyRedraw?.();

@@ -58,12 +58,23 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
   }
 
   const other = { id: "sess-other", threadRef: "web:tester:other", scopeId: "personal:tester", title: "Other" };
-  let serverSessions: Array<{ id: string; threadRef: string; scopeId: string; title: string | null }> = [other];
+  type ServerSession = {
+    id: string;
+    threadRef: string;
+    scopeId: string;
+    title: string | null;
+    forkedFrom?: { sessionId: string; title?: string | null };
+    forkBoundarySeq?: number;
+  };
+  type Entry = { type: string; payload: { text: string }; createdAt: number; seq: number };
+  let serverSessions: ServerSession[] = [other];
+  const serverEntries = new Map<string, Entry[]>();
   let listGate: Promise<void> | null = null;
   const listGates: Array<Promise<void> | null> = [];
   const listFetches: number[] = [];
   const listFailures: number[] = [];
   const transcriptFetches: string[] = [];
+  const approvalFetches: string[] = [];
   globalThis.fetch = async (input) => {
     const path = String(input);
     if (path === "/api/sessions") {
@@ -74,12 +85,18 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
       return gate ? gate.then(sessions) : sessions();
     }
     const approvals = /^\/api\/sessions\/([^/?]+)\/approvals$/.exec(path);
-    if (approvals) return Response.json({ approvals: [] });
+    if (approvals) {
+      approvalFetches.push(decodeURIComponent(approvals[1]!));
+      return Response.json({ approvals: [] });
+    }
     const transcript = /^\/api\/sessions\/([^/?]+)(?:\?|$)/.exec(path);
     if (transcript) {
       const id = decodeURIComponent(transcript[1]!);
       transcriptFetches.push(id);
-      return Response.json({ session: serverSessions.find((s) => s.id === id) ?? null, entries: [] });
+      return Response.json({
+        session: serverSessions.find((s) => s.id === id) ?? null,
+        entries: serverEntries.get(id) ?? [],
+      });
     }
     if (path === "/api/contexts") return Response.json({ contexts: [] });
     if (path.startsWith("/api/runtime-config"))
@@ -130,7 +147,16 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
     const reset = (): void => {
       listFetches.length = 0;
       transcriptFetches.length = 0;
+      approvalFetches.length = 0;
     };
+    const entry = (type: string, text: string, seq: number): Entry => ({
+      type,
+      payload: { text },
+      createdAt: 1_700_000_000_000 + seq,
+      seq,
+    });
+    const renderedRows = (selector: string): string[] =>
+      [...appState.mainEl.querySelectorAll(selector)].map((row: Element) => row.textContent?.trim() ?? "");
 
     await t.test("a new chat adopts its session from the refreshed list and fetches the transcript", async () => {
       const threadRef = conv.newChat();
@@ -247,6 +273,80 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
       } finally {
         listGate = null;
       }
+    });
+
+    await t.test("an adopted new chat renders the peer turn each later delivery nudge brings", async () => {
+      const threadRef = conv.newChat();
+      await settle();
+      serverSessions = [other, { id: "sess-live", threadRef, scopeId: "personal:tester", title: null }];
+      serverEntries.set("sess-live", [entry("user", "opening line", 1)]);
+      reset();
+      nudge(threadRef);
+      await settle();
+      assert.equal(conv.state.sessionId, "sess-live");
+      assert.deepEqual(transcriptFetches, ["sess-live"]);
+      assert.deepEqual(approvalFetches, ["sess-live"], "the adopting refresh reaches the approvals sync");
+      assert.deepEqual(renderedRows(".user-row .user-bubble"), ["opening line"]);
+
+      serverEntries.set("sess-live", [entry("user", "opening line", 1), entry("assistant", "peer turn arrives", 2)]);
+      reset();
+      nudge(threadRef);
+      await settle();
+      assert.deepEqual(transcriptFetches, ["sess-live"]);
+      assert.deepEqual(approvalFetches, ["sess-live"], "the later refresh reaches the approvals sync");
+      const texts = conv.state.agent!.state.messages.map((m: { content: unknown }) =>
+        typeof m.content === "string" ? m.content : (m.content as Array<{ text?: string }>)[0]?.text,
+      );
+      assert.deepEqual(texts, ["opening line", "peer turn arrives"]);
+      assert.equal(renderedRows(".assistant-row").length, 1, "the peer turn is drawn");
+      assert.match(renderedRows(".assistant-row")[0]!, /peer turn arrives/);
+      assert.deepEqual(renderedRows(".fork-origin-row"), [], "an adopted chat shows no fork origin");
+      assert.deepEqual(renderedRows(".session-fork-badge"), [], "an adopted chat shows no fork badge");
+      assert.equal(conv.state.inheritedExpanded, false);
+      assert.deepEqual(conv.state.inheritedMessages, []);
+      serverEntries.delete("sess-live");
+    });
+
+    await t.test("a forked chat opened from the sidebar keeps its fork origin across a delivery refresh", async () => {
+      const threadRef = "web:tester:forked";
+      const forked = {
+        id: "sess-forked",
+        threadRef,
+        scopeId: "personal:tester",
+        title: "Forked",
+        forkedFrom: { sessionId: "sess-other", title: "Original" },
+        forkBoundarySeq: 2,
+      };
+      serverSessions = [other, forked];
+      sessionsState.list = [other, forked];
+      serverEntries.set("sess-forked", [
+        entry("user", "inherited question", 1),
+        entry("assistant", "inherited answer", 2),
+        entry("user", "fork question", 3),
+      ]);
+      conv.mountContinuable(threadRef, "sess-forked", "personal:tester", [], null, forked, []);
+      await settle();
+      serverEntries.set("sess-forked", [
+        entry("user", "inherited question", 1),
+        entry("assistant", "inherited answer", 2),
+        entry("user", "fork question", 3),
+        entry("assistant", "fork reply", 4),
+      ]);
+      reset();
+      nudge(threadRef);
+      await settle();
+      assert.deepEqual(transcriptFetches, ["sess-forked"]);
+      assert.deepEqual(approvalFetches, ["sess-forked"]);
+      assert.equal(conv.state.forkSession, forked);
+      assert.equal(conv.state.inheritedLoaded, false);
+      assert.equal(conv.state.inheritedMessages.length, 2, "the refresh fills the inherited half");
+      assert.equal(conv.state.agent!.state.messages.length, 2, "only post-fork entries are current");
+      assert.equal(renderedRows(".fork-origin-row").length, 1);
+      assert.match(renderedRows(".fork-origin-row")[0]!, /Forked from Original/);
+      assert.equal(renderedRows(".session-fork-badge").length, 1);
+      assert.match(renderedRows(".assistant-row")[0]!, /fork reply/);
+      serverEntries.delete("sess-forked");
+      sessionsState.list = [other];
     });
 
     await t.test("a sidebar-opened chat refetches its transcript without waiting for the list", async () => {
