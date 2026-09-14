@@ -757,6 +757,7 @@ export function createChatSurface(
     const match = sessionsState.list.find((s) => s.id && s.threadRef === chatState.threadRef);
     if (!match) return;
     chatState.sessionId = match.id;
+    chatState.forkSession = match;
     chatState.scopeId = match.scopeId;
     if (match.channelName) chatState.contextName = match.channelName;
     chatState.rememberedSessionId = match.id;
