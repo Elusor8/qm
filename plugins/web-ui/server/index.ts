@@ -318,7 +318,24 @@ interface PendingWebDelivery {
   destination?: { target?: string };
 }
 
-async function drainWebDeliveries(): Promise<void> {
+function deliveryKeyKind(idempotencyKey: string): string {
+  const kind: string[] = [];
+  for (const segment of idempotencyKey.split(":", 2)) {
+    if (!/^[a-z][a-z-]*$/.test(segment)) break;
+    kind.push(segment);
+  }
+  return kind.join(":") || "unknown";
+}
+
+const warnedUnsentDeliveries = new Set<string>();
+
+function warnUnsentDelivery(d: PendingWebDelivery, reason: string): void {
+  if (warnedUnsentDeliveries.has(d.id)) return;
+  warnedUnsentDeliveries.add(d.id);
+  console.warn(`[web-ui] delivery ${d.id} (${deliveryKeyKind(d.idempotencyKey)}) acking unsent: ${reason}`);
+}
+
+export async function drainWebDeliveries(): Promise<void> {
   if (deliveriesPollInFlight) return;
   deliveriesPollInFlight = true;
   try {
@@ -330,15 +347,22 @@ async function drainWebDeliveries(): Promise<void> {
     } catch {
       return;
     }
+    const pendingIds = new Set(pending.map((d) => d.id));
+    for (const id of warnedUnsentDeliveries) if (!pendingIds.has(id)) warnedUnsentDeliveries.delete(id);
     const now = Date.now();
     for (const d of pending) {
       const target = d.destination?.target ?? "";
       const isRecovery = d.idempotencyKey.startsWith("run:");
-      const conns = !isRecovery ? deliveryClients.get(ownerOfWebThread(target) ?? "") : undefined;
+      const owner = !isRecovery ? ownerOfWebThread(target) : null;
+      const conns = owner ? deliveryClients.get(owner) : undefined;
       if (conns && conns.size) {
         for (const res of conns) sseEvent(res, "delivery", { threadRef: target });
+      } else if (!isRecovery && !owner) {
+        warnUnsentDelivery(d, "target is not a web thread");
       } else if (!isRecovery && now - (d.createdAt ?? 0) < WEB_DELIVERY_GIVEUP_MS) {
         continue;
+      } else if (!isRecovery) {
+        warnUnsentDelivery(d, "owner not connected");
       }
       await coreFetch("POST", `/v1/deliveries/${encodeURIComponent(d.id)}/ack`).catch(() => {});
     }

@@ -1412,6 +1412,15 @@ export function refreshSessions(
   return run;
 }
 
+export async function sessionsRefreshSettled(refresh: Promise<boolean>): Promise<boolean> {
+  let awaited = refresh;
+  for (;;) {
+    const applied = await awaited.catch(() => false);
+    if (latestSessionsRefresh === null || latestSessionsRefresh === awaited) return applied;
+    awaited = latestSessionsRefresh;
+  }
+}
+
 async function runSessionsRefresh(
   opts: { showLoading?: boolean; silent?: boolean; refreshContexts?: boolean; patchEpoch?: number },
   newerRun: () => Promise<boolean> | null,
