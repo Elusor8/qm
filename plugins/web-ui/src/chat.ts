@@ -468,7 +468,7 @@ export function createChatSurface(
     );
   }
 
-  function onDelivery(threadRef: string): void {
+  function onDelivery(threadRef: string, sessionsRefreshed: Promise<boolean>): void {
     const ro = readOnlyView;
     if (ro && threadRef === ro.threadRef) {
       void fetchTranscript(ro.id, ro.anchorSeq !== null ? { sinceSeq: ro.anchorSeq } : { tailTurns: TAIL_TURNS })
@@ -490,7 +490,29 @@ export function createChatSurface(
     }
     const agent = chatState.agent;
     if (!agent || threadRef !== chatState.threadRef || agent.state.isStreaming) return;
-    void refreshTranscriptFromEntries(agent);
+    if (chatState.sessionId === null) void adoptDeliveredSession(agent, threadRef, sessionsRefreshed);
+    else void refreshTranscriptFromEntries(agent);
+  }
+
+  async function adoptDeliveredSession(
+    agent: Agent,
+    threadRef: string,
+    sessionsRefreshed: Promise<boolean>,
+  ): Promise<void> {
+    try {
+      await sessionsRefreshed;
+    } catch {
+      void 0;
+    }
+    if (
+      agent !== chatState.agent ||
+      threadRef !== chatState.threadRef ||
+      agent.state.isStreaming ||
+      chatState.sessionId !== null
+    )
+      return;
+    adoptActiveSessionFromList(agent);
+    if (chatState.sessionId !== null) await refreshTranscriptFromEntries(agent);
   }
 
   function resumeIfIdle(): void {

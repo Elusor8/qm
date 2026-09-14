@@ -68,8 +68,8 @@ export function ensureDeliveryStream(): void {
   deliveryStreamOpen = true;
   subscribeDeliveries(
     (threadRef) => {
-      void refreshSessions({ silent: true });
-      for (const conv of live) conv.onDelivery(threadRef);
+      const sessionsRefreshed = refreshSessions({ silent: true });
+      for (const conv of live) conv.onDelivery(threadRef, sessionsRefreshed);
     },
     (event) => {
       const { list, matched } = applySessionState(sessionsState.list, event);
