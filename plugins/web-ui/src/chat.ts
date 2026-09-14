@@ -92,6 +92,7 @@ import {
   groupDmTitle,
   refreshSessions,
   renderList,
+  sessionsRefreshSettled,
   sessionsState,
   sessionSlackUrl,
   surfaceOf,
@@ -499,11 +500,7 @@ export function createChatSurface(
     threadRef: string,
     sessionsRefreshed: Promise<boolean>,
   ): Promise<void> {
-    try {
-      await sessionsRefreshed;
-    } catch {
-      void 0;
-    }
+    await sessionsRefreshSettled(sessionsRefreshed);
     if (
       agent !== chatState.agent ||
       threadRef !== chatState.threadRef ||

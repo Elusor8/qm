@@ -327,7 +327,11 @@ function deliveryKeyKind(idempotencyKey: string): string {
   return kind.join(":") || "unknown";
 }
 
+const warnedUnsentDeliveries = new Set<string>();
+
 function warnUnsentDelivery(d: PendingWebDelivery, reason: string): void {
+  if (warnedUnsentDeliveries.has(d.id)) return;
+  warnedUnsentDeliveries.add(d.id);
   console.warn(`[web-ui] delivery ${d.id} (${deliveryKeyKind(d.idempotencyKey)}) acking unsent: ${reason}`);
 }
 
@@ -343,6 +347,8 @@ export async function drainWebDeliveries(): Promise<void> {
     } catch {
       return;
     }
+    const pendingIds = new Set(pending.map((d) => d.id));
+    for (const id of warnedUnsentDeliveries) if (!pendingIds.has(id)) warnedUnsentDeliveries.delete(id);
     const now = Date.now();
     for (const d of pending) {
       const target = d.destination?.target ?? "";

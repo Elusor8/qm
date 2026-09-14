@@ -60,13 +60,14 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
   const other = { id: "sess-other", threadRef: "web:tester:other", scopeId: "personal:tester", title: "Other" };
   let serverSessions: Array<{ id: string; threadRef: string; scopeId: string; title: string | null }> = [other];
   let listGate: Promise<void> | null = null;
+  const listGates: Array<Promise<void> | null> = [];
   const listFetches: number[] = [];
   const transcriptFetches: string[] = [];
   globalThis.fetch = async (input) => {
     const path = String(input);
     if (path === "/api/sessions") {
       listFetches.push(Date.now());
-      const gate = listGate;
+      const gate = listGates.length ? listGates.shift() : listGate;
       const sessions = () => Response.json({ sessions: serverSessions });
       return gate ? gate.then(sessions) : sessions();
     }
@@ -118,11 +119,12 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
     sessionsState.list = [other];
     sessionsState.loaded = true;
     const conv = mainConversation();
-    const nudge = (threadRef: string): void => {
+    const emit = (type: string, data: unknown): void => {
       const stream = FakeEventSource.instances.find((es) => es.url.endsWith("/api/deliveries/events"));
       assert.ok(stream, "the chat opens the delivery stream");
-      stream.emit("delivery", { threadRef });
+      stream.emit(type, data);
     };
+    const nudge = (threadRef: string): void => emit("delivery", { threadRef });
     const reset = (): void => {
       listFetches.length = 0;
       transcriptFetches.length = 0;
@@ -139,6 +141,31 @@ test("a delivery nudge adopts a brand-new chat's session and refetches its trans
       assert.equal(listFetches.length, 1, "the chat reuses the list refresh the nudge already started");
       assert.equal(conv.state.sessionId, "sess-new");
       assert.deepEqual(transcriptFetches, ["sess-new"]);
+    });
+
+    await t.test("a nudge whose list refresh is overtaken adopts from the refresh that overtook it", async () => {
+      const threadRef = conv.newChat();
+      await settle();
+      serverSessions = [other];
+      const overtaking = deferred();
+      listGates.push(null, overtaking.promise);
+      try {
+        reset();
+        nudge(threadRef);
+        emit("session_state", { threadRef: "web:tester:unlisted", state: "idle" });
+        await settle();
+        assert.equal(listFetches.length, 2, "a second list refresh overtook the nudge's refresh");
+        assert.equal(conv.state.sessionId, null);
+        assert.deepEqual(transcriptFetches, []);
+        serverSessions = [other, { id: "sess-overtaken", threadRef, scopeId: "personal:tester", title: null }];
+        overtaking.release();
+        await settle();
+        assert.equal(conv.state.sessionId, "sess-overtaken");
+        assert.deepEqual(transcriptFetches, ["sess-overtaken"]);
+      } finally {
+        listGates.length = 0;
+        overtaking.release();
+      }
     });
 
     await t.test("a nudge for a different thread leaves the new chat alone", async () => {

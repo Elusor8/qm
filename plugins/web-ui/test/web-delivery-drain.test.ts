@@ -12,12 +12,18 @@ interface Pending {
 
 let pending: Pending[] = [];
 const acks: string[] = [];
+const failingAcks = new Set<string>();
 const core = createServer((req: IncomingMessage, res) => {
   req.resume();
   req.on("end", () => {
     const url = req.url ?? "";
-    res.writeHead(200, { "content-type": "application/json" });
     const ack = /^\/v1\/deliveries\/([^/?]+)\/ack(?:\?|$)/.exec(url);
+    if (req.method === "POST" && ack && failingAcks.has(decodeURIComponent(ack[1]!))) {
+      acks.push(decodeURIComponent(ack[1]!));
+      res.writeHead(500, { "content-type": "application/json" });
+      return void res.end(JSON.stringify({ error: "unavailable" }));
+    }
+    res.writeHead(200, { "content-type": "application/json" });
     if (req.method === "POST" && ack) {
       const id = decodeURIComponent(ack[1]!);
       acks.push(id);
@@ -127,6 +133,34 @@ test("the logged key kind stops at the first segment that is not a plain word", 
       "[web-ui] delivery d-bare (unknown) acking unsent: target is not a web thread",
     ]);
   } finally {
+    warnings.restore();
+  }
+});
+
+test("a delivery whose ack keeps failing is warned about once across polls", async () => {
+  acks.length = 0;
+  failingAcks.add("d-ack-fails");
+  const warnings = captureWarnings();
+  try {
+    pending = [
+      {
+        id: "d-ack-fails",
+        idempotencyKey: `zvconv:nudge:${EMAIL}:6:1`,
+        createdAt: Date.now(),
+        destination: { target: `slack:${EMAIL}` },
+      },
+    ];
+    await drainWebDeliveries();
+    await drainWebDeliveries();
+    await drainWebDeliveries();
+    assert.deepEqual(acks, ["d-ack-fails", "d-ack-fails", "d-ack-fails"]);
+    assert.deepEqual(warnings.lines(), [
+      "[web-ui] delivery d-ack-fails (zvconv:nudge) acking unsent: target is not a web thread",
+    ]);
+  } finally {
+    failingAcks.clear();
+    pending = [];
+    await drainWebDeliveries();
     warnings.restore();
   }
 });
