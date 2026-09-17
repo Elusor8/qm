@@ -32,6 +32,7 @@ import {
 } from "./core-bridge";
 import { applyRuntimeOptions } from "./model-options";
 import { errMessage, swallow } from "../../chassis/src/errors";
+import { checkMailSessionId as resolveCheckMailSessionId } from "./check-mail";
 import { brandMark, brandName, icon, initials } from "./ui";
 import { markConnectorConnected } from "./chat";
 import { clearSkillsCache, resyncModelSelection, seedRuntimeConfig } from "./composer";
@@ -505,9 +506,13 @@ export function mountShell(): void {
 let checkMailInFlight = false;
 
 function checkMailSessionId(): string | null {
-  const state = mainConversation().state;
-  if (!state.sessionId) return null;
-  return state.scopeId === `personal:${appState.me?.user ?? ""}` ? state.sessionId : null;
+  const pane = focusedPaneSession();
+  return resolveCheckMailSessionId(
+    appState.me?.user,
+    splitState.active,
+    pane ? { sessionId: pane.id, scopeId: pane.scopeId } : undefined,
+    mainConversation().state,
+  );
 }
 
 async function onCheckMailClick(): Promise<void> {
