@@ -8,6 +8,7 @@ import {
   Folder,
   KeyRound,
   LogOut,
+  Mail,
   MessageSquare,
   PanelLeft,
   Plus,
@@ -501,6 +502,30 @@ export function mountShell(): void {
   shellMounted = true;
 }
 
+let checkMailInFlight = false;
+
+function checkMailSessionId(): string | null {
+  const state = mainConversation().state;
+  if (!state.sessionId) return null;
+  return state.scopeId === `personal:${appState.me?.user ?? ""}` ? state.sessionId : null;
+}
+
+async function onCheckMailClick(): Promise<void> {
+  if (checkMailInFlight) return;
+  const sessionId = checkMailSessionId();
+  if (!sessionId) return;
+  checkMailInFlight = true;
+  renderSidebarTop();
+  try {
+    await api("/api/check-mail", { method: "POST", body: JSON.stringify({ sessionId }) });
+  } catch (err) {
+    canvasToast(errMessage(err, "Couldn't check ZipViz mail."));
+  } finally {
+    checkMailInFlight = false;
+    renderSidebarTop();
+  }
+}
+
 export function renderSidebarTop(): void {
   syncDocumentTitle();
   if (!appState.topEl) return;
@@ -583,6 +608,25 @@ export function renderSidebarTop(): void {
             >
               ${icon(Search, 13)}
             </button>
+            ${(() => {
+              const mailSessionId = checkMailSessionId();
+              const mailLabel = mailSessionId ? "Check mail" : "Check mail — open a chat first";
+              return html`
+                <button
+                  class="check-mail-button"
+                  type="button"
+                  aria-label=${mailLabel}
+                  ?disabled=${checkMailInFlight || !mailSessionId}
+                  @click=${onCheckMailClick}
+                  @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, mailLabel)}
+                  @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                  @focus=${(e: Event) => showTooltip(e.currentTarget as Element, mailLabel)}
+                  @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
+                >
+                  ${icon(Mail, 13)}
+                </button>
+              `;
+            })()}
             <button
               class="web-only-toggle ${sessionsState.webOnly ? "on" : ""}"
               type="button"

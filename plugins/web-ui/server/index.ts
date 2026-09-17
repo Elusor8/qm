@@ -547,6 +547,43 @@ async function postTurnAndMint(res: ServerResponse, turn: unknown, user: string,
   relay(res, r);
 }
 
+const CHECK_MAIL_TEXT = "Check ZipViz mail.";
+
+interface CheckMailSession {
+  threadRef?: unknown;
+  scopeId?: unknown;
+}
+
+async function checkMailThreadRef(
+  sessionId: string,
+  user: string,
+): Promise<{ status: number; text: string } | { threadRef: string }> {
+  const r = await coreFetch(
+    "GET",
+    `/v1/sessions/${encodeURIComponent(sessionId)}?viewer=${encodeURIComponent(user)}&tailTurns=1`,
+  );
+  if (r.status < 200 || r.status >= 300) return r;
+  let session: CheckMailSession | undefined;
+  try {
+    session = (JSON.parse(r.text) as { session?: CheckMailSession }).session;
+  } catch {
+    session = undefined;
+  }
+  if (typeof session?.threadRef !== "string" || !session.threadRef) {
+    return { status: 502, text: JSON.stringify({ error: "upstream_error" }) };
+  }
+  if (session.scopeId !== `personal:${user}`) {
+    return {
+      status: 403,
+      text: JSON.stringify({
+        error: "forbidden",
+        message: "ZipViz mail can only be checked from your own personal chat",
+      }),
+    };
+  }
+  return { threadRef: session.threadRef };
+}
+
 async function userPermissions(): Promise<string[]> {
   if (!CORE_SIGNING_SECRET) return [];
   try {
@@ -1895,6 +1932,29 @@ const apiRoutes: readonly WebRoute[] = [
         ...(clientTurnId ? { idempotencyKey: `web:${user}:${clientTurnId}` } : {}),
       };
       return postTurnAndMint(res, turn, user, threadRef);
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/check-mail",
+    handle: async (c) => {
+      const { req, res, user } = c;
+      const p = await readJson<{ sessionId?: unknown }>(req, res, false);
+      if (!p) return;
+      const sessionId = typeof p.sessionId === "string" ? p.sessionId.trim() : "";
+      if (!sessionId) return json(res, 400, { error: "bad_request", message: "sessionId required" });
+      const resolved = await checkMailThreadRef(sessionId, user);
+      if (!("threadRef" in resolved)) return relay(res, resolved);
+      const displayName = resolveIdentity(req)?.name ?? null;
+      const turn = {
+        surface: "web",
+        actor: { externalId: user, ...(displayName ? { displayName } : {}) },
+        conversation: { kind: "dm", threadRef: resolved.threadRef },
+        deliveryTarget: resolved.threadRef,
+        text: CHECK_MAIL_TEXT,
+        triggered: true,
+      };
+      return postTurnAndMint(res, turn, user, resolved.threadRef);
     },
   },
   {

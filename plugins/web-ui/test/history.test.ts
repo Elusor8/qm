@@ -378,6 +378,20 @@ test("a hidden proactive-opener user entry never renders, but its assistant gree
   assert.equal((msgs[0] as { role?: string }).role, "assistant");
 });
 
+test("a hidden triggered check-mail turn never renders its seed text, only the agent's reply", () => {
+  const entries: SessionEntry[] = [
+    { type: "user", payload: { text: "Check ZipViz mail.", hidden: true }, createdAt: 100, seq: 0 },
+    { type: "assistant", payload: { text: "No new mail waiting on you." }, createdAt: 110, seq: 1 },
+  ];
+  const msgs = entriesToMessages(entries, MODEL);
+  assert.equal(msgs.length, 1, "the hidden seed turn is skipped entirely");
+  assert.equal((msgs[0] as { role?: string }).role, "assistant");
+  assert.ok(
+    !JSON.stringify(msgs).includes("Check ZipViz mail."),
+    "the canned trigger text never reaches the rendered transcript",
+  );
+});
+
 test("a durable turn_failure entry renders like the live inline error (survives reload)", () => {
   const entries: SessionEntry[] = [
     { type: "user", payload: { text: "how did it go?" }, createdAt: 100 },
