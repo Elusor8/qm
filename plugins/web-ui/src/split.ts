@@ -205,7 +205,7 @@ function buildDock(): DockviewApi {
   });
   api.onDidActivePanelChange((e) => {
     splitState.focusedId = e.panel?.id ?? null;
-    syncDocumentTitle();
+    renderSidebarTop();
   });
   api.onDidMaximizedGroupChange(() => {
     for (const a of groupActions) a.draw();

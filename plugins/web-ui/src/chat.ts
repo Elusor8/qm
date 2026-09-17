@@ -523,6 +523,7 @@ export function createChatSurface(
   function syncLocation(): void {
     if (ctx.ownsUrl) syncUrlFromState();
     else postCurrentPaneState();
+    renderSidebarTop();
   }
 
   function redrawForConnector(): void {

@@ -7420,6 +7420,28 @@ h3.ambient-field-label {
   background: color-mix(in srgb, var(--foreground) 8%, transparent);
   color: var(--foreground);
 }
+.check-mail-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.check-mail-button:hover,
+.check-mail-button:focus-visible {
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+.check-mail-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .chat-search-overlay {
   position: fixed;
   inset: 0;
