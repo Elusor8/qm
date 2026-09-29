@@ -623,10 +623,6 @@ export function renderSidebarTop(): void {
                   aria-label=${mailLabel}
                   ?disabled=${checkMailInFlight || !mailSessionId}
                   @click=${onCheckMailClick}
-                  @mouseenter=${(e: Event) => showTooltip(e.currentTarget as Element, mailLabel)}
-                  @mouseleave=${(e: Event) => hideTooltip(e.currentTarget as Element)}
-                  @focus=${(e: Event) => showTooltip(e.currentTarget as Element, mailLabel)}
-                  @blur=${(e: Event) => hideTooltip(e.currentTarget as Element)}
                 >
                   ${icon(Mail, 13)}
                 </button>
