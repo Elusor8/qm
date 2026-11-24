@@ -1,0 +1,5 @@
+# Sensitive deployment, trust, signing, dependency, and repository-governance surfaces.
+# GitHub requests a matching owner when a CODEOWNERS review rule is enabled.
+/.github/ @stumcc8
+/scripts/prod-deploy-guard.sh @stumcc8
+/scripts/predeploy-db-snapshot.sh @stumcc8
